@@ -124,7 +124,7 @@ export default function DailyBotScreen() {
 
   // Restore draft from storage if returning to this screen
   useEffect(() => {
-    if (!today || draft !== null) return;
+    if (!today || draft !== null || today.activeSession || today.session) return;
     const stored = loadSavedDraft(today.tradingDate);
     if (stored) {
       setDraft(stored.draft);

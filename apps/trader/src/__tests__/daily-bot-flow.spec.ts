@@ -88,6 +88,9 @@ async function saveDefaults() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.clear();
+  }
   // Expo uses an automatic JSX transform; expose React for Vitest's classic TSX transform.
   vi.stubGlobal('React', React);
   mocks.width = 1200; mocks.platform = 'web';
@@ -115,7 +118,14 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => {
+  cleanup();
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.clear();
+  }
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe('Daily Trading Bot setup and execution flow', () => {
   it('shows the first setup action and waits for a saved, checked, authorized session', async () => {

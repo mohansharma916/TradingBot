@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
-import { AgentTask, AgentType, ProposalStatus, TradeProposal, OrderSide, ProductType } from '@trading-bot/contracts';
+import { AgentTask, ProposalStatus, TradeProposal } from '@trading-bot/contracts';
 import { apiClient } from '../src/services/api';
 
 export default function ProposalsScreen() {
@@ -8,90 +8,8 @@ export default function ProposalsScreen() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(165);
 
-  const [proposals, setProposals] = useState<TradeProposal[]>([
-    {
-      id: '550e8400-e29b-41d4-a716-446655440001',
-      strategyId: '550e8400-e29b-41d4-a716-446655440002',
-      strategyVersion: 1,
-      proposingAgent: AgentType.STRATEGY_ANALYST,
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      symbol: 'NIFTY26OCT25100CE',
-      side: OrderSide.BUY,
-      product: ProductType.I,
-      suggestedEntryPrice: 122.5,
-      suggestedStopPrice: 114.0,
-      suggestedTargetPrice: 136.0,
-      lotSize: 25,
-      quantity: 25,
-      estimatedCapitalRequired: 3062.5,
-      estimatedRoundTripCosts: 58.2,
-      allInMaxLoss: 270.7,
-      estimatedNetProfit: 279.3,
-      evidence: {
-        indicators: {
-          ema20: 25115.0,
-          rsi14: 58.4,
-          vwap: 25102.5,
-          spreadPct: 0.24,
-          volume: 45000,
-        },
-        rationale: '5m EMA bullish cross + RSI above 55 confirmation on closed bar with tight 0.24% spread.',
-        confidence: 0.78,
-      },
-      status: ProposalStatus.PENDING,
-      expiresAt: new Date(Date.now() + 165000).toISOString(),
-      createdAt: new Date().toISOString(),
-    },
-  ]);
-
-  const [tasks, setTasks] = useState<AgentTask[]>([
-    {
-      id: 'task_1001_coord',
-      agentType: AgentType.COORDINATOR,
-      status: 'COMPLETED' as any,
-      objective: 'Run 5-minute candle close scan for NIFTY EMA20 RSI Strategy v1',
-      toolsInvoked: [
-        {
-          tool: 'scan_universe' as any,
-          timestamp: '2026-10-10T09:30:05.120Z',
-          input: { underlying: 'NIFTY', minVolume: 1000, maxSpreadPct: 1.0 },
-          output: { candidatesCount: 8, topCandidate: 'NIFTY26OCT25100CE', spreadPct: 0.24 },
-        },
-        {
-          tool: 'calculate_indicators' as any,
-          timestamp: '2026-10-10T09:30:06.450Z',
-          input: { instrumentKey: 'NSE_INDEX|Nifty 50', timeframe: '5m', emaPeriod: 20, rsiPeriod: 14 },
-          output: { isWarmedUp: true, totalClosedBars: 40, ema: 25115.0, rsi: 58.4, vwap: 25102.5 },
-        },
-        {
-          tool: 'evaluate_strategy' as any,
-          timestamp: '2026-10-10T09:30:07.820Z',
-          input: { strategyId: '550e8400-e29b-41d4-a716-446655440002', instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE' },
-          output: { passed: true, signal: 'BUY_CALL', confidence: 0.78 },
-        },
-      ],
-      resultSummary: 'Multi-agent scan satisfied all entry criteria. Expiring TradeProposal generated with calibrated confidence 78%.',
-      startedAt: '2026-10-10T09:30:00.000Z',
-      completedAt: '2026-10-10T09:30:08.000Z',
-    },
-    {
-      id: 'task_1002_scan',
-      agentType: AgentType.MARKET_SCANNER,
-      status: 'COMPLETED' as any,
-      objective: 'Rank active weekly options by liquidity and bid/ask spread percentage',
-      toolsInvoked: [
-        {
-          tool: 'scan_universe' as any,
-          timestamp: '2026-10-10T09:25:02.100Z',
-          input: { underlying: 'NIFTY' },
-          output: { scannedStrikes: 26, liquidCount: 8 },
-        },
-      ],
-      resultSummary: '8 strikes passed spread < 1.0% filter. ATM 25100 CE selected as highest liquidity score (86/100).',
-      startedAt: '2026-10-10T09:25:00.000Z',
-      completedAt: '2026-10-10T09:25:03.000Z',
-    },
-  ]);
+  const [proposals, setProposals] = useState<TradeProposal[]>([]);
+  const [tasks, setTasks] = useState<AgentTask[]>([]);
 
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
 
@@ -105,11 +23,11 @@ export default function ProposalsScreen() {
           apiClient.getAgentTasks().catch(() => null),
         ]);
         if (isMounted) {
-          if (props && props.length > 0) {
+          if (props) {
             setProposals(props);
             setIsLiveConnected(true);
           }
-          if (taskList && taskList.length > 0) {
+          if (taskList) {
             setTasks(taskList);
           }
         }
@@ -272,7 +190,27 @@ export default function ProposalsScreen() {
       {/* TAB 1: Proposals Inspector */}
       {activeTab === 'PROPOSALS' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.lg }}>
-          {proposals.map((proposal) => {
+          {proposals.length === 0 ? (
+            <div
+              style={{
+                backgroundColor: colors.surface,
+                borderRadius: borderRadius.md,
+                border: `1px solid ${colors.border}`,
+                padding: spacing.xl,
+                textAlign: 'center',
+                color: colors.textMuted,
+              }}
+            >
+              <div style={{ fontSize: 32, marginBottom: spacing.sm }}>🎯</div>
+              <div style={{ fontSize: typography.fontSize.md, fontWeight: typography.fontWeight.semibold, color: colors.textPrimary }}>
+                No Pending Trade Proposals
+              </div>
+              <div style={{ fontSize: typography.fontSize.xs, marginTop: 4 }}>
+                Multi-agent strategy analysts are monitoring live 5m closed candles. Trade proposals will appear here when market conditions match registered rules.
+              </div>
+            </div>
+          ) : (
+            proposals.map((proposal) => {
             const isPending = proposal.status === ProposalStatus.PENDING && secondsRemaining > 0;
             const isExpired = secondsRemaining === 0 && proposal.status === ProposalStatus.PENDING;
 
@@ -403,14 +341,34 @@ export default function ProposalsScreen() {
                 )}
               </div>
             );
-          })}
+          }))}
         </div>
       )}
 
       {/* TAB 2: Agent Task Board */}
       {activeTab === 'AGENT_TASKS' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.md }}>
-          {tasks.map((task) => (
+          {tasks.length === 0 ? (
+            <div
+              style={{
+                backgroundColor: colors.surface,
+                borderRadius: borderRadius.md,
+                border: `1px solid ${colors.border}`,
+                padding: spacing.xl,
+                textAlign: 'center',
+                color: colors.textMuted,
+              }}
+            >
+              <div style={{ fontSize: 32, marginBottom: spacing.sm }}>🤖</div>
+              <div style={{ fontSize: typography.fontSize.md, fontWeight: typography.fontWeight.semibold, color: colors.textPrimary }}>
+                No Agent Tasks Recorded Today
+              </div>
+              <div style={{ fontSize: typography.fontSize.xs, marginTop: 4 }}>
+                Autonomous task dispatches, market scans, and analytical tool trails will appear here.
+              </div>
+            </div>
+          ) : (
+            tasks.map((task) => (
             <div
               key={task.id}
               style={{
@@ -464,7 +422,7 @@ export default function ProposalsScreen() {
                 <strong>Result:</strong> {task.resultSummary}
               </div>
             </div>
-          ))}
+          )))}
         </div>
       )}
     </div>

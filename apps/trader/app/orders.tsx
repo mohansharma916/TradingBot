@@ -23,93 +23,19 @@ export default function OrdersScreen() {
   const [activeAlert, setActiveAlert] = useState<string | null>(null);
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
 
-  // Central Risk & Capital Reservation Simulation State
-  const [reservedCapital, setReservedCapital] = useState<number>(3062.5);
-  const [availableCash, setAvailableCash] = useState<number>(6937.5);
-  const [remainingDailyRiskBudget, setRemainingDailyRiskBudget] = useState<number>(1229.3);
+  // Central Risk & Capital Reservation State
+  const [reservedCapital, setReservedCapital] = useState<number>(0);
+  const [availableCash, setAvailableCash] = useState<number>(10000);
+  const [remainingDailyRiskBudget, setRemainingDailyRiskBudget] = useState<number>(1500);
 
   // Active Positions & Protection States
-  const [positions, setPositions] = useState<(Position & { protectionStatus?: ExitProtectionStatus })[]>([
-    {
-      id: '550e8400-e29b-41d4-a716-446655440101',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      symbol: 'NIFTY26OCT25100CE',
-      netQuantity: 25,
-      buyQuantity: 25,
-      sellQuantity: 0,
-      buyAvgPrice: 122.5,
-      sellAvgPrice: 0,
-      lastPrice: 125.8,
-      unrealizedPnl: 82.5,
-      realizedPnl: 0,
-      stopLossPrice: 114.0,
-      targetPrice: 136.0,
-      protectionStatus: ExitProtectionStatus.PROTECTED_GTT,
-      lastVerifiedAt: new Date().toISOString(),
-    },
-  ]);
+  const [positions, setPositions] = useState<(Position & { protectionStatus?: ExitProtectionStatus })[]>([]);
 
   // Order Book
-  const [orders, setOrders] = useState<BrokerOrder[]>([
-    {
-      id: '550e8400-e29b-41d4-a716-446655440001',
-      intentId: '550e8400-e29b-41d4-a716-446655440002',
-      brokerOrderId: 'UPSTOX_SIM_98710',
-      tag: 'SUP_1',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      side: OrderSide.BUY,
-      orderType: OrderType.LIMIT,
-      product: ProductType.I,
-      quantity: 25,
-      price: 122.5,
-      status: OrderStatus.PROTECTED,
-      filledQuantity: 25,
-      averageFillPrice: 122.5,
-      createdAt: new Date(Date.now() - 1800000).toISOString(),
-      updatedAt: new Date(Date.now() - 1798000).toISOString(),
-    },
-    {
-      id: '550e8400-e29b-41d4-a716-446655440008',
-      intentId: '550e8400-e29b-41d4-a716-446655440009',
-      brokerOrderId: 'UPSTOX_SIM_98711',
-      tag: 'PENDING_ACK',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25150_CE',
-      side: OrderSide.BUY,
-      orderType: OrderType.LIMIT,
-      product: ProductType.I,
-      quantity: 25,
-      price: 118.0,
-      status: OrderStatus.ACKNOWLEDGED,
-      filledQuantity: 0,
-      averageFillPrice: 0,
-      createdAt: new Date(Date.now() - 60000).toISOString(),
-      updatedAt: new Date(Date.now() - 55000).toISOString(),
-    },
-  ]);
+  const [orders, setOrders] = useState<BrokerOrder[]>([]);
 
   // Trade Journal & Statutory Fill Ledger
-  const [fills, setFills] = useState<OrderFillEvent[]>([
-    {
-      id: '550e8400-e29b-41d4-a716-446655440010',
-      orderId: '550e8400-e29b-41d4-a716-446655440001',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      side: OrderSide.BUY,
-      fillQty: 25,
-      fillPrice: 122.5,
-      estimatedCharges: 58.2,
-      actualCharges: 52.27,
-      charges: {
-        brokerage: 40.0,
-        stt: 3.13,
-        exchangeCharges: 1.57,
-        sebiCharges: 0.0,
-        stampDuty: 0.09,
-        gst: 7.48,
-        totalRoundTripCharges: 52.27,
-      },
-      timestamp: new Date(Date.now() - 1798000).toISOString(),
-    },
-  ]);
+  const [fills, setFills] = useState<OrderFillEvent[]>([]);
 
   const showNotification = (msg: string) => {
     setToastMessage(msg);
@@ -538,9 +464,9 @@ export default function OrdersScreen() {
           apiClient.getGoLiveChecklist().catch(() => null),
         ]);
         if (isMounted) {
-          if (orderList && orderList.length > 0) setOrders(orderList);
-          if (posList && posList.length > 0) setPositions(posList as any);
-          if (fillsList && fillsList.length > 0) setFills(fillsList);
+          if (orderList) setOrders(orderList);
+          if (posList) setPositions(posList as any);
+          if (fillsList) setFills(fillsList);
           if (riskData) {
             setAvailableCash(riskData.availableCash);
             setReservedCapital(riskData.reservedCapital);
@@ -1044,7 +970,14 @@ export default function OrdersScreen() {
               </tr>
             </thead>
             <tbody>
-              {orders.map((ord) => {
+              {orders.length === 0 ? (
+                <tr>
+                  <td colSpan={9} style={{ padding: spacing.xl, textAlign: 'center', color: colors.textMuted }}>
+                    No orders executed today. Executed broker orders will appear here.
+                  </td>
+                </tr>
+              ) : (
+                orders.map((ord) => {
                 const isBuy = ord.side === OrderSide.BUY;
                 return (
                   <tr key={ord.id} style={{ borderBottom: `1px solid ${colors.border}` }}>
@@ -1104,7 +1037,7 @@ export default function OrdersScreen() {
                     </td>
                   </tr>
                 );
-              })}
+              }))}
             </tbody>
           </table>
         </div>
@@ -1197,7 +1130,14 @@ export default function OrdersScreen() {
                 </tr>
               </thead>
               <tbody>
-                {fills.map((f) => {
+                {fills.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} style={{ padding: spacing.xl, textAlign: 'center', color: colors.textMuted }}>
+                      No trade fills recorded yet. Confirmed fills will calculate exact statutory levies here.
+                    </td>
+                  </tr>
+                ) : (
+                  fills.map((f) => {
                   const variance = f.estimatedCharges - f.actualCharges;
                   return (
                     <tr key={f.id} style={{ borderBottom: `1px solid ${colors.border}` }}>
@@ -1228,7 +1168,7 @@ export default function OrdersScreen() {
                       </td>
                     </tr>
                   );
-                })}
+                }))}
               </tbody>
             </table>
           </div>

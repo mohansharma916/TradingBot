@@ -42,15 +42,17 @@ export default function MarketsScreen() {
   const [liveSpotPrice, setLiveSpotPrice] = useState<number | null>(null);
   const [liveExpiries, setLiveExpiries] = useState<string[] | null>(null);
   const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, any>>({});
 
-  // Periodic sync of live option chain and latency
+  // Periodic sync of live option chain, watchlist quotes, and latency
   useEffect(() => {
     let isMounted = true;
     const fetchLiveChain = async () => {
       try {
-        const [chain, diag] = await Promise.all([
+        const [chain, diag, watchlist] = await Promise.all([
           apiClient.getOptionChain(selectedUnderlying, selectedExpiry).catch(() => null),
           apiClient.getDiagnostics().catch(() => null),
+          apiClient.getWatchlist().catch(() => []),
         ]);
         if (isMounted) {
           if (chain && chain.strikes?.length > 0) {
@@ -60,6 +62,13 @@ export default function MarketsScreen() {
               setLiveExpiries(chain.availableExpiries);
             }
             setIsLiveConnected(true);
+          }
+          if (watchlist && Array.isArray(watchlist)) {
+            const map: Record<string, any> = {};
+            for (const q of watchlist) {
+              map[q.instrumentKey] = q;
+            }
+            setWatchlistQuotes(map);
           }
           if (diag?.marketFeed?.latencyMs) {
             setFeedLatencyMs(diag.marketFeed.latencyMs);
@@ -87,7 +96,7 @@ export default function MarketsScreen() {
     apiClient
       .searchInstruments(searchQuery)
       .then((res) => {
-        if (isMounted && res && res.length > 0) {
+        if (isMounted && res) {
           setSearchResults(res);
         }
       })
@@ -97,59 +106,15 @@ export default function MarketsScreen() {
     };
   }, [searchQuery]);
 
+  const niftyQuote = watchlistQuotes['NSE_INDEX|Nifty 50'];
+  const bankNiftyQuote = watchlistQuotes['NSE_INDEX|Nifty Bank'];
+
   const expiries = liveExpiries || ['2026-10-15', '2026-10-22', '2026-10-29', '2026-11-05'];
-  const spotPrice = liveSpotPrice ?? (selectedUnderlying === 'NIFTY' ? 25120.45 : 52450.8);
+  const spotPrice = liveSpotPrice ?? (selectedUnderlying === 'NIFTY' ? niftyQuote?.lastPrice : bankNiftyQuote?.lastPrice) ?? 0;
   const lotSize = selectedUnderlying === 'NIFTY' ? 25 : 15;
-  const atmStrike = Math.round(spotPrice / (selectedUnderlying === 'NIFTY' ? 50 : 100)) * (selectedUnderlying === 'NIFTY' ? 50 : 100);
+  const atmStrike = spotPrice > 0 ? Math.round(spotPrice / (selectedUnderlying === 'NIFTY' ? 50 : 100)) * (selectedUnderlying === 'NIFTY' ? 50 : 100) : 0;
 
-  const strikesList = selectedUnderlying === 'NIFTY'
-    ? [24950, 25000, 25050, 25100, 25150, 25200, 25250]
-    : [52000, 52200, 52400, 52600, 52800];
-
-  // Simulated option chain rows
-  const optionRows: OptionStrikeRow[] = strikesList.map((strike) => {
-    const isCallItm = strike < spotPrice;
-    const isPutItm = strike > spotPrice;
-
-    const callBaseLtp = Math.max(12, Math.round(145 - (strike - spotPrice) * 0.45));
-    const putBaseLtp = Math.max(12, Math.round(145 + (strike - spotPrice) * 0.45));
-
-    return {
-      strikePrice: strike,
-      call: {
-        instrumentKey: `NSE_FO|${selectedUnderlying}_${selectedExpiry}_${strike}_CE`,
-        symbol: `${selectedUnderlying} ${strike} CE`,
-        lastPrice: callBaseLtp,
-        bidPrice: Number((callBaseLtp - 0.25).toFixed(2)),
-        askPrice: Number((callBaseLtp + 0.25).toFixed(2)),
-        volume: isCallItm ? 98400 : 64200,
-        openInterest: isCallItm ? 142000 : 85000,
-        netChangePct: Number(((callBaseLtp - 120) / 1.2).toFixed(1)),
-        isStale: isFeedStale,
-      },
-      put: {
-        instrumentKey: `NSE_FO|${selectedUnderlying}_${selectedExpiry}_${strike}_PE`,
-        symbol: `${selectedUnderlying} ${strike} PE`,
-        lastPrice: putBaseLtp,
-        bidPrice: Number((putBaseLtp - 0.25).toFixed(2)),
-        askPrice: Number((putBaseLtp + 0.25).toFixed(2)),
-        volume: isPutItm ? 89200 : 58100,
-        openInterest: isPutItm ? 128000 : 76500,
-        netChangePct: Number(((putBaseLtp - 120) / 1.2).toFixed(1)),
-        isStale: isFeedStale,
-      },
-    };
-  });
-
-  const effectiveOptionRows = liveOptionRows && liveOptionRows.length > 0 ? liveOptionRows : optionRows;
-
-  // Simulated live feed heartbeat
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setFeedLatencyMs(Math.floor(14 + Math.random() * 8));
-    }, 2500);
-    return () => clearInterval(interval);
-  }, []);
+  const effectiveOptionRows: OptionStrikeRow[] = liveOptionRows || [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.lg, maxWidth: 1280, margin: '0 auto', width: '100%' }}>
@@ -272,11 +237,13 @@ export default function MarketsScreen() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 2 }}>
             <span style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, fontFamily: typography.fontFamily.mono }}>
-              25,120.45
+              {niftyQuote ? `₹${niftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'NIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Loading...')}
             </span>
-            <span style={{ fontSize: typography.fontSize.xs, color: colors.profit, fontWeight: typography.fontWeight.bold }}>
-              +145.20 (+0.58%)
-            </span>
+            {niftyQuote && (
+              <span style={{ fontSize: typography.fontSize.xs, color: niftyQuote.netChange >= 0 ? colors.profit : colors.loss, fontWeight: typography.fontWeight.bold }}>
+                {niftyQuote.netChange >= 0 ? '+' : ''}{niftyQuote.netChange.toFixed(2)} ({niftyQuote.netChangePct >= 0 ? '+' : ''}{niftyQuote.netChangePct.toFixed(2)}%)
+              </span>
+            )}
           </div>
         </div>
 
@@ -305,11 +272,13 @@ export default function MarketsScreen() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 2 }}>
             <span style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, fontFamily: typography.fontFamily.mono }}>
-              52,450.80
+              {bankNiftyQuote ? `₹${bankNiftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'BANKNIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Loading...')}
             </span>
-            <span style={{ fontSize: typography.fontSize.xs, color: colors.loss, fontWeight: typography.fontWeight.bold }}>
-              -85.40 (-0.16%)
-            </span>
+            {bankNiftyQuote && (
+              <span style={{ fontSize: typography.fontSize.xs, color: bankNiftyQuote.netChange >= 0 ? colors.profit : colors.loss, fontWeight: typography.fontWeight.bold }}>
+                {bankNiftyQuote.netChange >= 0 ? '+' : ''}{bankNiftyQuote.netChange.toFixed(2)} ({bankNiftyQuote.netChangePct >= 0 ? '+' : ''}{bankNiftyQuote.netChangePct.toFixed(2)}%)
+              </span>
+            )}
           </div>
         </div>
 
@@ -429,78 +398,86 @@ export default function MarketsScreen() {
             </tr>
           </thead>
           <tbody>
-            {effectiveOptionRows.map((row) => {
-              const isAtm = row.strikePrice === atmStrike;
-              const isCallItm = row.strikePrice < spotPrice;
-              const isPutItm = row.strikePrice > spotPrice;
+            {effectiveOptionRows.length === 0 ? (
+              <tr>
+                <td colSpan={11} style={{ padding: spacing.xl, color: colors.textMuted, textAlign: 'center', fontSize: typography.fontSize.sm }}>
+                  Connecting to Upstox Market Data Feed & fetching live strikes for {selectedUnderlying} ({selectedExpiry})...
+                </td>
+              </tr>
+            ) : (
+              effectiveOptionRows.map((row) => {
+                const isAtm = row.strikePrice === atmStrike;
+                const isCallItm = spotPrice > 0 && row.strikePrice < spotPrice;
+                const isPutItm = spotPrice > 0 && row.strikePrice > spotPrice;
 
-              return (
-                <tr
-                  key={row.strikePrice}
-                  style={{
-                    borderBottom: `1px solid ${colors.border}`,
-                    backgroundColor: isAtm ? 'rgba(6, 182, 212, 0.08)' : 'transparent',
-                  }}
-                >
-                  {/* Call Data */}
-                  <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
-                    {(row.call?.openInterest ? row.call.openInterest / 1000 : 0).toFixed(0)}k
-                  </td>
-                  <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                    {(row.call?.volume ? row.call.volume / 1000 : 0).toFixed(0)}k
-                  </td>
-                  <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                    {row.call?.bidPrice} / {row.call?.askPrice}
-                  </td>
-                  <td style={{ padding: spacing.sm, color: (row.call?.netChangePct || 0) >= 0 ? colors.profit : colors.loss }}>
-                    {(row.call?.netChangePct || 0) > 0 ? '+' : ''}{row.call?.netChangePct}%
-                  </td>
-                  <td
+                return (
+                  <tr
+                    key={row.strikePrice}
                     style={{
-                      padding: spacing.sm,
-                      fontWeight: typography.fontWeight.bold,
-                      color: '#60A5FA',
-                      borderRight: `1px solid ${colors.border}`,
-                      backgroundColor: isCallItm ? 'rgba(59, 130, 246, 0.05)' : 'transparent',
-                      fontFamily: typography.fontFamily.mono,
+                      borderBottom: `1px solid ${colors.border}`,
+                      backgroundColor: isAtm ? 'rgba(6, 182, 212, 0.08)' : 'transparent',
                     }}
                   >
-                    ₹{row.call?.lastPrice.toFixed(2)}
-                  </td>
+                    {/* Call Data */}
+                    <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
+                      {(row.call?.openInterest ? row.call.openInterest / 1000 : 0).toFixed(0)}k
+                    </td>
+                    <td style={{ padding: spacing.sm, color: colors.textMuted }}>
+                      {(row.call?.volume ? row.call.volume / 1000 : 0).toFixed(0)}k
+                    </td>
+                    <td style={{ padding: spacing.sm, color: colors.textMuted }}>
+                      {row.call?.bidPrice ?? '--'} / {row.call?.askPrice ?? '--'}
+                    </td>
+                    <td style={{ padding: spacing.sm, color: (row.call?.netChangePct || 0) >= 0 ? colors.profit : colors.loss }}>
+                      {(row.call?.netChangePct || 0) > 0 ? '+' : ''}{row.call?.netChangePct ?? 0}%
+                    </td>
+                    <td
+                      style={{
+                        padding: spacing.sm,
+                        fontWeight: typography.fontWeight.bold,
+                        color: '#60A5FA',
+                        borderRight: `1px solid ${colors.border}`,
+                        backgroundColor: isCallItm ? 'rgba(59, 130, 246, 0.05)' : 'transparent',
+                        fontFamily: typography.fontFamily.mono,
+                      }}
+                    >
+                      {row.call?.lastPrice ? `₹${row.call.lastPrice.toFixed(2)}` : '--'}
+                    </td>
 
-                  {/* Center Strike */}
-                  <td style={{ padding: spacing.sm, fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
-                    {row.strikePrice} {isAtm && <Badge label="ATM" variant="warning" size="sm" />}
-                  </td>
+                    {/* Center Strike */}
+                    <td style={{ padding: spacing.sm, fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
+                      {row.strikePrice} {isAtm && <Badge label="ATM" variant="warning" size="sm" />}
+                    </td>
 
-                  {/* Put Data */}
-                  <td
-                    style={{
-                      padding: spacing.sm,
-                      fontWeight: typography.fontWeight.bold,
-                      color: '#F472B6',
-                      borderLeft: `1px solid ${colors.border}`,
-                      backgroundColor: isPutItm ? 'rgba(244, 114, 182, 0.05)' : 'transparent',
-                      fontFamily: typography.fontFamily.mono,
-                    }}
-                  >
-                    ₹{row.put?.lastPrice.toFixed(2)}
-                  </td>
-                  <td style={{ padding: spacing.sm, color: (row.put?.netChangePct || 0) >= 0 ? colors.profit : colors.loss }}>
-                    {(row.put?.netChangePct || 0) > 0 ? '+' : ''}{row.put?.netChangePct}%
-                  </td>
-                  <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                    {row.put?.bidPrice} / {row.put?.askPrice}
-                  </td>
-                  <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                    {(row.put?.volume ? row.put.volume / 1000 : 0).toFixed(0)}k
-                  </td>
-                  <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
-                    {(row.put?.openInterest ? row.put.openInterest / 1000 : 0).toFixed(0)}k
-                  </td>
-                </tr>
-              );
-            })}
+                    {/* Put Data */}
+                    <td
+                      style={{
+                        padding: spacing.sm,
+                        fontWeight: typography.fontWeight.bold,
+                        color: '#F472B6',
+                        borderLeft: `1px solid ${colors.border}`,
+                        backgroundColor: isPutItm ? 'rgba(244, 114, 182, 0.05)' : 'transparent',
+                        fontFamily: typography.fontFamily.mono,
+                      }}
+                    >
+                      {row.put?.lastPrice ? `₹${row.put.lastPrice.toFixed(2)}` : '--'}
+                    </td>
+                    <td style={{ padding: spacing.sm, color: (row.put?.netChangePct || 0) >= 0 ? colors.profit : colors.loss }}>
+                      {(row.put?.netChangePct || 0) > 0 ? '+' : ''}{row.put?.netChangePct ?? 0}%
+                    </td>
+                    <td style={{ padding: spacing.sm, color: colors.textMuted }}>
+                      {row.put?.bidPrice ?? '--'} / {row.put?.askPrice ?? '--'}
+                    </td>
+                    <td style={{ padding: spacing.sm, color: colors.textMuted }}>
+                      {(row.put?.volume ? row.put.volume / 1000 : 0).toFixed(0)}k
+                    </td>
+                    <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
+                      {(row.put?.openInterest ? row.put.openInterest / 1000 : 0).toFixed(0)}k
+                    </td>
+                  </tr>
+                );
+              })
+            )}
           </tbody>
         </table>
       </div>
@@ -568,48 +545,42 @@ export default function MarketsScreen() {
             />
 
             <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-              {(searchResults.length > 0
-                ? searchResults.map((item: any) => ({
-                    symbol: item.symbol,
-                    key: item.instrumentKey,
-                    lot: item.lotSize || 25,
-                    type: item.instrumentType || (item.symbol?.includes('CE') ? 'CE' : 'PE'),
-                    ltp: item.lastPrice || 122.5,
-                  }))
-                : [
-                    { symbol: 'NIFTY 25100 CE 2026-10-15', key: 'NSE_FO|NIFTY_2026-10-15_25100_CE', lot: 25, type: 'CE', ltp: 122.5 },
-                    { symbol: 'NIFTY 25100 PE 2026-10-15', key: 'NSE_FO|NIFTY_2026-10-15_25100_PE', lot: 25, type: 'PE', ltp: 98.2 },
-                    { symbol: 'BANKNIFTY 52400 CE 2026-10-15', key: 'NSE_FO|BANKNIFTY_2026-10-15_52400_CE', lot: 15, type: 'CE', ltp: 245.0 },
-                    { symbol: 'BANKNIFTY 52400 PE 2026-10-15', key: 'NSE_FO|BANKNIFTY_2026-10-15_52400_PE', lot: 15, type: 'PE', ltp: 215.0 },
-                  ]
-              )
-                .filter((item) => !searchQuery || item.symbol.toUpperCase().includes(searchQuery.toUpperCase()))
-                .map((item) => (
-                  <div
-                    key={item.key}
-                    style={{
-                      padding: spacing.sm,
-                      backgroundColor: colors.surfaceElevated,
-                      borderRadius: borderRadius.sm,
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                    }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: typography.fontWeight.semibold, fontSize: typography.fontSize.xs }}>
-                        {item.symbol}
+              {searchResults.length > 0 ? (
+                searchResults.map((item: any) => {
+                  const type = item.instrumentType || (item.symbol?.includes('CE') ? 'CE' : 'PE');
+                  const ltp = item.lastPrice || 0;
+                  return (
+                    <div
+                      key={item.instrumentKey}
+                      style={{
+                        padding: spacing.sm,
+                        backgroundColor: colors.surfaceElevated,
+                        borderRadius: borderRadius.sm,
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: typography.fontWeight.semibold, fontSize: typography.fontSize.xs }}>
+                          {item.symbol}
+                        </div>
+                        <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>
+                          Lot Size: {item.lotSize || 25} | Token: {item.instrumentKey}
+                        </div>
                       </div>
-                      <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>
-                        Lot Size: {item.lot} | Token: {item.key}
+                      <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
+                        {ltp > 0 && <span style={{ fontWeight: typography.fontWeight.bold, color: colors.cyan }}>₹{ltp.toFixed(2)}</span>}
+                        <Badge label={type} variant={type === 'CE' ? 'primary' : 'danger'} size="sm" />
                       </div>
                     </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-                      <span style={{ fontWeight: typography.fontWeight.bold, color: colors.cyan }}>₹{item.ltp.toFixed(2)}</span>
-                      <Badge label={item.type} variant={item.type === 'CE' ? 'primary' : 'danger'} size="sm" />
-                    </div>
-                  </div>
-                ))}
+                  );
+                })
+              ) : (
+                <div style={{ padding: spacing.lg, textAlign: 'center', color: colors.textMuted, fontSize: typography.fontSize.sm }}>
+                  {searchQuery.trim() ? `No instruments found matching "${searchQuery}".` : 'Enter a contract symbol (e.g. NIFTY, 25100 CE, BANKNIFTY) to search.'}
+                </div>
+              )}
             </div>
           </div>
         </div>

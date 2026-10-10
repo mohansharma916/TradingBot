@@ -20,8 +20,8 @@ describe('useWorkstation Hook', () => {
     expect(result.current.state.mode).toBe(TradeMode.PAPER);
     expect(result.current.state.riskState).toBe(RiskState.DISARMED);
     expect(result.current.state.totalCapital).toBe(10000);
-    expect(result.current.state.openPositionsCount).toBe(1);
-    expect(result.current.state.activeReservationsCount).toBe(1);
+    expect(result.current.state.openPositionsCount).toBe(0);
+    expect(result.current.state.activeReservationsCount).toBe(0);
   });
 
   it('arms and disarms risk safely', () => {
@@ -55,7 +55,7 @@ describe('useWorkstation Hook', () => {
   it('flattenPositions closes positions at market and restores DISARMED state', async () => {
     const { result } = renderHook(() => useWorkstation());
 
-    expect(result.current.state.openPositionsCount).toBe(1);
+    expect(result.current.state.openPositionsCount).toBe(0);
 
     let res: any;
     await act(async () => {
@@ -63,7 +63,7 @@ describe('useWorkstation Hook', () => {
     });
 
     expect(res.success).toBe(true);
-    expect(res.positionsClosed).toBe(1);
+    expect(res.positionsClosed).toBe(0);
     expect(res.message).toContain('DISARMED');
     expect(result.current.state.openPositionsCount).toBe(0);
     expect(result.current.state.activeReservationsCount).toBe(0);

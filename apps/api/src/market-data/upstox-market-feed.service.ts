@@ -1,9 +1,10 @@
-import { Injectable, Inject, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Inject, Optional, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { QuoteSnapshot, FeedStatus, FeedSubscriptionMode } from '@trading-bot/contracts';
 import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { EnvService } from '../config/env.service';
 import { ProtobufDecoderService, DecodedFeedResponse } from './protobuf-decoder.service';
 import { EventsGateway } from '../websocket/events.gateway';
+import { TokenStorageService } from '../broker/token-storage.service';
 import WebSocket from 'ws';
 
 export interface FeedHealthDetails {
@@ -46,6 +47,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     @Inject(EnvService) private readonly envService: EnvService,
     @Inject(ProtobufDecoderService) private readonly decoder: ProtobufDecoderService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
+    @Optional() @Inject(TokenStorageService) private readonly tokenStorage?: TokenStorageService,
   ) {}
 
   async onModuleInit() {
@@ -160,9 +162,13 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  public initiateConnection(): void {
-    const apiKey = this.envService.config.UPSTOX_API_KEY;
-    if (!apiKey || apiKey === 'mock_key') {
+  public async initiateConnection(): Promise<void> {
+    const tokenRecord = this.tokenStorage?.getToken();
+    const token =
+      tokenRecord?.accessToken ||
+      (this.envService.config.UPSTOX_API_KEY !== 'mock_key' ? this.envService.config.UPSTOX_API_KEY : null);
+
+    if (!token) {
       // In simulation mode without live credentials, stay connected virtually
       this.status = FeedStatus.CONNECTED;
       console.log('[MarketFeedService] Simulation mode active. Virtual real-time quotes active.');
@@ -170,12 +176,30 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     }
 
     this.status = FeedStatus.CONNECTING;
-    const wsUrl = 'wss://api.upstox.com/v3/feed/market-data-feed';
+    let wsUrl = 'wss://api.upstox.com/v3/feed/market-data-feed';
+
+    // Request authorized WebSocket redirect URI from Upstox Market Data Feed V3
+    try {
+      const authRes = await fetch('https://api.upstox.com/v3/feed/market-data-feed/authorize', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+      if (authRes.ok) {
+        const body = (await authRes.json()) as any;
+        if (body?.data?.authorizedRedirectUri) {
+          wsUrl = body.data.authorizedRedirectUri;
+        }
+      }
+    } catch {
+      // Fallback to standard wsUrl if authorize endpoint is unreachable
+    }
 
     try {
       this.ws = new WebSocket(wsUrl, {
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${token}`,
         },
       });
 

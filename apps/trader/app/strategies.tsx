@@ -194,17 +194,7 @@ export default function StrategiesScreen() {
     systemMode: TradeMode.PAPER,
   });
 
-  const [executionLogs, setExecutionLogs] = useState<AutonomousExecutionLog[]>([
-    {
-      id: '550e8400-e29b-41d4-a716-446655440099',
-      timestamp: new Date(Date.now() - 3600000).toISOString(),
-      strategyId: '550e8400-e29b-41d4-a716-446655440002',
-      versionHash: 'v1-337f4ea9',
-      action: 'AUTO_DISARMED',
-      details: 'Initial system startup: Default risk state safely initialized to DISARMED.',
-      riskChecksPassed: true,
-    },
-  ]);
+  const [executionLogs, setExecutionLogs] = useState<AutonomousExecutionLog[]>([]);
 
   // Arming Form Inputs
   const [armDurationMinutes, setArmDurationMinutes] = useState<number>(30);
@@ -231,7 +221,7 @@ export default function StrategiesScreen() {
           }
           if (autoStatus) setSessionStatus(autoStatus);
           if (autoReadiness) setReadiness(autoReadiness);
-          if (logs && logs.length > 0) setExecutionLogs(logs);
+          if (logs) setExecutionLogs(logs);
         }
       } catch {
         // Fallback
@@ -1087,7 +1077,21 @@ export default function StrategiesScreen() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-          {executionLogs.map((log) => (
+          {executionLogs.length === 0 ? (
+            <div
+              style={{
+                padding: spacing.lg,
+                textAlign: 'center',
+                color: colors.textMuted,
+                fontSize: typography.fontSize.sm,
+                backgroundColor: colors.surfaceElevated,
+                borderRadius: borderRadius.sm,
+              }}
+            >
+              Zero autonomous events logged today. Execution events will stream here during bounded sessions.
+            </div>
+          ) : (
+            executionLogs.map((log) => (
             <div
               key={log.id}
               style={{
@@ -1125,7 +1129,7 @@ export default function StrategiesScreen() {
                 variant={log.action === 'AUTO_TRIGGERED' ? 'success' : log.action === 'ORDER_DISPATCHED' ? 'primary' : 'neutral'}
               />
             </div>
-          ))}
+          )))}
         </div>
       </div>
 

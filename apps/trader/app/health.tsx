@@ -19,25 +19,25 @@ export default function HealthScreen() {
 
   // Upstox OAuth Session State
   const [session, setSession] = useState<UpstoxSessionStatus>({
-    isConnected: true,
+    isConnected: false,
     isExpired: false,
-    tokenExpiresAt: new Date(Date.now() + 85400000).toISOString(),
-    secondsRemaining: 85400,
+    tokenExpiresAt: null,
+    secondsRemaining: 0,
     egressIpVerified: true,
     registeredEgressIp: '127.0.0.1',
     currentEgressIp: '127.0.0.1',
     rateLimitRemaining: 25,
-    lastReconciledAt: new Date(Date.now() - 120000).toISOString(),
+    lastReconciledAt: null,
   });
 
   // Reconciliation Audit State
   const [reconciliation, setReconciliation] = useState<ReconciliationReport>({
-    timestamp: new Date(Date.now() - 120000).toISOString(),
+    timestamp: new Date().toISOString(),
     status: 'CLEAN',
-    brokerPositionsCount: 1,
-    localPositionsCount: 1,
-    brokerOrdersCount: 2,
-    localOrdersCount: 2,
+    brokerPositionsCount: 0,
+    localPositionsCount: 0,
+    brokerOrdersCount: 0,
+    localOrdersCount: 0,
     discrepancies: [],
     executionFrozen: false,
   });
@@ -46,89 +46,67 @@ export default function HealthScreen() {
   const [schedulerStatus, setSchedulerStatus] = useState<ReconciliationScheduleStatus>({
     schedulerActive: true,
     intervalSeconds: 60,
-    lastRunAt: new Date(Date.now() - 30000).toISOString(),
-    totalRuns: 14,
+    lastRunAt: null,
+    totalRuns: 0,
     lastDiscrepanciesFound: 0,
   });
 
   // Diagnostics Telemetry State
   const [diagnostics, setDiagnostics] = useState<DiagnosticsReport>({
-    uptimeSeconds: 3840,
-    memoryUsageMb: 82.4,
+    uptimeSeconds: 0,
+    memoryUsageMb: 0,
     systemMode: TradeMode.PAPER,
     marketFeed: {
-      connected: true,
-      latencyMs: 18,
+      connected: false,
+      latencyMs: 0,
       staleTicksCount: 0,
-      lastTickAt: new Date().toISOString(),
+      lastTickAt: null,
     },
     brokerConnection: {
-      authenticated: true,
+      authenticated: false,
       rateLimiterTokensRemaining: 25,
       egressIpMatch: true,
       registeredIp: '127.0.0.1',
-      tokenExpiresInSeconds: 85400,
+      tokenExpiresInSeconds: 0,
     },
     riskStatus: {
       killSwitchActive: false,
       riskState: RiskState.DISARMED,
-      availableCash: 6937.5,
-      reservedCapital: 3062.5,
+      availableCash: 10000.0,
+      reservedCapital: 0,
       dailyDrawdownBudgetRemaining: 1500.0,
-      openPositionsCount: 1,
+      openPositionsCount: 0,
     },
     reconciliation: {
-      activeScheduler: true,
-      lastReconciliationAt: new Date(Date.now() - 30000).toISOString(),
+      activeScheduler: false,
+      lastReconciliationAt: null,
       discrepancyCount: 0,
     },
     timestamp: new Date().toISOString(),
   });
 
   // System Alerts Queue
-  const [alerts, setAlerts] = useState<SystemAlert[]>([
-    {
-      id: 'alert_001',
-      severity: AlertSeverity.INFO,
-      category: 'SYSTEM',
-      title: 'Platform Initialized in Supervised Approval Mode',
-      message: 'Risk gates, AES-256-GCM tokens, and streaming Protobuf V3 data feed are operational.',
-      acknowledged: true,
-      timestamp: new Date(Date.now() - 3600000).toISOString(),
-    },
-    {
-      id: 'alert_002',
-      severity: AlertSeverity.WARNING,
-      category: 'RISK_GATE',
-      title: 'Approaching Risk Budget Limit',
-      message: 'Reserved capital has reached 30.6% of maximum hard account cap.',
-      acknowledged: false,
-      timestamp: new Date(Date.now() - 600000).toISOString(),
-    },
-  ]);
+  const [alerts, setAlerts] = useState<SystemAlert[]>([]);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  const handleConnectOAuth = () => {
-    const mockState = 'state_' + Math.random().toString(36).substring(2, 10);
-    const mockAuthUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=UPSTOX_DEV_916&redirect_uri=http%3A%2F%2Flocalhost%3A4000%2Fapi%2Fv1%2Fbroker%2Fupstox%2Fcallback&state=${mockState}`;
-    
-    setSession({
-      isConnected: true,
-      isExpired: false,
-      tokenExpiresAt: new Date(Date.now() + 86400000).toISOString(),
-      secondsRemaining: 86400,
-      egressIpVerified: true,
-      registeredEgressIp: '127.0.0.1',
-      currentEgressIp: '127.0.0.1',
-      rateLimitRemaining: 25,
-      lastReconciledAt: new Date().toISOString(),
-    });
-
-    showToast(`OAuth authorization initiated: ${mockAuthUrl.slice(0, 48)}... Token encrypted via AES-256-GCM.`);
+  const handleConnectOAuth = async () => {
+    try {
+      const res = await apiClient.connectUpstox();
+      if (res?.authUrl) {
+        showToast('Redirecting to Upstox OAuth login...');
+        if (typeof window !== 'undefined') {
+          window.location.href = res.authUrl;
+        }
+      } else {
+        showToast('Upstox connection initiated.');
+      }
+    } catch (err: any) {
+      showToast(`OAuth connection error: ${err?.message || 'Check API connection'}`);
+    }
   };
 
   // Periodic sync with live backend API
@@ -148,7 +126,7 @@ export default function HealthScreen() {
           if (sess) setSession(sess);
           if (recon) setReconciliation(recon);
           if (sched) setSchedulerStatus(sched);
-          if (alertList && alertList.length > 0) setAlerts(alertList);
+          if (alertList) setAlerts(alertList);
           setIsLiveConnected(true);
         }
       } catch {
@@ -632,39 +610,54 @@ export default function HealthScreen() {
 
         {/* Alerts List */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.sm }}>
-          {alerts.map((alert) => (
+          {alerts.length === 0 ? (
             <div
-              key={alert.id}
               style={{
-                backgroundColor: alert.acknowledged ? colors.surfaceElevated : colors.surface,
-                border: `1px solid ${
-                  alert.severity === AlertSeverity.EMERGENCY || alert.severity === AlertSeverity.CRITICAL
-                    ? colors.loss
-                    : alert.severity === AlertSeverity.WARNING
-                    ? colors.warningBorder
-                    : colors.border
-                }`,
-                borderRadius: borderRadius.sm,
                 padding: spacing.md,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                flexWrap: 'wrap',
-                gap: spacing.sm,
+                backgroundColor: colors.surfaceElevated,
+                borderRadius: borderRadius.sm,
+                border: `1px solid ${colors.border}`,
+                color: colors.textMuted,
+                fontSize: typography.fontSize.sm,
+                textAlign: 'center',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, flex: 1, minWidth: 260 }}>
-                <Badge
-                  label={alert.severity}
-                  variant={
+              Zero active system alerts. All operational subsystems healthy.
+            </div>
+          ) : (
+            alerts.map((alert) => (
+              <div
+                key={alert.id}
+                style={{
+                  backgroundColor: alert.acknowledged ? colors.surfaceElevated : colors.surface,
+                  border: `1px solid ${
                     alert.severity === AlertSeverity.EMERGENCY || alert.severity === AlertSeverity.CRITICAL
-                      ? 'danger'
+                      ? colors.loss
                       : alert.severity === AlertSeverity.WARNING
-                      ? 'warning'
-                      : 'neutral'
-                  }
-                  size="sm"
-                />
+                      ? colors.warningBorder
+                      : colors.border
+                  }`,
+                  borderRadius: borderRadius.sm,
+                  padding: spacing.md,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: spacing.sm,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, flex: 1, minWidth: 260 }}>
+                  <Badge
+                    label={alert.severity}
+                    variant={
+                      alert.severity === AlertSeverity.EMERGENCY || alert.severity === AlertSeverity.CRITICAL
+                        ? 'danger'
+                        : alert.severity === AlertSeverity.WARNING
+                        ? 'warning'
+                        : 'neutral'
+                    }
+                    size="sm"
+                  />
                 <div>
                   <div style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.xs, color: colors.textPrimary }}>
                     {alert.title}
@@ -702,7 +695,7 @@ export default function HealthScreen() {
                 )}
               </div>
             </div>
-          ))}
+          )))}
         </div>
       </div>
     </div>

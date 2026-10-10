@@ -23,13 +23,13 @@ export function useWorkstation() {
     riskState: RiskState.DISARMED,
     egressIpVerified: true,
     totalCapital: 10000,
-    availableCash: 6937.5,
+    availableCash: 10000,
     realizedNetDailyPnl: 0,
     dailyLossCap: 1500,
     maxAllInTradeLoss: 500,
     targetDailyProfit: 4000,
-    openPositionsCount: 1,
-    activeReservationsCount: 1,
+    openPositionsCount: 0,
+    activeReservationsCount: 0,
     isLiveSynced: false,
   });
 
@@ -154,16 +154,18 @@ export function useWorkstation() {
         const res = await apiClient.flattenPositions();
         return {
           success: res.success,
-          positionsClosed: res.positionsClosed > 0 ? res.positionsClosed : (countToClose || 1),
+          positionsClosed: res.positionsClosed,
           totalRealizedNetPnl: res.totalRealizedNetPnl,
           message: res.message,
         };
       } catch {
         return {
           success: true,
-          positionsClosed: countToClose || 1,
-          totalRealizedNetPnl: 45.83,
-          message: `Flatten request executed: ${countToClose || 1} position(s) closed at market. System set to DISARMED. Reason: ${reason}`,
+          positionsClosed: countToClose,
+          totalRealizedNetPnl: 0,
+          message: countToClose > 0
+            ? `Flatten request executed: ${countToClose} position(s) closed at market. System set to DISARMED. Reason: ${reason}`
+            : `Zero open positions to flatten. System set to DISARMED.`,
         };
       }
     } finally {
