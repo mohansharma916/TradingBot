@@ -521,6 +521,7 @@ export const BacktestResultSchema = z.object({
   maxDrawdownPct: z.number(),
   profitFactor: z.number(),
   trades: z.array(BacktestTradeRecordSchema),
+  error: z.string().optional(),
 });
 export type BacktestResult = z.infer<typeof BacktestResultSchema>;
 

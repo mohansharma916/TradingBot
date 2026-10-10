@@ -1424,9 +1424,36 @@ export default function StrategiesScreen() {
         {/* Backtest Results Display */}
         {backtestResult && (
           <div>
+            {/* Capital / Validation Error Banner */}
+            {backtestResult.error && (
+              <div style={{
+                margin: `${spacing.md} 0`,
+                padding: spacing.md,
+                borderRadius: borderRadius.md,
+                background: 'rgba(255,59,48,0.12)',
+                border: `1.5px solid ${colors.loss}`,
+                display: 'flex',
+                alignItems: 'flex-start',
+                gap: spacing.sm,
+              }}>
+                <span style={{ fontSize: 22 }}>⛔</span>
+                <div>
+                  <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, marginBottom: 4 }}>
+                    Backtest Aborted
+                  </div>
+                  <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
+                    {backtestResult.error}
+                  </div>
+                </div>
+              </div>
+            )}
+            {/* Only render the full results panel when there is no error */}
+            {!backtestResult.error && (
+              <>
             {/* Real Market Data Badge & Meta Header */}
             <div
               style={{
+
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
@@ -1650,8 +1677,12 @@ export default function StrategiesScreen() {
                 </div>
               )}
             </div>
+            {/* end !backtestResult.error */}
+            </>
+            )}
           </div>
         )}
+
       </div>
 
       {/* --- Modal: Create New Strategy --- */}

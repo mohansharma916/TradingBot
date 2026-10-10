@@ -97,6 +97,21 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
     return emptyResult;
   }
 
+  // ── Pre-flight: capital adequacy check ───────────────────────────────────
+  // Estimate the cost of 1 lot using the very first candle's open price.
+  // Option premium is modelled as ~0.55 % of spot (ATM approx).
+  const firstCandle = sortedCandles[0]!;
+  const estimatedPremiumFirstCandle = Math.max(25, Number((firstCandle.open * 0.0055).toFixed(2)));
+  const minCapitalRequired = estimatedPremiumFirstCandle * lotSize;
+  if (initialCapital < minCapitalRequired) {
+    return {
+      ...emptyResult,
+      error: `Insufficient capital: ₹${initialCapital.toFixed(2)} is too low to open even 1 lot ` +
+             `(estimated cost ≈ ₹${minCapitalRequired.toFixed(2)} = ₹${estimatedPremiumFirstCandle.toFixed(2)} premium × ${lotSize} lot size). ` +
+             `Please increase your initial capital.`,
+    };
+  }
+
   let runningCapital = initialCapital;
   let peakCapital = initialCapital;
   let maxDrawdown = 0;
@@ -297,7 +312,9 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
 
         // Standard lot sizing (e.g. 25 units for NIFTY, 15 for BANKNIFTY)
         const costPerLot = estimatedPremium * lotSize;
-        const allowedLots = Math.max(1, Math.floor(maxTradeCapital / costPerLot));
+        const allowedLots = Math.floor(maxTradeCapital / costPerLot);
+        // Skip entry if capital is insufficient for even 1 lot
+        if (allowedLots < 1) continue;
         const totalUnits = allowedLots * lotSize;
 
         const pointsStop = Math.max(3, perTradeStopLossInr / totalUnits);
