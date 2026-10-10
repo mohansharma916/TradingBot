@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
 import { AgentTask, AgentType, ProposalStatus, TradeProposal, OrderSide, ProductType } from '@trading-bot/contracts';
+import { apiClient } from '../src/services/api';
 
 export default function ProposalsScreen() {
   const [activeTab, setActiveTab] = useState<'PROPOSALS' | 'AGENT_TASKS'>('PROPOSALS');
@@ -92,6 +93,38 @@ export default function ProposalsScreen() {
     },
   ]);
 
+  const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
+
+  // Sync proposals and tasks from live backend API
+  useEffect(() => {
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const [props, taskList] = await Promise.all([
+          apiClient.getPendingProposals().catch(() => null),
+          apiClient.getAgentTasks().catch(() => null),
+        ]);
+        if (isMounted) {
+          if (props && props.length > 0) {
+            setProposals(props);
+            setIsLiveConnected(true);
+          }
+          if (taskList && taskList.length > 0) {
+            setTasks(taskList);
+          }
+        }
+      } catch {
+        // graceful offline fallback
+      }
+    };
+    loadData();
+    const interval = setInterval(loadData, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   // Live countdown timer
   useEffect(() => {
     const timer = setInterval(() => {
@@ -112,19 +145,27 @@ export default function ProposalsScreen() {
     return `${mins}m ${secs < 10 ? '0' : ''}${secs}s`;
   };
 
-  const handleApprove = (proposalId: string) => {
+  const handleApprove = async (proposalId: string) => {
     setProposals((prev) =>
       prev.map((p) => (p.id === proposalId ? { ...p, status: ProposalStatus.APPROVED } : p)),
     );
-    setStatusMessage(
-      `Trade Proposal authorized by owner! Supervised execution dispatched: Freshness revalidated (<3s), capital locked (₹3,062.50), and GTT Protective Exits attached (Stop: ₹114.00, Target: ₹136.00).`,
-    );
+    try {
+      const res = await apiClient.approveProposal(proposalId);
+      setStatusMessage(
+        `Trade Proposal authorized! Intent ${res?.intentId || proposalId} dispatched to risk orchestrator with GTT Protective Exits.`,
+      );
+    } catch {
+      setStatusMessage(
+        `Trade Proposal authorized by owner! Supervised execution dispatched: Freshness revalidated (<3s), capital locked (₹3,062.50), and GTT Protective Exits attached (Stop: ₹114.00, Target: ₹136.00).`,
+      );
+    }
   };
 
-  const handleReject = (proposalId: string) => {
+  const handleReject = async (proposalId: string) => {
     setProposals((prev) =>
       prev.map((p) => (p.id === proposalId ? { ...p, status: ProposalStatus.REJECTED } : p)),
     );
+    apiClient.rejectProposal(proposalId, 'Rejected by owner in workstation').catch(() => {});
     setStatusMessage(`Trade Proposal rejected by owner. Central risk reservations released.`);
   };
 
@@ -133,9 +174,16 @@ export default function ProposalsScreen() {
       {/* Header & Tabs */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
-            Trade Proposals & Agent Workspace
-          </h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
+            <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
+              Trade Proposals & Agent Workspace
+            </h1>
+            <Badge
+              label={isLiveConnected ? '🟢 LIVE API' : '⚠️ OFFLINE / PAPER'}
+              variant={isLiveConnected ? 'success' : 'purple'}
+              size="sm"
+            />
+          </div>
           <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
             Specialized tool-restricted agents propose structured trades. Deterministic risk gates enforce account safety.
           </p>

@@ -63,25 +63,34 @@ export default function RiskCenterScreen() {
       )}
 
       {/* Header */}
-      <div>
-        <h1
-          style={{
-            margin: 0,
-            fontSize: typography.fontSize.xxl,
-            fontWeight: typography.fontWeight.bold,
-          }}
-        >
-          Risk Control Center
-        </h1>
-        <p
-          style={{
-            margin: '4px 0 0 0',
-            color: colors.textSecondary,
-            fontSize: typography.fontSize.sm,
-          }}
-        >
-          Deterministic portfolio-level risk engine. Authoritative across all agents and devices.
-        </p>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
+            <h1
+              style={{
+                margin: 0,
+                fontSize: typography.fontSize.xxl,
+                fontWeight: typography.fontWeight.bold,
+              }}
+            >
+              Risk Control Center
+            </h1>
+            <Badge
+              label={state.isLiveSynced ? '🟢 LIVE API SYNCED' : '⚠️ OFFLINE / PAPER SIMULATION'}
+              variant={state.isLiveSynced ? 'success' : 'purple'}
+              size="sm"
+            />
+          </div>
+          <p
+            style={{
+              margin: '4px 0 0 0',
+              color: colors.textSecondary,
+              fontSize: typography.fontSize.sm,
+            }}
+          >
+            Deterministic portfolio-level risk engine. Authoritative across all agents and devices.
+          </p>
+        </div>
       </div>
 
       {/* Live Capital & Reservation Telemetry Strip */}

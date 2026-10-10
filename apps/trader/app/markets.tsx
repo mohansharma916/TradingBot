@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { colors, spacing, borderRadius, typography } from '@trading-bot/ui';
 import { Badge } from '@trading-bot/ui';
+import { apiClient } from '../src/services/api';
 
 interface OptionStrikeRow {
   strikePrice: number;
@@ -35,11 +36,71 @@ export default function MarketsScreen() {
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [feedLatencyMs, setFeedLatencyMs] = useState(16);
   const [isFeedStale, setIsFeedStale] = useState(false);
+  const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
 
-  const expiries = ['2026-10-15', '2026-10-22', '2026-10-29', '2026-11-05'];
-  const spotPrice = selectedUnderlying === 'NIFTY' ? 25120.45 : 52450.8;
+  const [liveOptionRows, setLiveOptionRows] = useState<OptionStrikeRow[] | null>(null);
+  const [liveSpotPrice, setLiveSpotPrice] = useState<number | null>(null);
+  const [liveExpiries, setLiveExpiries] = useState<string[] | null>(null);
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+
+  // Periodic sync of live option chain and latency
+  useEffect(() => {
+    let isMounted = true;
+    const fetchLiveChain = async () => {
+      try {
+        const [chain, diag] = await Promise.all([
+          apiClient.getOptionChain(selectedUnderlying, selectedExpiry).catch(() => null),
+          apiClient.getDiagnostics().catch(() => null),
+        ]);
+        if (isMounted) {
+          if (chain && chain.strikes?.length > 0) {
+            setLiveOptionRows(chain.strikes as any);
+            setLiveSpotPrice(chain.spotPrice);
+            if (chain.availableExpiries?.length > 0) {
+              setLiveExpiries(chain.availableExpiries);
+            }
+            setIsLiveConnected(true);
+          }
+          if (diag?.marketFeed?.latencyMs) {
+            setFeedLatencyMs(diag.marketFeed.latencyMs);
+          }
+        }
+      } catch {
+        // offline fallback
+      }
+    };
+    fetchLiveChain();
+    const interval = setInterval(fetchLiveChain, 4000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [selectedUnderlying, selectedExpiry]);
+
+  // Live instrument catalog search
+  useEffect(() => {
+    if (!searchQuery.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    let isMounted = true;
+    apiClient
+      .searchInstruments(searchQuery)
+      .then((res) => {
+        if (isMounted && res && res.length > 0) {
+          setSearchResults(res);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      isMounted = false;
+    };
+  }, [searchQuery]);
+
+  const expiries = liveExpiries || ['2026-10-15', '2026-10-22', '2026-10-29', '2026-11-05'];
+  const spotPrice = liveSpotPrice ?? (selectedUnderlying === 'NIFTY' ? 25120.45 : 52450.8);
   const lotSize = selectedUnderlying === 'NIFTY' ? 25 : 15;
-  const atmStrike = selectedUnderlying === 'NIFTY' ? 25100 : 52400;
+  const atmStrike = Math.round(spotPrice / (selectedUnderlying === 'NIFTY' ? 50 : 100)) * (selectedUnderlying === 'NIFTY' ? 50 : 100);
 
   const strikesList = selectedUnderlying === 'NIFTY'
     ? [24950, 25000, 25050, 25100, 25150, 25200, 25250]
@@ -80,6 +141,8 @@ export default function MarketsScreen() {
     };
   });
 
+  const effectiveOptionRows = liveOptionRows && liveOptionRows.length > 0 ? liveOptionRows : optionRows;
+
   // Simulated live feed heartbeat
   useEffect(() => {
     const interval = setInterval(() => {
@@ -93,9 +156,16 @@ export default function MarketsScreen() {
       {/* Header and Controls */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
-            Markets, Catalog & Option Chain
-          </h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
+            <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
+              Markets, Catalog & Option Chain
+            </h1>
+            <Badge
+              label={isLiveConnected ? '🟢 LIVE API' : '⚠️ OFFLINE / PAPER'}
+              variant={isLiveConnected ? 'success' : 'purple'}
+              size="sm"
+            />
+          </div>
           <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
             Real-time Upstox Market Data Feed V3 Protobuf decoding & F&O strike ladder.
           </p>
@@ -359,7 +429,7 @@ export default function MarketsScreen() {
             </tr>
           </thead>
           <tbody>
-            {optionRows.map((row) => {
+            {effectiveOptionRows.map((row) => {
               const isAtm = row.strikePrice === atmStrike;
               const isCallItm = row.strikePrice < spotPrice;
               const isPutItm = row.strikePrice > spotPrice;
@@ -498,12 +568,21 @@ export default function MarketsScreen() {
             />
 
             <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-              {[
-                { symbol: 'NIFTY 25100 CE 2026-10-15', key: 'NSE_FO|NIFTY_2026-10-15_25100_CE', lot: 25, type: 'CE', ltp: 122.5 },
-                { symbol: 'NIFTY 25100 PE 2026-10-15', key: 'NSE_FO|NIFTY_2026-10-15_25100_PE', lot: 25, type: 'PE', ltp: 98.2 },
-                { symbol: 'BANKNIFTY 52400 CE 2026-10-15', key: 'NSE_FO|BANKNIFTY_2026-10-15_52400_CE', lot: 15, type: 'CE', ltp: 245.0 },
-                { symbol: 'BANKNIFTY 52400 PE 2026-10-15', key: 'NSE_FO|BANKNIFTY_2026-10-15_52400_PE', lot: 15, type: 'PE', ltp: 215.0 },
-              ]
+              {(searchResults.length > 0
+                ? searchResults.map((item: any) => ({
+                    symbol: item.symbol,
+                    key: item.instrumentKey,
+                    lot: item.lotSize || 25,
+                    type: item.instrumentType || (item.symbol?.includes('CE') ? 'CE' : 'PE'),
+                    ltp: item.lastPrice || 122.5,
+                  }))
+                : [
+                    { symbol: 'NIFTY 25100 CE 2026-10-15', key: 'NSE_FO|NIFTY_2026-10-15_25100_CE', lot: 25, type: 'CE', ltp: 122.5 },
+                    { symbol: 'NIFTY 25100 PE 2026-10-15', key: 'NSE_FO|NIFTY_2026-10-15_25100_PE', lot: 25, type: 'PE', ltp: 98.2 },
+                    { symbol: 'BANKNIFTY 52400 CE 2026-10-15', key: 'NSE_FO|BANKNIFTY_2026-10-15_52400_CE', lot: 15, type: 'CE', ltp: 245.0 },
+                    { symbol: 'BANKNIFTY 52400 PE 2026-10-15', key: 'NSE_FO|BANKNIFTY_2026-10-15_52400_PE', lot: 15, type: 'PE', ltp: 215.0 },
+                  ]
+              )
                 .filter((item) => !searchQuery || item.symbol.toUpperCase().includes(searchQuery.toUpperCase()))
                 .map((item) => (
                   <div

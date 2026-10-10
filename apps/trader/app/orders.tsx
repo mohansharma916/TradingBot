@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
 import {
   BrokerOrder,
@@ -12,6 +12,7 @@ import {
   GoLiveChecklistItem,
 } from '@trading-bot/contracts';
 import { useWorkstation } from '../src/hooks/useWorkstation';
+import { apiClient } from '../src/services/api';
 
 type TabType = 'POSITIONS' | 'ORDERS' | 'JOURNAL' | 'CHECKLIST';
 
@@ -20,6 +21,7 @@ export default function OrdersScreen() {
   const [activeTab, setActiveTab] = useState<TabType>('POSITIONS');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [activeAlert, setActiveAlert] = useState<string | null>(null);
+  const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
 
   // Central Risk & Capital Reservation Simulation State
   const [reservedCapital, setReservedCapital] = useState<number>(3062.5);
@@ -114,7 +116,27 @@ export default function OrdersScreen() {
     setTimeout(() => setToastMessage(null), 4000);
   };
 
-  const handleExportCsv = () => {
+  const handleExportCsv = async () => {
+    try {
+      const serverCsv = await apiClient.exportDailyReportCsv();
+      if (serverCsv && typeof window !== 'undefined' && typeof document !== 'undefined') {
+        const blob = new Blob([serverCsv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        const dateStr = new Date().toISOString().split('T')[0];
+        link.href = url;
+        link.setAttribute('download', `daily_trading_report_${dateStr}.csv`);
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        showNotification('RFC-4180 Daily Audit CSV downloaded from backend API.');
+        return;
+      }
+    } catch {
+      // fallback to local generation
+    }
+
     const headers = [
       'Fill ID',
       'Timestamp',
@@ -172,6 +194,7 @@ export default function OrdersScreen() {
 
   // Close open position simulation
   const handleClosePosition = (instrumentKey: string) => {
+    apiClient.closePosition(instrumentKey).catch(() => {});
     const pos = positions.find((p) => p.instrumentKey === instrumentKey);
     if (!pos || pos.netQuantity <= 0) return;
 
@@ -502,6 +525,46 @@ export default function OrdersScreen() {
   const [checklistSignedOffBy, setChecklistSignedOffBy] = useState<string | null>('Platform Owner');
   const [checklistSignedOffAt, setChecklistSignedOffAt] = useState<string | null>(new Date().toISOString());
 
+  // Periodic sync with live backend API
+  useEffect(() => {
+    let isMounted = true;
+    const syncOrdersData = async () => {
+      try {
+        const [orderList, posList, fillsList, riskData, checklistData] = await Promise.all([
+          apiClient.getOrders().catch(() => null),
+          apiClient.getPositions().catch(() => null),
+          apiClient.getOrderFills().catch(() => null),
+          apiClient.getRiskStatus().catch(() => null),
+          apiClient.getGoLiveChecklist().catch(() => null),
+        ]);
+        if (isMounted) {
+          if (orderList && orderList.length > 0) setOrders(orderList);
+          if (posList && posList.length > 0) setPositions(posList as any);
+          if (fillsList && fillsList.length > 0) setFills(fillsList);
+          if (riskData) {
+            setAvailableCash(riskData.availableCash);
+            setReservedCapital(riskData.reservedCapital);
+            setRemainingDailyRiskBudget(riskData.remainingDailyRiskBudget);
+            setIsLiveConnected(true);
+          }
+          if (checklistData && checklistData.items?.length > 0) {
+            setChecklistItems(checklistData.items);
+            if (checklistData.signedOffBy) setChecklistSignedOffBy(checklistData.signedOffBy);
+            if (checklistData.signedOffAt) setChecklistSignedOffAt(checklistData.signedOffAt);
+          }
+        }
+      } catch {
+        // offline fallback
+      }
+    };
+    syncOrdersData();
+    const interval = setInterval(syncOrdersData, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   const handleSignOffItem = (id: string) => {
     setChecklistItems((prev) =>
       prev.map((item) =>
@@ -510,12 +573,14 @@ export default function OrdersScreen() {
           : item,
       ),
     );
+    apiClient.signOffChecklistItem(id, 'Verified by operator in workstation').catch(() => {});
     showNotification(`Checklist item '${id}' verified and passed.`);
   };
 
   const handleCompleteChecklist = () => {
     setChecklistSignedOffBy('Platform Owner');
     setChecklistSignedOffAt(new Date().toISOString());
+    apiClient.signOffGoLiveChecklist('Platform Owner').catch(() => {});
     showNotification('10-Point Go-Live Safety Checklist signed off by Platform Owner. Live execution authorized.');
   };
 
@@ -599,6 +664,10 @@ export default function OrdersScreen() {
             <Badge
               label={workstationState.riskState === 'ARMED' ? 'ARMED' : 'DISARMED'}
               variant={workstationState.riskState === 'ARMED' ? 'success' : 'neutral'}
+            />
+            <Badge
+              label={isLiveConnected ? '🟢 LIVE API' : '⚠️ OFFLINE / PAPER'}
+              variant={isLiveConnected ? 'success' : 'purple'}
             />
           </div>
           <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
