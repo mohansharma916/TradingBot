@@ -192,13 +192,17 @@ export default function StrategiesScreen() {
     setBacktestLoading(true);
     setBacktestResult(null);
 
+    const effectiveFrom = isCustomDateRange && (backtestFromDate || backtestToDate) ? (backtestFromDate || backtestToDate) : undefined;
+    const effectiveTo = isCustomDateRange && (backtestToDate || backtestFromDate) ? (backtestToDate || backtestFromDate) : undefined;
+    const [finalFrom, finalTo] = effectiveFrom && effectiveTo && effectiveFrom > effectiveTo ? [effectiveTo, effectiveFrom] : [effectiveFrom, effectiveTo];
+
     const backtestPayload = {
       days: backtestDays,
       initialCapital: backtestCapital,
       underlying: backtestUnderlying,
       timeframe: backtestTimeframe,
-      fromDate: isCustomDateRange && backtestFromDate ? backtestFromDate : undefined,
-      toDate: isCustomDateRange && backtestToDate ? backtestToDate : undefined,
+      fromDate: finalFrom,
+      toDate: finalTo,
       useTrailingStop,
       trailingActivationProfitInr: trailingActivationProfit,
       trailingStepInr: trailingStep,
@@ -1155,7 +1159,15 @@ export default function StrategiesScreen() {
               <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, marginBottom: 4 }}>
                 <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Date Range</label>
                 <button
-                  onClick={() => setIsCustomDateRange(!isCustomDateRange)}
+                  onClick={() => {
+                    const nextVal = !isCustomDateRange;
+                    setIsCustomDateRange(nextVal);
+                    if (nextVal && !backtestFromDate) {
+                      const today = new Date().toISOString().slice(0, 10);
+                      setBacktestFromDate(today);
+                      setBacktestToDate(today);
+                    }
+                  }}
                   style={{
                     background: 'none',
                     border: 'none',
@@ -1192,13 +1204,19 @@ export default function StrategiesScreen() {
                   ))}
                 </div>
               ) : (
-                <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
                   <div>
                     <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>From:</span>
                     <input
                       type="date"
                       value={backtestFromDate}
-                      onChange={(e) => setBacktestFromDate(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setBacktestFromDate(val);
+                        if (!backtestToDate || backtestToDate < val) {
+                          setBacktestToDate(val);
+                        }
+                      }}
                       style={{
                         backgroundColor: colors.surface,
                         border: `1px solid ${colors.border}`,
@@ -1225,6 +1243,24 @@ export default function StrategiesScreen() {
                       }}
                     />
                   </div>
+                  {backtestFromDate && backtestToDate !== backtestFromDate && (
+                    <button
+                      type="button"
+                      onClick={() => setBacktestToDate(backtestFromDate)}
+                      style={{
+                        backgroundColor: 'transparent',
+                        border: `1px dashed ${colors.border}`,
+                        borderRadius: borderRadius.sm,
+                        color: colors.cyan,
+                        fontSize: 10,
+                        padding: '3px 6px',
+                        cursor: 'pointer',
+                      }}
+                      title="Set To date equal to From date for single-day intraday backtesting"
+                    >
+                      Single Day
+                    </button>
+                  )}
                 </div>
               )}
             </div>
@@ -1347,8 +1383,19 @@ export default function StrategiesScreen() {
                 </span>
               </div>
               <div style={{ display: 'flex', gap: spacing.sm, fontSize: typography.fontSize.xs, color: colors.textSecondary, flexWrap: 'wrap' }}>
-                <span>From: <strong style={{ color: colors.textPrimary }}>{backtestResult.fromDate ? new Date(backtestResult.fromDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', year: 'numeric' }) : '—'}</strong></span>
-                <span>To: <strong style={{ color: colors.textPrimary }}>{backtestResult.toDate ? new Date(backtestResult.toDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', year: 'numeric' }) : '—'}</strong></span>
+                {(() => {
+                  const fromFormatted = backtestResult.fromDate ? new Date(backtestResult.fromDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', year: 'numeric' }) : '—';
+                  const toFormatted = backtestResult.toDate ? new Date(backtestResult.toDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', year: 'numeric' }) : '—';
+                  const isSingleDay = fromFormatted === toFormatted && fromFormatted !== '—';
+                  return isSingleDay ? (
+                    <span>Date: <strong style={{ color: colors.textPrimary }}>{fromFormatted} (Intraday)</strong></span>
+                  ) : (
+                    <>
+                      <span>From: <strong style={{ color: colors.textPrimary }}>{fromFormatted}</strong></span>
+                      <span>To: <strong style={{ color: colors.textPrimary }}>{toFormatted}</strong></span>
+                    </>
+                  );
+                })()}
                 <span>Timeframe: <strong style={{ color: colors.cyan }}>{backtestResult.timeframe || backtestTimeframe}</strong></span>
                 {useTrailingStop && (
                   <span style={{ color: colors.purple, fontWeight: typography.fontWeight.semibold }}>
@@ -1429,7 +1476,7 @@ export default function StrategiesScreen() {
 
               {backtestResult.trades.length === 0 ? (
                 <div style={{ padding: spacing.md, backgroundColor: colors.surfaceElevated, borderRadius: borderRadius.md, textAlign: 'center', color: colors.textMuted }}>
-                  No setup signals triggered during the {backtestDays}-day window under current indicator thresholds.
+                  No setup signals triggered during the {isCustomDateRange ? 'selected date window' : `${backtestDays}-day window`} under current indicator thresholds.
                 </div>
               ) : (
                 <div style={{ overflowX: 'auto' }}>

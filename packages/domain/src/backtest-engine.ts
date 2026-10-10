@@ -42,14 +42,38 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
   const daysRequested = request?.days ?? 14;
   const timeframe = request?.timeframe ?? strategy.timeframe ?? '5m';
 
-  const fromDate = toIso(candles[0]?.timestamp ?? new Date(Date.now() - daysRequested * 86400000).toISOString());
-  const toDate = toIso(candles[candles.length - 1]?.timestamp ?? new Date().toISOString());
+  // Sort candles chronologically
+  let sortedCandles = [...(candles || [])].sort(
+    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+  );
+
+  // Strictly bound candles to requested fromDate / toDate if provided
+  if (request?.fromDate || request?.toDate) {
+    const rawFrom = (request.fromDate || request.toDate)!.slice(0, 10);
+    const rawTo = (request.toDate || request.fromDate)!.slice(0, 10);
+    const [f1, t1] = rawFrom <= rawTo ? [rawFrom, rawTo] : [rawTo, rawFrom];
+    const startMs = new Date(`${f1}T00:00:00+05:30`).getTime();
+    const endMs = new Date(`${t1}T23:59:59.999+05:30`).getTime();
+    sortedCandles = sortedCandles.filter((c) => {
+      const tMs = new Date(c.timestamp).getTime();
+      return tMs >= startMs && tMs <= endMs;
+    });
+  }
+
+  const fromDate = sortedCandles.length > 0 && sortedCandles[0]
+    ? toIso(sortedCandles[0].timestamp)
+    : (request?.fromDate ? new Date(`${request.fromDate.slice(0, 10)}T03:45:00.000Z`).toISOString() : new Date(Date.now() - daysRequested * 86400000).toISOString());
+  const toDate = sortedCandles.length > 0 && sortedCandles[sortedCandles.length - 1]
+    ? toIso(sortedCandles[sortedCandles.length - 1]!.timestamp)
+    : (request?.toDate ? new Date(`${request.toDate.slice(0, 10)}T10:00:00.000Z`).toISOString() : new Date().toISOString());
+
+  const periodDays = request?.days ?? Math.max(1, Math.round((new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86400000));
 
   const emptyResult: BacktestResult = {
     strategyId: strategy.id,
     strategyName: strategy.name,
     version: strategy.version,
-    periodDays: daysRequested,
+    periodDays,
     timeframe,
     fromDate,
     toDate,
@@ -69,14 +93,9 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
     trades: [],
   };
 
-  if (!candles || candles.length < 25) {
+  if (sortedCandles.length < 10) {
     return emptyResult;
   }
-
-  // Sort candles chronologically
-  const sortedCandles = [...candles].sort(
-    (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
-  );
 
   let runningCapital = initialCapital;
   let peakCapital = initialCapital;
@@ -341,12 +360,30 @@ export async function fetchRealHistoricalCandles(options: {
   const yahooSymbol = upperUnderlying === 'BANKNIFTY' ? '%5ENSEBANK' : '%5ENSEI';
   const interval = ['1m', '5m', '15m', '30m', '1d'].includes(requestedTf) ? requestedTf : '5m';
 
+  const rawFrom = fromDate || toDate;
+  const rawTo = toDate || fromDate;
+  const isCustom = Boolean(rawFrom || rawTo);
+
+  let startMs: number;
+  let endMs: number;
+
+  if (isCustom) {
+    const f1 = rawFrom!.slice(0, 10);
+    const t1 = rawTo!.slice(0, 10);
+    const [fromDay, toDay] = f1 <= t1 ? [f1, t1] : [t1, f1];
+    startMs = new Date(`${fromDay}T00:00:00+05:30`).getTime();
+    endMs = new Date(`${toDay}T23:59:59.999+05:30`).getTime();
+  } else {
+    endMs = Date.now();
+    startMs = endMs - days * 86400000;
+  }
+
   // 1. Try Upstox Historical Candle API if token available
   if (authToken) {
     try {
       const upstoxInstrumentKey = upperUnderlying === 'BANKNIFTY' ? 'NSE_INDEX|Nifty Bank' : 'NSE_INDEX|Nifty 50';
-      const toStr = toDate || new Date().toISOString().slice(0, 10);
-      const fromStr = fromDate || new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+      const toStr = new Date(endMs).toISOString().slice(0, 10);
+      const fromStr = new Date(startMs).toISOString().slice(0, 10);
       const upstoxInterval = interval === '1m' ? '1minute' : interval === '30m' ? '30minute' : interval === '1d' ? 'day' : '30minute';
       const res = await fetch(
         `https://api.upstox.com/v2/historical-candle/${encodeURIComponent(upstoxInstrumentKey)}/${upstoxInterval}/${toStr}/${fromStr}`,
@@ -355,16 +392,25 @@ export async function fetchRealHistoricalCandles(options: {
       if (res.ok) {
         const json = (await res.json()) as any;
         const candlesRaw = json?.data?.candles;
-        if (Array.isArray(candlesRaw) && candlesRaw.length > 20) {
-          const parsedCandles: Candle[] = candlesRaw.map((c: any[]) => ({
-            timestamp: c[0],
-            open: Number(c[1]),
-            high: Number(c[2]),
-            low: Number(c[3]),
-            close: Number(c[4]),
-            volume: Number(c[5] ?? 0),
-          })).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-          return { candles: parsedCandles, dataSource: 'UPSTOX_V2_EXCHANGE_FEED' };
+        if (Array.isArray(candlesRaw) && candlesRaw.length > 5) {
+          const parsedCandles: Candle[] = candlesRaw
+            .map((c: any[]) => ({
+              timestamp: c[0],
+              open: Number(c[1]),
+              high: Number(c[2]),
+              low: Number(c[3]),
+              close: Number(c[4]),
+              volume: Number(c[5] ?? 0),
+            }))
+            .filter((c) => {
+              const tMs = new Date(c.timestamp).getTime();
+              return tMs >= startMs && tMs <= endMs;
+            })
+            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+          if (parsedCandles.length >= 10) {
+            return { candles: parsedCandles, dataSource: 'UPSTOX_V2_EXCHANGE_FEED' };
+          }
         }
       }
     } catch {
@@ -375,9 +421,9 @@ export async function fetchRealHistoricalCandles(options: {
   // 2. Fetch from Yahoo Finance Chart Feed (Real NSE Exchange Data)
   try {
     let url = '';
-    if (fromDate && toDate) {
-      const period1 = Math.floor(new Date(`${fromDate}T03:45:00Z`).getTime() / 1000);
-      const period2 = Math.floor(new Date(`${toDate}T12:00:00Z`).getTime() / 1000);
+    if (isCustom) {
+      const period1 = Math.floor(startMs / 1000);
+      const period2 = Math.floor(endMs / 1000);
       url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&period1=${period1}&period2=${period2}`;
     } else {
       const range = days <= 7 ? '7d' : days <= 14 ? '14d' : days <= 30 ? '1mo' : '60d';
@@ -391,9 +437,14 @@ export async function fetchRealHistoricalCandles(options: {
       const timestamps: number[] = result?.timestamp || [];
       const quote = result?.indicators?.quote?.[0];
 
-      if (timestamps.length > 10 && quote?.open && quote?.close) {
+      if (timestamps.length > 5 && quote?.open && quote?.close) {
         const candles: Candle[] = [];
         for (let i = 0; i < timestamps.length; i++) {
+          const tMs = timestamps[i]! * 1000;
+          // Filter strictly within the requested time bounds
+          if (tMs < startMs || tMs > endMs) {
+            continue;
+          }
           const o = quote.open[i];
           const h = quote.high[i];
           const l = quote.low[i];
@@ -401,7 +452,7 @@ export async function fetchRealHistoricalCandles(options: {
           const v = quote.volume[i] ?? 10000;
           if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
             candles.push({
-              timestamp: new Date(timestamps[i]! * 1000).toISOString(),
+              timestamp: new Date(tMs).toISOString(),
               open: Number(Number(o).toFixed(2)),
               high: Number(Number(h).toFixed(2)),
               low: Number(Number(l).toFixed(2)),
@@ -410,7 +461,7 @@ export async function fetchRealHistoricalCandles(options: {
             });
           }
         }
-        if (candles.length > 20) {
+        if (candles.length >= 10) {
           return { candles, dataSource: 'REAL_NSE_EXCHANGE_FEED' };
         }
       }
@@ -424,6 +475,8 @@ export async function fetchRealHistoricalCandles(options: {
     upperUnderlying,
     days,
     interval === '15m' ? 15 : interval === '1m' ? 1 : 5,
+    fromDate,
+    toDate,
   );
   return { candles: fallbackCandles, dataSource: 'MARKET_CALENDAR_SIMULATION' };
 }
@@ -436,11 +489,64 @@ export function generateHistoricalMarketCandles(
   underlying: string,
   days = 14,
   timeframeMinutes = 5,
+  fromDate?: string,
+  toDate?: string,
 ): Candle[] {
   const candles: Candle[] = [];
   const basePrice = underlying === 'BANKNIFTY' ? 55256.65 : 22520.45;
   let runningPrice = basePrice;
 
+  // Custom date bounds mode
+  if (fromDate || toDate) {
+    const rawFrom = (fromDate || toDate)!.slice(0, 10);
+    const rawTo = (toDate || fromDate)!.slice(0, 10);
+    const [f1, t1] = rawFrom <= rawTo ? [rawFrom, rawTo] : [rawTo, rawFrom];
+
+    const cur = new Date(`${f1}T00:00:00+05:30`);
+    const end = new Date(`${t1}T23:59:59+05:30`);
+
+    while (cur.getTime() <= end.getTime()) {
+      const dayOfWeek = cur.getDay(); // 0: Sun, 6: Sat
+      if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+        const y = cur.getFullYear();
+        const m = String(cur.getMonth() + 1).padStart(2, '0');
+        const d = String(cur.getDate()).padStart(2, '0');
+
+        const sessionStartUtcMs = Date.parse(`${y}-${m}-${d}T03:45:00.000Z`);
+        const totalBars = Math.floor(375 / timeframeMinutes);
+
+        for (let bar = 0; bar < totalBars; bar++) {
+          const barTimestamp = new Date(sessionStartUtcMs + bar * timeframeMinutes * 60 * 1000).toISOString();
+          const volatility = underlying === 'BANKNIFTY' ? 42.0 : 18.0;
+
+          const cyclicDrift = Math.sin((bar / 18) * Math.PI * 2) * (volatility * 0.7);
+          const randomNoise = (Math.random() - 0.49) * volatility * 1.1;
+          const delta = cyclicDrift + randomNoise;
+
+          const open = Number(runningPrice.toFixed(2));
+          runningPrice += delta;
+          const close = Number(runningPrice.toFixed(2));
+          const high = Number((Math.max(open, close) + Math.random() * (volatility * 0.5)).toFixed(2));
+          const low = Number((Math.min(open, close) - Math.random() * (volatility * 0.5)).toFixed(2));
+          const volume = Math.floor(15000 + Math.random() * 35000);
+
+          candles.push({
+            timestamp: barTimestamp,
+            open,
+            high,
+            low,
+            close,
+            volume,
+          });
+        }
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+
+    return candles;
+  }
+
+  // Days relative to today mode
   const now = new Date();
   const dayMs = 24 * 60 * 60 * 1000;
 

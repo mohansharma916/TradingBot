@@ -119,4 +119,43 @@ describe('Historical Backtest Engine', () => {
     expect(withTrailing.dataSource).toBeDefined();
     expect(withTrailing.trades.length).toBeGreaterThanOrEqual(0);
   });
+
+  it('strictly bounds simulated trades and candles to user-selected fromDate and toDate', () => {
+    const candles = generateHistoricalMarketCandles('NIFTY', 14, 5, '2026-10-05', '2026-10-06');
+    expect(candles.length).toBe(150); // 2 days * 75 bars per day for 5m
+
+    const result = runStrategyBacktest({
+      strategy: sampleStrategy,
+      candles,
+      request: {
+        fromDate: '2026-10-06',
+        toDate: '2026-10-06',
+        days: 1,
+        initialCapital: 10000,
+        underlying: 'NIFTY',
+      },
+    });
+
+    // Candles must be strictly bounded to 2026-10-06
+    expect(result.fromDate.startsWith('2026-10-06')).toBe(true);
+    expect(result.toDate.startsWith('2026-10-06')).toBe(true);
+
+    // Every single trade must have entry and exit on 2026-10-06
+    for (const trade of result.trades) {
+      expect(trade.entryTime.startsWith('2026-10-06')).toBe(true);
+      if (trade.exitTime) {
+        expect(trade.exitTime.startsWith('2026-10-06')).toBe(true);
+      }
+    }
+  });
+
+  it('generates candles for exact custom date range skipping weekends', () => {
+    // 2026-10-03 is Saturday, 2026-10-04 is Sunday, 2026-10-05 is Monday
+    const candles = generateHistoricalMarketCandles('NIFTY', 5, 5, '2026-10-03', '2026-10-05');
+    // Only Monday should generate 75 candles
+    expect(candles.length).toBe(75);
+    for (const c of candles) {
+      expect(c.timestamp.startsWith('2026-10-05')).toBe(true);
+    }
+  });
 });
