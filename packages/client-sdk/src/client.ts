@@ -28,6 +28,13 @@ import {
   AutonomousArmRequest,
   AutonomousSessionStatus,
   AutonomousExecutionLog,
+  DailyBotConfigInput,
+  DailyBotControlAction,
+  DailyBotPreflight,
+  DailyBotSession,
+  DailyBotSetup,
+  DailyBotStartRequest,
+  DailyBotToday,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -320,6 +327,52 @@ export class TradingPlatformClient {
 
   public async runStrategyScan(id: string): Promise<any> {
     return this.request(`/strategies/${id}/scan`, {
+      method: 'POST',
+    });
+  }
+
+  // Daily Trading Bot
+  public async getDailyBotToday(): Promise<DailyBotToday> {
+    return this.request('/daily-bot/today');
+  }
+
+  public async getDailyBotSetups(): Promise<DailyBotSetup[]> {
+    return this.request('/daily-bot/setups');
+  }
+
+  public async createDailyBotSetup(config: DailyBotConfigInput): Promise<DailyBotSetup> {
+    return this.request('/daily-bot/setups', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+  }
+
+  public async cloneDailyBotSetup(id: string, tradingDate: string): Promise<DailyBotSetup> {
+    return this.request(`/daily-bot/setups/${encodeURIComponent(id)}/clone`, {
+      method: 'POST',
+      body: JSON.stringify({ tradingDate }),
+    });
+  }
+
+  public async preflightDailyBot(id: string): Promise<DailyBotPreflight> {
+    return this.request(`/daily-bot/setups/${encodeURIComponent(id)}/preflight`, {
+      method: 'POST',
+    });
+  }
+
+  public async startDailyBot(id: string, request: DailyBotStartRequest): Promise<DailyBotSession> {
+    return this.request(`/daily-bot/setups/${encodeURIComponent(id)}/start`, {
+      method: 'POST',
+      body: JSON.stringify(request),
+    });
+  }
+
+  public async getDailyBotSession(id: string): Promise<DailyBotSession> {
+    return this.request(`/daily-bot/sessions/${encodeURIComponent(id)}`);
+  }
+
+  public async controlDailyBot(id: string, action: DailyBotControlAction): Promise<DailyBotSession> {
+    return this.request(`/daily-bot/sessions/${encodeURIComponent(id)}/${action}`, {
       method: 'POST',
     });
   }

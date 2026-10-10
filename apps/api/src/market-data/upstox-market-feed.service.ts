@@ -24,6 +24,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
   private status: FeedStatus = FeedStatus.DISCONNECTED;
   private subscribedKeys: Set<string> = new Set();
   private quotes: Map<string, QuoteSnapshot> = new Map();
+  private readonly quoteListeners = new Set<(quote: QuoteSnapshot) => void>();
   private lastTickTimestamps: Map<string, number> = new Map(); // Monotonic tick checking
 
   private staleCheckTimer: NodeJS.Timeout | null = null;
@@ -271,6 +272,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
 
       const snapshot = this.decoder.normalizeToQuoteSnapshot(item, false);
       this.quotes.set(key, snapshot);
+      for (const listener of this.quoteListeners) listener(snapshot);
       updatedSnapshots.push(snapshot);
     }
 
@@ -352,6 +354,12 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     return this.quotes.get(key);
   }
 
+  /** Observers receive actual feed/test ticks; bootstrap display quotes are excluded. */
+  public observeQuotes(listener: (quote: QuoteSnapshot) => void): () => void {
+    this.quoteListeners.add(listener);
+    return () => this.quoteListeners.delete(listener);
+  }
+
   public getAllQuotes(): QuoteSnapshot[] {
     return Array.from(this.quotes.values());
   }
@@ -374,6 +382,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
   // Simulator helper: inject custom tick for testing
   public injectSimulatedTick(snapshot: QuoteSnapshot): void {
     this.quotes.set(snapshot.instrumentKey, snapshot);
+    for (const listener of this.quoteListeners) listener(snapshot);
     this.lastTickTimestamps.set(snapshot.instrumentKey, Date.now());
     this.gateway.broadcast('quotes.snapshot', [snapshot]);
   }

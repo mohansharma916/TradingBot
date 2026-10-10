@@ -42,6 +42,7 @@ export const EnvSchema = z.object({
   UPSTOX_HFT_URL: z.string().url().default('https://api-hft.upstox.com/v3'),
   TOKEN_ENCRYPTION_KEY: z.string().min(16).default('32_byte_aes_gcm_token_encryption_key_default'),
   LIVE_EXECUTION_ENABLED: z.coerce.boolean().default(false),
+  DAILY_BOT_STORAGE_PATH: z.string().min(1).optional(),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;

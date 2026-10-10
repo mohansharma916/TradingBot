@@ -37,6 +37,10 @@ import { NotificationsController } from './notifications/notifications.controlle
 import { NotificationsService } from './notifications/notifications.service';
 import { AutonomousController } from './orders/autonomous.controller';
 import { AutonomousExecutionService } from './orders/autonomous-execution.service';
+import { DailyBotController } from './daily-bot/daily-bot.controller';
+import { DailyBotService } from './daily-bot/daily-bot.service';
+import { DailyBotStore } from './daily-bot/daily-bot.store';
+import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.service';
 
 @Module({
   imports: [],
@@ -54,6 +58,7 @@ import { AutonomousExecutionService } from './orders/autonomous-execution.servic
     ReportsController,
     NotificationsController,
     AutonomousController,
+    DailyBotController,
   ],
   providers: [
     EnvService,
@@ -81,6 +86,9 @@ import { AutonomousExecutionService } from './orders/autonomous-execution.servic
     NotificationsService,
     ReportsService,
     AutonomousExecutionService,
+    DailyBotStore,
+    DailyBotService,
+    DailyBotExecutionService,
   ],
   exports: [
     EnvService,
@@ -108,6 +116,9 @@ import { AutonomousExecutionService } from './orders/autonomous-execution.servic
     NotificationsService,
     ReportsService,
     AutonomousExecutionService,
+    DailyBotStore,
+    DailyBotService,
+    DailyBotExecutionService,
   ],
 })
 export class AppModule {}

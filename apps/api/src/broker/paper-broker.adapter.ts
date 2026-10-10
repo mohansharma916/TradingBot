@@ -13,6 +13,7 @@ import {
   QuoteSnapshot,
   ExitProtectionStatus,
   ProtectionResult,
+  DailyBotTrade,
 } from '@trading-bot/contracts';
 import { calculateOptionCharges, ChargeBreakdown } from '@trading-bot/domain';
 import { InstrumentCatalogService } from '../instruments/instrument-catalog.service';
@@ -46,6 +47,8 @@ export interface PlacePaperOrderParams {
   targetPrice?: number;
   estimatedCharges?: number;
   simulatedPartialFill?: boolean;
+  maximumExecutionPrice?: number;
+  disableTarget?: boolean;
 }
 
 /**
@@ -71,9 +74,7 @@ export class PaperBrokerAdapter implements BrokerPort {
     @Inject(InstrumentCatalogService) private readonly catalog: InstrumentCatalogService,
     @Inject(UpstoxMarketFeedService) private readonly feed: UpstoxMarketFeedService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
-  ) {
-    this.seedInitialPositions();
-  }
+  ) {}
 
   async getConnectionHealth(): Promise<BrokerHealth> {
     const feedHealth = this.feed.getFeedHealth();
@@ -123,19 +124,57 @@ export class PaperBrokerAdapter implements BrokerPort {
   }
 
   async getPositions(): Promise<Position[]> {
-    return Array.from(this.positions.values());
+    return Array.from(this.positions.values()).map((position) => ({ ...position }));
   }
 
   public getFills(): OrderFillEvent[] {
     return [...this.fills];
   }
 
+  public getConfirmedExit(orderId: string, buyPrice: number, quantity: number): { exitPrice: number; charges: number; netPnl: number } | undefined {
+    const exits = this.fills.filter((fill) => fill.orderId === orderId && fill.side === OrderSide.SELL);
+    if (exits.reduce((sum, fill) => sum + fill.fillQty, 0) !== quantity) return undefined;
+    let remaining = quantity;
+    let entryCharges = 0;
+    for (const buy of this.fills.filter((fill) => fill.instrumentKey === exits[0]!.instrumentKey && fill.side === OrderSide.BUY)) {
+      const included = Math.min(remaining, buy.fillQty);
+      entryCharges += buy.actualCharges * included / buy.fillQty;
+      remaining -= included;
+      if (remaining === 0) break;
+    }
+    const exitPrice = exits.reduce((sum, fill) => sum + fill.fillPrice * fill.fillQty, 0) / quantity;
+    const charges = Number((entryCharges + exits.reduce((sum, fill) => sum + fill.actualCharges, 0)).toFixed(2));
+    return { exitPrice, charges, netPnl: Number(((exitPrice - buyPrice) * quantity - charges).toFixed(2)) };
+  }
+
+  /** Rehydrate only a durably confirmed simulator entry; never fabricate an unresolved fill. */
+  public restoreConfirmedPosition(trade: DailyBotTrade): void {
+    if (this.positions.size || this.orders.has(trade.orderId) || !trade.reservationId || !trade.openedAt || trade.entryActualCharges === undefined || trade.status !== 'OPEN') throw new Error('Confirmed paper position cannot be restored from incomplete or conflicting metadata.');
+    this.positions.set(trade.instrumentKey, { id: `restored_${trade.orderId}`, instrumentKey: trade.instrumentKey, symbol: trade.symbol, netQuantity: trade.quantity, buyQuantity: trade.quantity, sellQuantity: 0, buyAvgPrice: trade.entryPrice, sellAvgPrice: 0, lastPrice: trade.currentPrice, unrealizedPnl: trade.grossPnl ?? 0, realizedPnl: 0, stopLossPrice: trade.stopPrice, targetPrice: null, lastVerifiedAt: trade.openedAt });
+    this.orders.set(trade.orderId, { id: trade.orderId, intentId: trade.reservationId, brokerOrderId: trade.orderId, tag: 'RESTORED_DAILY_ENTRY', instrumentKey: trade.instrumentKey, side: OrderSide.BUY, orderType: OrderType.MARKET, product: ProductType.I, quantity: trade.quantity, price: trade.entryPrice, status: OrderStatus.FILLED, filledQuantity: trade.quantity, averageFillPrice: trade.entryPrice, createdAt: trade.openedAt, updatedAt: trade.openedAt });
+    const charges = calculateOptionCharges({ buyPrice: trade.entryPrice, sellPrice: 0, quantity: trade.quantity });
+    charges.brokerage = 20;
+    charges.gst = Number((charges.gst - 3.6).toFixed(2));
+    charges.totalRoundTripCharges = trade.entryActualCharges;
+    this.fills.unshift({ id: `restored_fill_${trade.orderId}`, orderId: trade.orderId, instrumentKey: trade.instrumentKey, side: OrderSide.BUY, fillQty: trade.quantity, fillPrice: trade.entryPrice, timestamp: trade.openedAt, estimatedCharges: trade.estimatedCharges, actualCharges: trade.entryActualCharges, charges });
+  }
+
   /**
    * Places and simulates execution of a paper order.
    */
   async placeOrder(params: PlacePaperOrderParams): Promise<OrderAcknowledgement> {
+    const previous = Array.from(this.orders.values()).find((order) => order.intentId === params.intentId);
+    if (previous) {
+      return { orderId: previous.id, tag: previous.tag, status: previous.status === OrderStatus.REJECTED ? 'REJECTED' : 'ACKNOWLEDGED', message: 'Existing paper order returned for this intent.' };
+    }
     const orderId = `ord_paper_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
+    if (!Number.isInteger(params.quantity) || params.quantity <= 0) {
+      return { orderId, tag: params.tag, status: 'REJECTED', message: 'Quantity must be a positive integer.' };
+    }
+    if (params.side === OrderSide.SELL && params.quantity > (this.positions.get(params.instrumentKey)?.netQuantity ?? 0)) {
+      return { orderId, tag: params.tag, status: 'REJECTED', message: 'Exit quantity exceeds the confirmed open position.' };
+    }
 
     // 1. Stale Feed Gate Check
     const quote = this.feed.getQuote(params.instrumentKey);
@@ -177,6 +216,9 @@ export class PaperBrokerAdapter implements BrokerPort {
     const basePrice = quote ? (params.side === OrderSide.BUY ? quote.askPrice : quote.bidPrice) : (params.price || 120.0);
     const slippage = params.side === OrderSide.BUY ? 0.25 : -0.25;
     const executionPrice = Number(Math.max(1.0, basePrice + slippage).toFixed(2));
+    if (params.maximumExecutionPrice !== undefined && executionPrice > params.maximumExecutionPrice) {
+      return { orderId, tag: params.tag, status: 'REJECTED', message: 'Executable ask moved above the reserved entry price; refresh and revalidate the signal.' };
+    }
 
     // 3. Partial Fill or Full Fill Decision
     const isPartial = params.simulatedPartialFill && params.quantity > 25;
@@ -209,6 +251,10 @@ export class PaperBrokerAdapter implements BrokerPort {
       sellPrice: params.side === OrderSide.SELL ? executionPrice : 0,
       quantity: filledQuantity,
     });
+    // A fill executes one leg. Remove the calculator's second brokerage leg and its GST.
+    charges.brokerage = 20;
+    charges.gst = Number((charges.gst - 3.6).toFixed(2));
+    charges.totalRoundTripCharges = Number((charges.totalRoundTripCharges - 23.6).toFixed(2));
 
     const fillEvent: OrderFillEvent = {
       id: `fill_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -283,7 +329,7 @@ export class PaperBrokerAdapter implements BrokerPort {
     quantity: number;
   }): Promise<ProtectionResult> {
     const existing = this.positions.get(req.instrumentKey);
-    if (!existing) {
+    if (!existing || existing.netQuantity !== req.quantity || !Number.isFinite(req.stopLossPrice) || req.stopLossPrice <= 0) {
       return {
         success: false,
         protectionStatus: ExitProtectionStatus.PROTECTION_FAILED,
@@ -294,7 +340,7 @@ export class PaperBrokerAdapter implements BrokerPort {
       };
     }
 
-    existing.stopLossPrice = req.stopLossPrice;
+    existing.stopLossPrice = Math.max(existing.stopLossPrice ?? 0, req.stopLossPrice);
     existing.targetPrice = req.targetPrice;
     existing.lastVerifiedAt = new Date().toISOString();
     this.positions.set(req.instrumentKey, existing);
@@ -309,6 +355,17 @@ export class PaperBrokerAdapter implements BrokerPort {
       confirmedQty: req.quantity,
       message: `Paper GTT protective exits placed successfully (Stop: ₹${req.stopLossPrice}, Target: ₹${req.targetPrice}). Triggers submit limit orders; not a guaranteed stop.`,
     };
+  }
+
+  public tightenProtectiveStop(instrumentKey: string, quantity: number, stopPrice: number): boolean {
+    const position = this.positions.get(instrumentKey);
+    const tick = this.catalog.getInstrument(instrumentKey)?.tickSize ?? 0.05;
+    if (!position || position.netQuantity !== quantity || !Number.isFinite(stopPrice) || stopPrice <= 0 ||
+      stopPrice < (position.stopLossPrice ?? 0) || Math.abs(stopPrice / tick - Math.round(stopPrice / tick)) > 0.00001) return false;
+    position.stopLossPrice = stopPrice;
+    position.lastVerifiedAt = new Date().toISOString();
+    this.gateway.broadcast('position.stop.updated', { instrumentKey, quantity, stopPrice });
+    return true;
   }
 
   private updatePositionFromFill(
@@ -335,7 +392,7 @@ export class PaperBrokerAdapter implements BrokerPort {
           unrealizedPnl: 0,
           realizedPnl: 0,
           stopLossPrice: params.stopLossPrice || Number((fillPrice * 0.92).toFixed(2)),
-          targetPrice: params.targetPrice || Number((fillPrice * 1.12).toFixed(2)),
+          targetPrice: params.disableTarget ? null : params.targetPrice || Number((fillPrice * 1.12).toFixed(2)),
           lastVerifiedAt: new Date().toISOString(),
         });
       } else {
@@ -380,26 +437,8 @@ export class PaperBrokerAdapter implements BrokerPort {
     if (quote.isStale) return true;
     const now = Date.now();
     const quoteTime = new Date(quote.timestamp).getTime();
-    return now - quoteTime > 3000; // 3 seconds staleness limit
+    return !Number.isFinite(quoteTime) || quoteTime > now + 1000 || now - quoteTime > 3000 ||
+      ![quote.bidPrice, quote.askPrice].every((price) => Number.isFinite(price) && price > 0) || quote.bidPrice > quote.askPrice;
   }
 
-  private seedInitialPositions(): void {
-    // Initial sample positions for immediate display
-    this.positions.set('NSE_FO|NIFTY_2026-10-15_25100_CE', {
-      id: 'pos_seed_001',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      symbol: 'NIFTY 25100 CE 2026-10-15',
-      netQuantity: 25,
-      buyQuantity: 25,
-      sellQuantity: 0,
-      buyAvgPrice: 122.5,
-      sellAvgPrice: 0,
-      lastPrice: 126.5,
-      unrealizedPnl: 100.0, // (126.5 - 122.5) * 25
-      realizedPnl: 0,
-      stopLossPrice: 114.0,
-      targetPrice: 136.0,
-      lastVerifiedAt: new Date().toISOString(),
-    });
-  }
 }

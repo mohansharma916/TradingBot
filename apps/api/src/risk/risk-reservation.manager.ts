@@ -24,6 +24,7 @@ export interface ReservationRequest {
   allInRisk: number;
   maxCapitalCap?: number;
   maxTradeRiskCap?: number;
+  maxDailyRiskCap?: number;
 }
 
 export interface ReservationRecord {
@@ -62,6 +63,7 @@ export class RiskReservationManager {
   private activeSignalKeys: Set<string> = new Set();
   private openPositionsCount = 0;
   private killSwitchActive = false;
+  private ledgerTradingDate = this.currentTradingDate();
 
   constructor(
     @Inject(EnvService) private readonly envService: EnvService,
@@ -78,6 +80,10 @@ export class RiskReservationManager {
    * Throws RiskGateViolationError or DuplicateIntentError if safety limits violated.
    */
   public acquireReservation(request: ReservationRequest): ReservationRecord {
+    this.ensureTradingDay();
+    if (![request.capitalRequired, request.allInRisk].every((value) => Number.isFinite(value) && value > 0)) {
+      throw new RiskGateViolationError('Capital and all-in risk must be positive finite amounts.');
+    }
     if (this.killSwitchActive) {
       throw new RiskGateViolationError('Kill switch is ACTIVE: All new trades and reservations are blocked.');
     }
@@ -90,14 +96,14 @@ export class RiskReservationManager {
     }
 
     // 2. Validate against account hard capital limits
-    const maxTradeRisk = request.maxTradeRiskCap || this.maxTradeRiskCap;
+    const maxTradeRisk = Math.min(request.maxTradeRiskCap ?? this.maxTradeRiskCap, this.maxTradeRiskCap);
     if (request.allInRisk > maxTradeRisk) {
       throw new RiskGateViolationError(
         `All-in risk ₹${request.allInRisk.toFixed(2)} exceeds maximum per-trade limit ₹${maxTradeRisk.toFixed(2)}.`,
       );
     }
 
-    if (request.capitalRequired > this.totalAccountCapital) {
+    if (request.capitalRequired > Math.min(request.maxCapitalCap ?? this.totalAccountCapital, this.totalAccountCapital)) {
       throw new RiskGateViolationError(
         `Required capital ₹${request.capitalRequired.toFixed(2)} exceeds total account budget ₹${this.totalAccountCapital}.`,
       );
@@ -114,7 +120,7 @@ export class RiskReservationManager {
     const totalReservedRisk = this.getTotalReservedRisk();
     const remainingDailyRiskBudget = Math.max(
       0,
-      this.dailyDrawdownCap - this.realizedNetDailyLoss - totalReservedRisk,
+      Math.min(request.maxDailyRiskCap ?? this.dailyDrawdownCap, this.dailyDrawdownCap) - this.realizedNetDailyLoss - totalReservedRisk,
     );
 
     if (request.allInRisk > remainingDailyRiskBudget) {
@@ -190,7 +196,10 @@ export class RiskReservationManager {
    */
   public commitReservationToPosition(reservationId: string, actualFilledCapital: number): void {
     const record = this.reservations.get(reservationId);
-    if (!record) return;
+    if (!record || record.status !== 'HELD') return;
+    if (!Number.isFinite(actualFilledCapital) || actualFilledCapital <= 0 || actualFilledCapital > record.reservedCapital) {
+      throw new RiskGateViolationError('Confirmed filled capital must be positive and within its reservation.');
+    }
 
     record.status = 'COMMITTED';
     this.openPositionsCount++;
@@ -200,6 +209,7 @@ export class RiskReservationManager {
     if (diff > 0) {
       this.availableCash = Number((this.availableCash + diff).toFixed(2));
     }
+    record.reservedCapital = actualFilledCapital;
 
     this.reservations.set(reservationId, record);
     this.logger.log(
@@ -247,14 +257,63 @@ export class RiskReservationManager {
     });
   }
 
+  /** Reconcile an owned fill exactly once; rejected exits never release its capital. */
+  public settleReservation(reservationId: string, realizedNetPnl: number): boolean {
+    const record = this.reservations.get(reservationId);
+    if (!record || record.status !== 'COMMITTED' || !Number.isFinite(realizedNetPnl)) return false;
+    this.settleClosedPosition(record.signalKey, record.reservedCapital, realizedNetPnl);
+    return true;
+  }
+
+  public getReservation(reservationId: string): ReservationRecord | undefined {
+    const record = this.reservations.get(reservationId);
+    return record ? { ...record } : undefined;
+  }
+
+  public getOpenPositionsCount(): number {
+    return this.openPositionsCount;
+  }
+
+  public getRealizedNetDailyPnl(): number {
+    return Number((this.realizedNetDailyGain - this.realizedNetDailyLoss).toFixed(2));
+  }
+
+  public getRealizedDailyLoss(): number {
+    return this.realizedNetDailyLoss;
+  }
+
   public getAvailableCash(): number {
+    this.ensureTradingDay();
     return this.availableCash;
+  }
+
+  /** Restore confirmed daily results on startup, before any new reservation can be accepted. */
+  public restoreDailyResults(tradingDate: string, results: { orderId: string; realizedNetPnl: number }[]): void {
+    if (tradingDate !== this.currentTradingDate()) return;
+    if (this.openPositionsCount > 0 || this.getHeldReservationsCount() > 0) throw new RiskGateViolationError('Cannot restore a daily ledger while exposure is active.');
+    const unique = new Map(results.map((result) => [result.orderId, result.realizedNetPnl]));
+    if (Array.from(unique.values()).some((value) => !Number.isFinite(value))) throw new RiskGateViolationError('Confirmed daily results must be finite.');
+    this.realizedNetDailyLoss = Array.from(unique.values()).reduce((total, pnl) => total + Math.max(0, -pnl), 0);
+    this.realizedNetDailyGain = Array.from(unique.values()).reduce((total, pnl) => total + Math.max(0, pnl), 0);
+    this.availableCash = Number((this.totalAccountCapital + this.realizedNetDailyGain - this.realizedNetDailyLoss).toFixed(2));
+    this.ledgerTradingDate = tradingDate;
+  }
+
+  public restoreConfirmedPosition(record: ReservationRecord): void {
+    if (this.reservations.has(record.id)) throw new RiskGateViolationError('A recovered reservation ID is already present.');
+    if (this.openPositionsCount !== 0 || this.getHeldReservationsCount() !== 0 || this.activeSignalKeys.has(record.signalKey)) throw new RiskGateViolationError('Recovered exposure conflicts with an existing position or intent.');
+    if (!Number.isFinite(record.reservedCapital) || record.reservedCapital <= 0 || record.reservedCapital > this.availableCash || record.reservedCapital > this.totalAccountCapital || !Number.isFinite(record.reservedRisk) || record.reservedRisk <= 0 || record.reservedRisk > this.maxTradeRiskCap) throw new RiskGateViolationError('Recovered position has invalid or excessive confirmed capital/risk.');
+    this.reservations.set(record.id, { ...record, status: 'COMMITTED' });
+    this.activeSignalKeys.add(record.signalKey);
+    this.availableCash = Number((this.availableCash - record.reservedCapital).toFixed(2));
+    this.openPositionsCount = 1;
+    this.gateway.broadcast('risk.restored', { reservationId: record.id, availableCash: this.availableCash });
   }
 
   public getTotalReservedCapital(): number {
     let total = 0;
     for (const record of this.reservations.values()) {
-      if (record.status === 'HELD') {
+      if (record.status === 'HELD' || record.status === 'COMMITTED') {
         total += record.reservedCapital;
       }
     }
@@ -264,7 +323,7 @@ export class RiskReservationManager {
   public getTotalReservedRisk(): number {
     let total = 0;
     for (const record of this.reservations.values()) {
-      if (record.status === 'HELD') {
+      if (record.status === 'HELD' || record.status === 'COMMITTED') {
         total += record.reservedRisk;
       }
     }
@@ -283,7 +342,12 @@ export class RiskReservationManager {
     return Array.from(this.reservations.values()).filter((r) => r.status === 'HELD');
   }
 
+  public getActiveReservations(): ReservationRecord[] {
+    return Array.from(this.reservations.values()).filter((record) => record.status !== 'RELEASED').map((record) => ({ ...record }));
+  }
+
   public getRemainingDailyRiskBudget(): number {
+    this.ensureTradingDay();
     return Math.max(
       0,
       Number(
@@ -301,11 +365,23 @@ export class RiskReservationManager {
   }
 
   public resetForNewTradingDay(): void {
+    if (this.openPositionsCount > 0 || this.getHeldReservationsCount() > 0) {
+      throw new RiskGateViolationError('Cannot reset daily risk while positions or pending reservations remain open.');
+    }
     this.realizedNetDailyLoss = 0;
     this.realizedNetDailyGain = 0;
     this.reservations.clear();
     this.activeSignalKeys.clear();
     this.openPositionsCount = 0;
     this.availableCash = this.totalAccountCapital;
+    this.ledgerTradingDate = this.currentTradingDate();
+  }
+
+  private ensureTradingDay(): void {
+    if (this.ledgerTradingDate !== this.currentTradingDate() && this.openPositionsCount === 0 && this.getHeldReservationsCount() === 0) this.resetForNewTradingDay();
+  }
+
+  private currentTradingDate(): string {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
   }
 }

@@ -120,7 +120,7 @@ export class InstrumentCatalogService implements OnModuleInit {
   private addInstrument(inst: Instrument) {
     this.instruments.set(inst.instrumentKey, inst);
     const existing = this.underlyingIndex.get(inst.underlying) || [];
-    existing.push(inst.instrumentKey);
+    if (!existing.includes(inst.instrumentKey)) existing.push(inst.instrumentKey);
     this.underlyingIndex.set(inst.underlying, existing);
   }
 

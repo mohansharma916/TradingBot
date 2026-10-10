@@ -1,7 +1,18 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useWorkstation } from '../hooks/useWorkstation.ts';
 import { RiskState, TradeMode } from '@trading-bot/contracts';
+
+vi.mock('../services/api', () => ({
+  apiClient: {
+    armRisk: vi.fn().mockRejectedValue(new Error('offline')),
+    disarmRisk: vi.fn().mockRejectedValue(new Error('offline')),
+    resetKillSwitch: vi.fn().mockRejectedValue(new Error('offline')),
+    emergencyStop: vi.fn().mockRejectedValue(new Error('offline')),
+    flattenPositions: vi.fn().mockRejectedValue(new Error('offline')),
+    getRiskStatus: vi.fn().mockRejectedValue(new Error('offline')),
+  },
+}));
 
 describe('useWorkstation Hook', () => {
   it('defaults to PAPER mode and DISARMED risk state', () => {

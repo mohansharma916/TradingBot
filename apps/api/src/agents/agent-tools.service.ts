@@ -33,12 +33,15 @@ export class AgentSecurityViolationError extends Error {
 export class AgentToolsService {
   // Candle buffer per instrument for historical closed bars (5m timeframe)
   private closedCandleStore: Map<string, Candle[]> = new Map();
+  private verifiedClosedCandleStore: Map<string, Candle[]> = new Map();
+  private formingCandles = new Map<string, { bucket: number; candle: Candle; volumeAtOpen: number; complete: boolean }>();
 
   constructor(
     @Inject(InstrumentCatalogService) private readonly catalog: InstrumentCatalogService,
     @Inject(UpstoxMarketFeedService) private readonly feed: UpstoxMarketFeedService,
   ) {
     this.seedHistoricalCandles();
+    this.feed.observeQuotes?.((quote) => this.collectClosedCandle(quote));
   }
 
   /**
@@ -60,7 +63,7 @@ export class AgentToolsService {
       case AgentToolName.CALCULATE_INDICATORS:
         return this.calculateIndicators(input);
       case AgentToolName.EVALUATE_STRATEGY:
-        return this.evaluateStrategy(input.strategy, input.instrumentKey);
+        return this.evaluateStrategy(input.strategy, input.instrumentKey, input.requireFreshQuotes);
       default:
         throw new BadRequestException(`Unhandled read-only tool: ${toolName}`);
     }
@@ -70,7 +73,7 @@ export class AgentToolsService {
    * Tool: scan_universe
    * Scans available F&O instruments, evaluates live liquidity, calculates spread %, and ranks candidates.
    */
-  public async scanUniverse(input: ToolScanUniverseInput): Promise<ToolScanUniverseOutput> {
+  public async scanUniverse(input: ToolScanUniverseInput & { requireFreshQuotes?: boolean }): Promise<ToolScanUniverseOutput> {
     const underlying = input.underlying || 'NIFTY';
     const minVolume = input.minVolume ?? 1000;
     const maxSpreadPct = input.maxSpreadPct ?? 1.0;
@@ -94,7 +97,8 @@ export class AgentToolsService {
       }
 
       // Fetch or compute quote
-      const quote = this.feed.getQuote(inst.instrumentKey) || this.generateFallbackQuote(inst, spotPrice);
+      const quote = this.feed.getQuote(inst.instrumentKey) || (input.requireFreshQuotes ? undefined : this.generateFallbackQuote(inst, spotPrice));
+      if (!quote || (input.requireFreshQuotes && !this.isFreshQuote(quote))) continue;
 
       const bid = quote.bidPrice > 0 ? quote.bidPrice : quote.lastPrice;
       const ask = quote.askPrice > 0 ? quote.askPrice : quote.lastPrice;
@@ -139,9 +143,9 @@ export class AgentToolsService {
    * Pulls confirmed closed bars, checks indicator warm-up, and calculates EMA, RSI, and VWAP.
    */
   public async calculateIndicators(
-    input: ToolCalculateIndicatorsInput,
+    input: ToolCalculateIndicatorsInput & { requireFreshQuotes?: boolean },
   ): Promise<ToolCalculateIndicatorsOutput> {
-    const candles = this.getClosedCandles(input.instrumentKey);
+    const candles = this.getClosedCandles(input.instrumentKey, input.requireFreshQuotes);
     const emaPeriod = input.emaPeriod ?? 20;
     const rsiPeriod = input.rsiPeriod ?? 14;
 
@@ -191,18 +195,22 @@ export class AgentToolsService {
   public async evaluateStrategy(
     strategy: StrategyConfig,
     candidateInstrumentKey: string,
+    requireFreshQuotes = false,
   ): Promise<StrategyEvaluationResult> {
     const underlyingKey =
       strategy.underlying === 'NIFTY' ? 'NSE_INDEX|Nifty 50' : 'NSE_INDEX|Nifty Bank';
-    const spotCandles = this.getClosedCandles(underlyingKey);
+    const spotCandles = this.getClosedCandles(underlyingKey, requireFreshQuotes);
     const candidateQuote =
       this.feed.getQuote(candidateInstrumentKey) ||
-      this.generateFallbackQuote({ instrumentKey: candidateInstrumentKey } as any, 25100);
+      (requireFreshQuotes ? undefined : this.generateFallbackQuote({ instrumentKey: candidateInstrumentKey } as any, 25100));
+    if (!candidateQuote || (requireFreshQuotes && !this.isFreshQuote(candidateQuote))) {
+      return { passed: false, signal: 'NONE', confidence: 0, reasons: ['Fresh executable option quote is unavailable.'], metrics: { closedCandlesCount: spotCandles.length, isWarmedUp: false } };
+    }
 
     const now = new Date();
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const currentTimeIst = `${hours}:${minutes}`;
+    const currentTimeIst = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).format(now);
 
     return evaluateStrategyRules({
       strategy,
@@ -212,12 +220,40 @@ export class AgentToolsService {
     });
   }
 
-  public getClosedCandles(instrumentKey: string): Candle[] {
-    return this.closedCandleStore.get(instrumentKey) || [];
+  public getClosedCandles(instrumentKey: string, verifiedOnly = false): Candle[] {
+    return (verifiedOnly ? this.verifiedClosedCandleStore : this.closedCandleStore).get(instrumentKey) || [];
   }
 
   public setClosedCandles(instrumentKey: string, candles: Candle[]): void {
     this.closedCandleStore.set(instrumentKey, candles);
+    this.verifiedClosedCandleStore.set(instrumentKey, candles);
+  }
+
+  private isFreshQuote(quote: QuoteSnapshot): boolean {
+    const age = Date.now() - Date.parse(quote.timestamp);
+    return !quote.isStale && Number.isFinite(age) && age >= -1000 && age <= 3000 && quote.bidPrice > 0 && quote.askPrice >= quote.bidPrice;
+  }
+
+  /** Build 5m closed bars from observed feed data. Never use seeded analytical examples for execution. */
+  private collectClosedCandle(quote: QuoteSnapshot): void {
+    if (!quote.instrumentKey.startsWith('NSE_INDEX|') || !this.isFreshQuote(quote) || !Number.isFinite(quote.lastPrice) || quote.lastPrice <= 0) return;
+    const timestamp = Date.parse(quote.timestamp);
+    const bucket = Math.floor(timestamp / 300000) * 300000;
+    const previous = this.formingCandles.get(quote.instrumentKey);
+    if (previous && bucket < previous.bucket) return;
+    if (!previous || bucket > previous.bucket) {
+      if (previous?.complete && bucket === previous.bucket + 300000) {
+        const bars = this.verifiedClosedCandleStore.get(quote.instrumentKey) ?? [];
+        bars.push({ ...previous.candle, timestamp: new Date(previous.bucket + 300000).toISOString() });
+        this.verifiedClosedCandleStore.set(quote.instrumentKey, bars.slice(-200));
+      }
+      this.formingCandles.set(quote.instrumentKey, { bucket, complete: timestamp - bucket < 3000, volumeAtOpen: quote.volume, candle: { timestamp: new Date(bucket + 300000).toISOString(), open: quote.lastPrice, high: quote.lastPrice, low: quote.lastPrice, close: quote.lastPrice, volume: 0 } });
+      return;
+    }
+    previous.candle.high = Math.max(previous.candle.high, quote.lastPrice);
+    previous.candle.low = Math.min(previous.candle.low, quote.lastPrice);
+    previous.candle.close = quote.lastPrice;
+    previous.candle.volume = Math.max(0, quote.volume - previous.volumeAtOpen);
   }
 
   private seedHistoricalCandles(): void {

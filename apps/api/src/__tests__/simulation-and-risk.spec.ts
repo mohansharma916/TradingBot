@@ -190,8 +190,8 @@ describe('Phase 3: Simulation, Risk Engine & Paper Broker', () => {
       const fill = fills[0]!;
       expect(fill.fillQty).toBe(25);
       expect(fill.fillPrice).toBeCloseTo(125.45, 1); // Ask + 0.25 slippage
-      expect(fill.charges.brokerage).toBe(40.0); // ₹20 * 2 legs
-      expect(fill.actualCharges).toBeGreaterThan(45.0); // Brokerage + STT + GST + Exchange
+      expect(fill.charges.brokerage).toBe(20.0); // One executed buy leg
+      expect(fill.actualCharges).toBeGreaterThan(23.0);
     });
 
     it('handles simulated partial fills and updates order status to PARTIALLY_FILLED', async () => {
@@ -285,7 +285,7 @@ describe('Phase 3: Simulation, Risk Engine & Paper Broker', () => {
       const positions = await ordersService.getPositions();
       const pos = positions.find((p) => p.instrumentKey === proposal.instrumentKey);
       expect(pos).toBeDefined();
-      expect(pos?.netQuantity).toBe(50); // 25 seeded + 25 newly filled
+      expect(pos?.netQuantity).toBe(25);
     });
   });
 });

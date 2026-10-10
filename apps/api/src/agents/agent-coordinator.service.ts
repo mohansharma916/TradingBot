@@ -29,6 +29,7 @@ export class AgentCoordinatorService {
    */
   public async runStrategyWorkflow(
     strategy: StrategyConfig,
+    options: { strictMarketData?: boolean } = {},
   ): Promise<{ task: AgentTask; proposal?: TradeProposal }> {
     const startedAt = new Date().toISOString();
     const taskId = `task_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -46,7 +47,7 @@ export class AgentCoordinatorService {
 
     try {
       // 1. Dispatch Market Scanner
-      const scanResult = await this.scanner.scanUniverse(strategy);
+      const scanResult = await this.scanner.scanUniverse(strategy, options.strictMarketData);
       task.toolsInvoked.push(scanResult.toolInvocation);
 
       if (scanResult.topCandidates.length === 0) {
@@ -60,7 +61,7 @@ export class AgentCoordinatorService {
       const candidate = scanResult.topCandidates[0]!;
 
       // 2. Dispatch Strategy Analyst on top liquid candidate
-      const analysisResult = await this.analyst.analyzeCandidate(strategy, candidate);
+      const analysisResult = await this.analyst.analyzeCandidate(strategy, candidate, options.strictMarketData);
       for (const invocation of analysisResult.toolInvocations) {
         task.toolsInvoked.push(invocation);
       }

@@ -34,6 +34,7 @@ export class StrategyAnalystAgent {
   public async analyzeCandidate(
     strategy: StrategyConfig,
     candidate: ScannedInstrumentCandidate,
+    requireFreshQuotes = false,
   ): Promise<StrategyAnalystResult> {
     const toolInvocations: Array<{
       tool: AgentToolName;
@@ -50,6 +51,7 @@ export class StrategyAnalystAgent {
       timeframe: strategy.timeframe,
       emaPeriod: strategy.entry?.emaPeriod ?? 20,
       rsiPeriod: strategy.entry?.rsiPeriod ?? 14,
+      requireFreshQuotes,
     };
 
     const indicatorOutput = await this.tools.executeTool(
@@ -66,6 +68,7 @@ export class StrategyAnalystAgent {
         ema: indicatorOutput.ema,
         rsi: indicatorOutput.rsi,
         vwap: indicatorOutput.vwap,
+        lastClosedCandleTime: indicatorOutput.lastClosedCandleTime,
       },
     });
 
@@ -92,6 +95,7 @@ export class StrategyAnalystAgent {
     const evaluateInput = {
       strategy,
       instrumentKey: candidate.instrumentKey,
+      requireFreshQuotes,
     };
 
     const evaluation: StrategyEvaluationResult = await this.tools.executeTool(

@@ -7,6 +7,7 @@ import {
   Position,
   ProductType,
 } from '@trading-bot/contracts';
+import { randomUUID } from 'node:crypto';
 import { PaperBrokerAdapter, OrderFillEvent } from '../broker/paper-broker.adapter';
 import { RiskReservationManager } from '../risk/risk-reservation.manager';
 import { ProposalsService } from '../proposals/proposals.service';
@@ -128,7 +129,7 @@ export class OrdersService {
     }
 
     const ack = await this.broker.placeOrder({
-      intentId: `exit_${Date.now()}`,
+      intentId: `exit_${randomUUID()}`,
       tag: 'EXIT_MANUAL',
       instrumentKey: position.instrumentKey,
       side: OrderSide.SELL,
@@ -137,13 +138,13 @@ export class OrdersService {
       quantity: position.netQuantity,
     });
 
-    const initialCapital = position.buyAvgPrice * position.netQuantity;
-    const estPnl = (position.lastPrice - position.buyAvgPrice) * position.netQuantity - 58.0;
-    this.reservationManager.settleClosedPosition(
-      `pos_${instrumentKey}`,
-      initialCapital,
-      estPnl,
-    );
+    if (ack.status === 'REJECTED') return { success: false, message: `Exit rejected: ${ack.message}. Position and reserved risk remain open.` };
+    const confirmed = this.broker.getConfirmedExit(ack.orderId, position.buyAvgPrice, position.netQuantity);
+    if (!confirmed) return { success: false, message: 'Exit does not have a confirmed complete fill; position risk remains reserved.' };
+    const realizedPnl = confirmed.netPnl;
+    const reservation = this.reservationManager.getActiveReservations().find((record) => record.instrumentKey === instrumentKey);
+    if (reservation?.status === 'COMMITTED') this.reservationManager.settleReservation(reservation.id, realizedPnl);
+    else if (reservation) this.reservationManager.settleClosedPosition(reservation.signalKey, reservation.reservedCapital, realizedPnl);
 
     return {
       success: true,

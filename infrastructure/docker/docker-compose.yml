@@ -37,6 +37,9 @@ services:
       UPSTOX_API_KEY: ${UPSTOX_API_KEY:-mock_key}
       UPSTOX_API_SECRET: ${UPSTOX_API_SECRET:-mock_secret}
       UPSTOX_EGRESS_IP: ${UPSTOX_EGRESS_IP:-127.0.0.1}
+      DAILY_BOT_STORAGE_PATH: /app/.data/daily-bot.json
+    volumes:
+      - dailybotdata:/app/.data
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,3 +64,4 @@ services:
 
 volumes:
   pgdata:
+  dailybotdata:

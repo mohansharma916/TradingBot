@@ -30,11 +30,12 @@ export class MarketScannerAgent {
    * Scans universe for options contracts meeting liquidity and spread criteria.
    * Can ONLY invoke read-only tool: scan_universe.
    */
-  public async scanUniverse(strategy: StrategyConfig): Promise<MarketScannerResult> {
+  public async scanUniverse(strategy: StrategyConfig, requireFreshQuotes = false): Promise<MarketScannerResult> {
     const input = {
       underlying: strategy.underlying,
       minVolume: strategy.entry?.minVolume ?? 1000,
       maxSpreadPct: strategy.entry?.maxBidAskSpreadPct ?? 1.0,
+      requireFreshQuotes,
     };
 
     const output = await this.tools.executeTool(AgentToolName.SCAN_UNIVERSE, input);

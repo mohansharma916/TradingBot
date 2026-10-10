@@ -57,10 +57,10 @@ export class RiskService {
       reservedCapital,
       maxAllInTradeLoss: cfg.MAX_ALL_IN_TRADE_RISK_INR,
       dailyLossCap: cfg.MAX_DAILY_DRAWDOWN_INR,
-      realizedNetDailyPnl: 0,
+      realizedNetDailyPnl: this.reservationManager.getRealizedNetDailyPnl(),
       unrealizedDailyPnl: this.unrealizedDailyPnl,
       remainingDailyRiskBudget: remainingBudget,
-      openPositionsCount: this.reservationManager.getHeldReservationsCount(),
+      openPositionsCount: this.reservationManager.getOpenPositionsCount(),
       maxOpenPositions: 1,
       dailyTargetProfit: cfg.TARGET_DAILY_PROFIT_INR,
       armedUntil: this.armedUntil,
@@ -123,13 +123,16 @@ export class RiskService {
     const activePositions = positions.filter((p) => p.netQuantity > 0);
 
     if (activePositions.length === 0) {
+      this.currentState = RiskState.DISARMED;
+      this.armedUntil = null;
+      this.unrealizedDailyPnl = 0;
       return {
         success: true,
         positionsClosed: 0,
         exitOrders: [],
         totalRealizedNetPnl: 0,
         totalActualCharges: 0,
-        message: 'No open positions to flatten. Portfolio is flat.',
+        message: 'No open positions to flatten. Portfolio is flat. System DISARMED.',
         disclaimer: 'Exits submitted as market orders; confirmed broker fill events finalize closed ledger state.',
       };
     }
@@ -139,24 +142,8 @@ export class RiskService {
     let totalActualCharges = 0;
 
     for (const pos of activePositions) {
-      const exitPrice = pos.lastPrice > 0 ? pos.lastPrice : pos.buyAvgPrice;
-      const orderId = `ord_flatten_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-
-      // Calculate statutory charges for exit
-      const charges = calculateOptionCharges({
-        buyPrice: pos.buyAvgPrice,
-        sellPrice: exitPrice,
-        quantity: pos.netQuantity,
-      });
-
-      const grossPnl = Number(((exitPrice - pos.buyAvgPrice) * pos.netQuantity).toFixed(2));
-      const netPnl = Number((grossPnl - charges.totalRoundTripCharges).toFixed(2));
-
-      totalRealizedNetPnl += netPnl;
-      totalActualCharges += charges.totalRoundTripCharges;
-
       // Submit explicit market sell order to broker
-      await broker.placeOrder({
+      const ack = await broker.placeOrder({
         intentId: `intent_flatten_${Date.now()}_${pos.instrumentKey}`,
         tag: 'FLATTEN_ALL',
         instrumentKey: pos.instrumentKey,
@@ -164,16 +151,29 @@ export class RiskService {
         orderType: OrderType.MARKET,
         product: ProductType.I,
         quantity: pos.netQuantity,
-        price: exitPrice,
       });
+
+      const confirmed = ack.status === 'REJECTED' ? undefined : (await broker.getOrders()).find((order) => order.id === ack.orderId && order.filledQuantity === pos.netQuantity && order.averageFillPrice > 0);
+      if (!confirmed) {
+        exitOrders.push({ orderId: ack.orderId, instrumentKey: pos.instrumentKey, symbol: pos.symbol, quantity: pos.netQuantity, exitPrice: 0, realizedPnl: 0, charges: 0, status: ack.status === 'REJECTED' ? OrderStatus.REJECTED : OrderStatus.ACKNOWLEDGED });
+        continue;
+      }
+      const exitPrice = confirmed.averageFillPrice;
+      const charges = calculateOptionCharges({ buyPrice: pos.buyAvgPrice, sellPrice: exitPrice, quantity: pos.netQuantity });
+      const paperExit = broker instanceof PaperBrokerAdapter ? broker.getConfirmedExit(ack.orderId, pos.buyAvgPrice, pos.netQuantity) : undefined;
+      if (paperExit) charges.totalRoundTripCharges = paperExit.charges;
+      const netPnl = paperExit?.netPnl ?? Number(((exitPrice - pos.buyAvgPrice) * pos.netQuantity - charges.totalRoundTripCharges).toFixed(2));
+      totalRealizedNetPnl += netPnl;
+      totalActualCharges += charges.totalRoundTripCharges;
 
       // Settle reservation in risk reservation manager
       const activeReservation = this.reservationManager
-        .getHeldReservations()
+        .getActiveReservations()
         .find((r) => r.instrumentKey === pos.instrumentKey);
 
       if (activeReservation) {
-        this.reservationManager.settleClosedPosition(
+        if (activeReservation.status === 'COMMITTED') this.reservationManager.settleReservation(activeReservation.id, netPnl);
+        else this.reservationManager.settleClosedPosition(
           activeReservation.signalKey,
           activeReservation.reservedCapital,
           netPnl,
@@ -181,7 +181,7 @@ export class RiskService {
       }
 
       exitOrders.push({
-        orderId,
+        orderId: ack.orderId,
         instrumentKey: pos.instrumentKey,
         symbol: pos.symbol,
         quantity: pos.netQuantity,
@@ -209,12 +209,12 @@ export class RiskService {
     );
 
     return {
-      success: true,
-      positionsClosed: exitOrders.length,
+      success: exitOrders.every((order) => order.status === OrderStatus.CLOSED),
+      positionsClosed: exitOrders.filter((order) => order.status === OrderStatus.CLOSED).length,
       exitOrders,
       totalRealizedNetPnl: Number(totalRealizedNetPnl.toFixed(2)),
       totalActualCharges: Number(totalActualCharges.toFixed(2)),
-      message: `Flattened ${exitOrders.length} position(s). Reason: '${reason}'. Total net P&L: ₹${totalRealizedNetPnl.toFixed(2)}. System DISARMED.`,
+      message: `${exitOrders.filter((order) => order.status === OrderStatus.CLOSED).length} confirmed closed position(s); ${exitOrders.filter((order) => order.status !== OrderStatus.CLOSED).length} exit(s) pending or rejected. Reason: '${reason}'. System DISARMED.`,
       disclaimer: 'Exits submitted as market orders; confirmed broker fill events finalize closed ledger state.',
     };
   }

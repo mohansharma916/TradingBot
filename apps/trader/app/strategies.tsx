@@ -330,9 +330,10 @@ export default function StrategiesScreen() {
     try {
       const res = await apiClient.armAutonomous({
         strategyId: selectedStrategy.id,
-        durationMinutes: armDurationMinutes,
-        maxTradesSession: maxTradesCap,
-        confirmationToken: confirmationCode.trim(),
+        windowMinutes: armDurationMinutes,
+        maxSessionTrades: maxTradesCap,
+        confirmationCode: confirmationCode.trim(),
+        operatorConsent,
       });
       setSessionStatus(res);
       setStrategies((prev) =>

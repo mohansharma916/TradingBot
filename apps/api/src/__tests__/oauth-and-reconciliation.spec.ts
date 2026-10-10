@@ -236,6 +236,7 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
     });
 
     it('detects position quantity divergence between broker and app', async () => {
+      await paperBroker.placeOrder({ intentId: 'position_divergence_entry', tag: 'TEST', instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE', side: OrderSide.BUY, orderType: OrderType.MARKET, product: ProductType.I, quantity: 25 });
       const localPositions = await paperBroker.getPositions();
       const basePos = localPositions[0];
 

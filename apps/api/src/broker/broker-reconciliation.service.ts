@@ -1,14 +1,16 @@
-import { Injectable, Inject, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import { Injectable, Inject, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { PaperBrokerAdapter } from './paper-broker.adapter';
 import { UpstoxBrokerAdapter } from './upstox-broker.adapter';
 import { RiskReservationManager } from '../risk/risk-reservation.manager';
 import { UpstoxOAuthService } from './upstox-oauth.service';
 import { EventsGateway } from '../websocket/events.gateway';
+import { EnvService } from '../config/env.service';
 import {
   ReconciliationReport,
   ReconciliationDiscrepancy,
   Position,
   BrokerOrder,
+  TradeMode,
 } from '@trading-bot/contracts';
 
 @Injectable()
@@ -22,6 +24,7 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
     @Inject(RiskReservationManager) private readonly riskReservationManager: RiskReservationManager,
     @Inject(UpstoxOAuthService) private readonly oauthService: UpstoxOAuthService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
+    @Optional() @Inject(EnvService) private readonly envService?: EnvService,
   ) {}
 
   /**
@@ -54,13 +57,17 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
       if (options.mockBrokerPositions) {
         brokerPositions = options.mockBrokerPositions;
       } else {
-        brokerPositions = await this.upstoxBroker.getPositions();
+        brokerPositions = this.envService?.config.SYSTEM_MODE === TradeMode.APPROVAL || this.envService?.config.SYSTEM_MODE === TradeMode.AUTO
+          ? await this.upstoxBroker.getPositions()
+          : await this.localBroker.getPositions();
       }
 
       if (options.mockBrokerOrders) {
         brokerOrders = options.mockBrokerOrders;
       } else {
-        brokerOrders = await this.upstoxBroker.getOrders();
+        brokerOrders = this.envService?.config.SYSTEM_MODE === TradeMode.APPROVAL || this.envService?.config.SYSTEM_MODE === TradeMode.AUTO
+          ? await this.upstoxBroker.getOrders()
+          : await this.localBroker.getOrders();
       }
     } catch (err: any) {
       this.logger.warn(`[BrokerReconciliation] Remote broker read degraded: ${err.message}`);

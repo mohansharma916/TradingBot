@@ -19,6 +19,9 @@ import {
   TradeMode,
   AlertSeverity,
   OrderStatus,
+  OrderSide,
+  OrderType,
+  ProductType,
 } from '@trading-bot/contracts';
 
 describe('Operational Resilience & Diagnostics (Phase 6)', () => {
@@ -67,7 +70,8 @@ describe('Operational Resilience & Diagnostics (Phase 6)', () => {
     const tokenStorage = new TokenStorageService(envService);
     const upstoxBroker = new UpstoxBrokerAdapter(envService, catalogService, tokenStorage);
 
-    // PaperBroker starts with a seeded position for 'NSE_FO|NIFTY_2026-10-15_25100_CE'
+    // Open an actual paper fill before exercising the flatten control.
+    await paperBroker.placeOrder({ intentId: 'flatten_test_entry', tag: 'TEST', instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE', side: OrderSide.BUY, orderType: OrderType.MARKET, product: ProductType.I, quantity: 25 });
     const initialPositions = await paperBroker.getPositions();
     expect(initialPositions.length).toBeGreaterThan(0);
     const seededKey = initialPositions[0]!.instrumentKey;

@@ -44,7 +44,7 @@ export default function ProposalsScreen() {
     },
   ]);
 
-  const [tasks] = useState<AgentTask[]>([
+  const [tasks, setTasks] = useState<AgentTask[]>([
     {
       id: 'task_1001_coord',
       agentType: AgentType.COORDINATOR,
