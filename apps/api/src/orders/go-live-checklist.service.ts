@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
 import { TokenStorageService } from '../broker/token-storage.service';
 import {
@@ -14,8 +14,8 @@ export class GoLiveChecklistService {
   private signedOffAt: string | null = null;
 
   constructor(
-    private readonly envService: EnvService,
-    private readonly tokenStorage: TokenStorageService,
+    @Inject(EnvService) private readonly envService: EnvService,
+    @Inject(TokenStorageService) private readonly tokenStorage: TokenStorageService,
   ) {
     this.initializeChecklist();
   }

@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@babel/runtime": "^8.0.7",
     "@trading-bot/contracts": "workspace:*"
   },
   "peerDependencies": {

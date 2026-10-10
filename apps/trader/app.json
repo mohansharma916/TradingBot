@@ -4,7 +4,6 @@
     "slug": "fo-trading-workstation",
     "version": "1.0.0",
     "orientation": "default",
-    "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "scheme": "fotrader",
     "splash": {
@@ -15,13 +14,9 @@
       "bundleIdentifier": "com.fotrading.workstation"
     },
     "android": {
-      "adaptiveIcon": {
-        "backgroundColor": "#090D16"
-      },
       "package": "com.fotrading.workstation"
     },
     "web": {
-      "favicon": "./assets/favicon.png",
       "bundler": "metro"
     },
     "plugins": [

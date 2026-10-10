@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
 import crypto from 'node:crypto';
 
@@ -28,7 +28,7 @@ export class TokenStorageService {
   private readonly algorithm = 'aes-256-gcm';
   private readonly encryptionKey: Buffer;
 
-  constructor(private readonly envService: EnvService) {
+  constructor(@Inject(EnvService) private readonly envService: EnvService) {
     const rawKey = this.envService.config.TOKEN_ENCRYPTION_KEY || 'default_32_byte_aes_gcm_token_encryption_key';
     // Derive a fixed 32-byte key using SHA-256
     this.encryptionKey = crypto.createHash('sha256').update(rawKey).digest();
