@@ -34,4 +34,9 @@ export class StrategiesController {
   runAgentScan(@Param('id') id: string) {
     return this.strategiesService.runAgentScan(id);
   }
+
+  @Post(':id/backtest')
+  runBacktest(@Param('id') id: string, @Body() body: any) {
+    return this.strategiesService.runBacktest(id, body);
+  }
 }

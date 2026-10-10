@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'expo-router';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
 import {
@@ -7,1512 +7,1035 @@ import {
   TradeMode,
   AllowedOptionType,
   MoneynessType,
-  AutonomousReadinessReport,
-  AutonomousSessionStatus,
-  AutonomousExecutionLog,
+  BacktestResult,
 } from '@trading-bot/contracts';
-import { calculateStrategyVersionHash } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
+import {
+  loadSavedDraft,
+  saveDraftToStorage,
+  createDailyBotDraft,
+  tradingDateInIst,
+  StoredDailyBotDraft,
+} from '../src/features/daily-bot/config';
 
 export default function StrategiesScreen() {
   const router = useRouter();
-  const [dailyDraftDate, setDailyDraftDate] = useState<string | null>(null);
+  const backtestRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      try {
-        const raw = window.localStorage.getItem('TRADING_BOT_DAILY_DRAFT');
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed?.draft?.tradingDate) {
-            setDailyDraftDate(parsed.draft.tradingDate);
-          }
-        }
-      } catch {}
-    }
-  }, []);
-  const [strategies, setStrategies] = useState<StrategyConfig[]>([
-    {
-      id: '550e8400-e29b-41d4-a716-446655440002',
-      name: 'NIFTY EMA20 RSI Long Call',
-      version: 1,
-      versionHash: 'v1-337f4ea9',
-      status: StrategyStatus.PAPER_ACTIVE,
-      tradeMode: TradeMode.PAPER,
-      market: 'NSE_FO',
-      underlying: 'NIFTY',
-      allowedInstruments: [AllowedOptionType.LONG_CALL],
-      timeframe: '5m',
-      session: { start: '09:25', lastEntry: '14:45', timezone: 'Asia/Kolkata' },
-      entry: {
-        emaPeriod: 20,
-        rsiPeriod: 14,
-        rsiThreshold: 55,
-        maxBidAskSpreadPct: 1.0,
-        minVolume: 1000,
-      },
-      selection: {
-        expiry: 'NEAREST_ELIGIBLE',
-        moneyness: MoneynessType.ATM,
-        minVolume: 1000,
-      },
-      risk: {
-        maxCapitalInr: 10000,
-        maxAllInTradeLossInr: 200,
-        maxAllInDailyLossInr: 600,
-        maxOpenPositions: 1,
-        maxTradesPerDay: 3,
-        targetNetProfitInr: 300,
-        maxRoundTripCostBudgetInr: 60,
-      },
-      exit: {
-        stopBasis: 'OPTION_PREMIUM',
-        marketCutoff: '15:10',
-      },
-      maxCapitalInr: 10000,
-      maxAllInTradeLossInr: 200,
-      maxAllInDailyLossInr: 600,
-      targetNetProfitInr: 300,
-      maxRoundTripCostBudgetInr: 60,
-      maxOpenPositions: 1,
-      requiresApproval: true,
-    },
-  ]);
+  // Daily Bot continuity state
+  const [dailyDraft, setDailyDraft] = useState<StoredDailyBotDraft | null>(null);
 
-  const [versionHistory, setVersionHistory] = useState<Record<string, StrategyConfig[]>>({
-    '550e8400-e29b-41d4-a716-446655440002': [
-      {
-        id: '550e8400-e29b-41d4-a716-446655440002',
-        name: 'NIFTY EMA20 RSI Long Call (v1)',
-        version: 1,
-        versionHash: 'v1-337f4ea9',
-        status: StrategyStatus.PAPER_ACTIVE,
-        tradeMode: TradeMode.PAPER,
-        market: 'NSE_FO',
-        underlying: 'NIFTY',
-        allowedInstruments: [AllowedOptionType.LONG_CALL],
-        timeframe: '5m',
-        session: { start: '09:25', lastEntry: '14:45', timezone: 'Asia/Kolkata' },
-        entry: { emaPeriod: 20, rsiPeriod: 14, rsiThreshold: 55, maxBidAskSpreadPct: 1.0, minVolume: 1000 },
-        selection: { expiry: 'NEAREST_ELIGIBLE', moneyness: MoneynessType.ATM, minVolume: 1000 },
-        risk: { maxCapitalInr: 10000, maxAllInTradeLossInr: 200, maxAllInDailyLossInr: 600, maxOpenPositions: 1, maxTradesPerDay: 3, targetNetProfitInr: 300, maxRoundTripCostBudgetInr: 60 },
-        exit: { stopBasis: 'OPTION_PREMIUM', marketCutoff: '15:10' },
-        maxCapitalInr: 10000,
-        maxAllInTradeLossInr: 200,
-        maxAllInDailyLossInr: 600,
-        targetNetProfitInr: 300,
-        maxRoundTripCostBudgetInr: 60,
-        maxOpenPositions: 1,
-        requiresApproval: true,
-      },
-    ],
-  });
+  // Strategy list & active selection
+  const [strategies, setStrategies] = useState<StrategyConfig[]>([]);
+  const [selectedStrategyId, setSelectedStrategyId] = useState<string>('');
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
 
-  const [isEditorOpen, setIsEditorOpen] = useState(false);
-  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
-  const [isReadinessModalOpen, setIsReadinessModalOpen] = useState(false);
-  const [isArmingModalOpen, setIsArmingModalOpen] = useState(false);
-  const [selectedStrategyId] = useState<string>('550e8400-e29b-41d4-a716-446655440002');
-  const [isScanning, setIsScanning] = useState(false);
-  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  // Backtest state
+  const [backtestDays, setBacktestDays] = useState<number>(14);
+  const [backtestCapital, setBacktestCapital] = useState<number>(10000);
+  const [backtestUnderlying, setBacktestUnderlying] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
+  const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
+  const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
 
-  // --- Phase 7: Bounded Autonomous Execution State ---
-  const [readiness, setReadiness] = useState<AutonomousReadinessReport>({
-    isEligibleForAuto: true,
-    evaluatedAt: new Date().toISOString(),
-    summary: 'All 6 Autonomous Readiness Gates PASSED. System is eligible for bounded arming.',
-    items: [
-      {
-        id: 'auto_01',
-        title: 'SEBI Personal Algorithmic Framework Compliance',
-        description: 'Supervised personal execution with time-bound session windows and hard risk caps.',
-        category: 'REGULATORY',
-        passed: true,
-        details: 'Personal retail API access under SEBI Feb 2025 guidelines. Multi-tenant public auto disabled.',
-        verifiedAt: new Date().toISOString(),
-      },
-      {
-        id: 'auto_02',
-        title: 'Multi-Day Paper Proof Verification',
-        description: 'Verified minimum clean paper simulation runs without unhandled exceptions.',
-        category: 'PAPER_PROOF',
-        passed: true,
-        details: 'Paper broker ledger verified with 0 discrepancies and full statutory fee tracking.',
-        verifiedAt: new Date().toISOString(),
-      },
-      {
-        id: 'auto_03',
-        title: '10-Point Pre-Flight Go-Live Verification',
-        description: 'Owner signed-off pre-flight checklist covering risk caps, static IP, and disclosure.',
-        category: 'GO_LIVE',
-        passed: true,
-        details: 'Go-Live checklist 10/10 verified and signed off by platform owner.',
-        verifiedAt: new Date().toISOString(),
-      },
-      {
-        id: 'auto_04',
-        title: 'Broker Order & Position Reconciliation',
-        description: 'Local and broker state synchronized with 0 phantom or divergent exposures.',
-        category: 'RECONCILIATION',
-        passed: true,
-        details: 'Zero broker discrepancies detected across positions and orders.',
-        verifiedAt: new Date().toISOString(),
-      },
-      {
-        id: 'auto_05',
-        title: 'Broker OAuth 2.0 Token Validity',
-        description: 'AES-256-GCM encrypted Upstox token valid with > 15 minutes remaining.',
-        category: 'BROKER_AUTH',
-        passed: true,
-        details: 'Broker token valid (expires in 23h 48m). Registered static egress IP matched.',
-        verifiedAt: new Date().toISOString(),
-      },
-      {
-        id: 'auto_06',
-        title: 'Market Data Feed Latency & Freshness',
-        description: 'Upstox WebSocket live feed latency strictly under 3,000ms threshold.',
-        category: 'FEED_HEALTH',
-        passed: true,
-        details: 'Active feed healthy: 18ms latency, 0 stale ticks.',
-        verifiedAt: new Date().toISOString(),
-      },
-    ],
-  });
+  // Modals state
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
+  const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
+  const [historyList, setHistoryList] = useState<StrategyConfig[]>([]);
 
-  const [sessionStatus, setSessionStatus] = useState<AutonomousSessionStatus>({
-    isArmed: false,
-    strategyId: null,
-    strategyName: null,
-    strategyVersion: null,
-    versionHash: null,
-    armedAt: null,
-    armedUntil: null,
-    remainingMinutes: 0,
-    maxSessionTrades: 2,
-    tradesExecutedInSession: 0,
-    lastDisarmReason: null,
-    systemMode: TradeMode.PAPER,
-  });
-
-  const [executionLogs, setExecutionLogs] = useState<AutonomousExecutionLog[]>([]);
-
-  // Arming Form Inputs
-  const [armDurationMinutes, setArmDurationMinutes] = useState<number>(30);
-  const [maxTradesCap, setMaxTradesCap] = useState<number>(2);
-  const [confirmationCode, setConfirmationCode] = useState<string>('');
-  const [operatorConsent, setOperatorConsent] = useState<boolean>(false);
-  const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
-
-  // Initial Fetch & Periodic Live Sync with backend API
-  useEffect(() => {
-    let isMounted = true;
-    const syncData = async () => {
-      try {
-        const [stratList, autoStatus, autoReadiness, logs] = await Promise.all([
-          apiClient.getStrategies().catch(() => null),
-          apiClient.getAutonomousStatus().catch(() => null),
-          apiClient.getAutonomousReadiness().catch(() => null),
-          apiClient.getAutonomousLogs().catch(() => []),
-        ]);
-        if (isMounted) {
-          if (stratList && stratList.length > 0) {
-            setStrategies(stratList);
-            setIsLiveConnected(true);
-          }
-          if (autoStatus) setSessionStatus(autoStatus);
-          if (autoReadiness) setReadiness(autoReadiness);
-          if (logs) setExecutionLogs(logs);
-        }
-      } catch {
-        // Fallback
-      }
-    };
-    syncData();
-    const interval = setInterval(syncData, 5000);
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
-  }, []);
-
-  // Live Timer Countdown Hook
-  const [countdownSeconds, setCountdownSeconds] = useState<number>(0);
-
-  useEffect(() => {
-    if (!sessionStatus.isArmed || !sessionStatus.armedUntil) {
-      setCountdownSeconds(0);
-      return;
-    }
-
-    const interval = setInterval(() => {
-      const now = Date.now();
-      const expiry = new Date(sessionStatus.armedUntil!).getTime();
-      const remainingSec = Math.max(0, Math.floor((expiry - now) / 1000));
-
-      setCountdownSeconds(remainingSec);
-
-      if (remainingSec <= 0) {
-        clearInterval(interval);
-        handleDisarm('SESSION_WINDOW_EXPIRED');
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [sessionStatus.isArmed, sessionStatus.armedUntil]);
-
-  const defaultStrategy: StrategyConfig = strategies[0]!;
-  const selectedStrategy: StrategyConfig = strategies.find((s) => s.id === selectedStrategyId) ?? defaultStrategy;
-
-  // Form State for Strategy Editor
-  const [formData, setFormData] = useState({
-    name: 'NIFTY EMA20 RSI Momentum',
-    underlying: 'NIFTY',
+  // Create Strategy Form
+  const [createForm, setCreateForm] = useState({
+    name: '',
+    underlying: 'NIFTY' as 'NIFTY' | 'BANKNIFTY',
+    direction: AllowedOptionType.LONG_CALL,
     timeframe: '5m',
     emaPeriod: 20,
     rsiPeriod: 14,
     rsiThreshold: 55,
-    maxBidAskSpreadPct: 1.0,
-    minVolume: 1000,
-    moneyness: MoneynessType.ATM,
     maxCapitalInr: 10000,
     maxAllInTradeLossInr: 200,
-    maxAllInDailyLossInr: 600,
     targetNetProfitInr: 300,
+    maxTradesPerDay: 3,
   });
 
-  const handleRunScan = async (strategy: StrategyConfig) => {
-    setIsScanning(true);
-    setFeedbackMessage(null);
+  // Edit Strategy Form
+  const [editForm, setEditForm] = useState({
+    name: '',
+    emaPeriod: 20,
+    rsiPeriod: 14,
+    rsiThreshold: 55,
+    maxCapitalInr: 10000,
+    maxAllInTradeLossInr: 200,
+    targetNetProfitInr: 300,
+    maxTradesPerDay: 3,
+  });
+
+  // Check saved Daily Bot draft
+  useEffect(() => {
+    const todayStr = tradingDateInIst();
+    const stored = loadSavedDraft(todayStr);
+    if (stored) {
+      setDailyDraft(stored);
+    }
+  }, []);
+
+  // Fetch strategies from backend API
+  const loadStrategies = async () => {
+    setIsLoading(true);
     try {
-      const scanRes = await apiClient.runStrategyScan(strategy.id).catch(() => null);
-      if (scanRes) {
-        setFeedbackMessage(
-          `Live API scan complete for ${strategy.name} (v${strategy.version}). Scanned candidate strikes: ${scanRes?.candidatesScanned ?? 8}. Signal: ${scanRes?.signal ?? 'SCAN_COMPLETE'}.`,
-        );
-      } else {
-        await new Promise((resolve) => setTimeout(resolve, 800));
-        setFeedbackMessage(
-          `Agent scan completed for ${strategy.name} (v${strategy.version}). Market conditions evaluated against 5m closed candle. Zero rule violations detected.`,
-        );
-      }
-    } finally {
-      setIsScanning(false);
-    }
-  };
-
-  const handleAuditReadiness = async () => {
-    setFeedbackMessage('Running real-time autonomous pre-flight readiness audit against backend...');
-    try {
-      const report = await apiClient.getAutonomousReadiness();
-      setReadiness(report);
-      setFeedbackMessage(
-        `Readiness audit complete: ${report.items.filter((i) => i.passed).length} of ${report.items.length} pre-flight criteria PASSED. ${report.summary}`,
-      );
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      setReadiness((prev) => ({
-        ...prev,
-        evaluatedAt: new Date().toISOString(),
-        isEligibleForAuto: true,
-        summary: 'All 6 Autonomous Readiness Gates verified. System ready for bounded arming.',
-      }));
-      setFeedbackMessage('Readiness audit complete: 6 of 6 pre-flight criteria PASSED (offline mode).');
-    }
-  };
-
-  const handleArmSession = async () => {
-    if (!readiness.isEligibleForAuto) {
-      setFeedbackMessage('Arming rejected: One or more pre-flight readiness gates failed.');
-      return;
-    }
-    if (confirmationCode.trim() !== 'CONFIRM_AUTO_EXECUTION') {
-      setFeedbackMessage("Invalid confirmation code. You must type 'CONFIRM_AUTO_EXECUTION'.");
-      return;
-    }
-    if (!operatorConsent) {
-      setFeedbackMessage('Operator consent required: Please check the risk acknowledgment checkbox.');
-      return;
-    }
-
-    try {
-      const res = await apiClient.armAutonomous({
-        strategyId: selectedStrategy.id,
-        windowMinutes: armDurationMinutes,
-        maxSessionTrades: maxTradesCap,
-        confirmationCode: confirmationCode.trim(),
-        operatorConsent,
-      });
-      setSessionStatus(res);
-      setStrategies((prev) =>
-        prev.map((s) => (s.id === selectedStrategy.id ? { ...s, status: StrategyStatus.ARMED } : s)),
-      );
-      const logs = await apiClient.getAutonomousLogs().catch(() => []);
-      if (logs.length > 0) setExecutionLogs(logs);
-
-      setIsArmingModalOpen(false);
-      setConfirmationCode('');
-      setOperatorConsent(false);
-      setFeedbackMessage(
-        `⚡ BOUNDED AUTONOMOUS MODE ARMED: Strategy active for ${res.remainingMinutes || armDurationMinutes}m. Max trades: ${res.maxSessionTrades}. Hard risk caps strictly enforced.`,
-      );
-    } catch {
-      // Graceful offline fallback
-      const now = new Date();
-      const expiry = new Date(now.getTime() + armDurationMinutes * 60000);
-
-      const newSession: AutonomousSessionStatus = {
-        isArmed: true,
-        strategyId: selectedStrategy.id,
-        strategyName: selectedStrategy.name,
-        strategyVersion: selectedStrategy.version,
-        versionHash: selectedStrategy.versionHash ?? null,
-        armedAt: now.toISOString(),
-        armedUntil: expiry.toISOString(),
-        remainingMinutes: armDurationMinutes,
-        maxSessionTrades: maxTradesCap,
-        tradesExecutedInSession: 0,
-        lastDisarmReason: null,
-        systemMode: TradeMode.PAPER,
-      };
-
-      setSessionStatus(newSession);
-      setStrategies((prev) =>
-        prev.map((s) => (s.id === selectedStrategy.id ? { ...s, status: StrategyStatus.ARMED } : s)),
-      );
-
-      setIsArmingModalOpen(false);
-      setConfirmationCode('');
-      setOperatorConsent(false);
-      setFeedbackMessage(
-        `⚡ BOUNDED AUTONOMOUS MODE ARMED: Strategy active for ${armDurationMinutes}m. Max trades: ${maxTradesCap}. Hard risk caps strictly enforced.`,
-      );
-    }
-  };
-
-  const handleDisarm = async (reason = 'Operator Manual Disarm') => {
-    try {
-      const res = await apiClient.disarmAutonomous(reason);
-      setSessionStatus(res);
-      setStrategies((prev) =>
-        prev.map((s) => (s.id === selectedStrategy.id ? { ...s, status: StrategyStatus.PAPER_ACTIVE } : s)),
-      );
-      const logs = await apiClient.getAutonomousLogs().catch(() => []);
-      if (logs.length > 0) setExecutionLogs(logs);
-      setFeedbackMessage(`🔒 Engine safely disarmed. Reason: ${reason}.`);
-    } catch {
-      setSessionStatus({
-        isArmed: false,
-        strategyId: null,
-        strategyName: null,
-        strategyVersion: null,
-        versionHash: null,
-        armedAt: null,
-        armedUntil: null,
-        remainingMinutes: 0,
-        maxSessionTrades: 2,
-        tradesExecutedInSession: sessionStatus.tradesExecutedInSession,
-        lastDisarmReason: reason,
-        systemMode: TradeMode.PAPER,
-      });
-
-      setStrategies((prev) =>
-        prev.map((s) => (s.id === selectedStrategy.id ? { ...s, status: StrategyStatus.PAPER_ACTIVE } : s)),
-      );
-
-      setFeedbackMessage(`🔒 Engine safely disarmed. Reason: ${reason}.`);
-    }
-  };
-
-  const handleSaveStrategy = () => {
-    const newVersion = selectedStrategy.version + 1;
-
-    const updatedStrategy: StrategyConfig = {
-      ...selectedStrategy,
-      name: formData.name,
-      underlying: formData.underlying,
-      timeframe: formData.timeframe,
-      version: newVersion,
-      status: StrategyStatus.PAPER_ACTIVE,
-      entry: {
-        ...selectedStrategy.entry,
-        emaPeriod: Number(formData.emaPeriod),
-        rsiPeriod: Number(formData.rsiPeriod),
-        rsiThreshold: Number(formData.rsiThreshold),
-        maxBidAskSpreadPct: Number(formData.maxBidAskSpreadPct),
-        minVolume: Number(formData.minVolume),
-      },
-      selection: {
-        ...selectedStrategy.selection,
-        expiry: 'NEAREST_ELIGIBLE',
-        moneyness: formData.moneyness,
-        minVolume: Number(formData.minVolume),
-      },
-      risk: {
-        ...selectedStrategy.risk,
-        maxCapitalInr: Number(formData.maxCapitalInr),
-        maxAllInTradeLossInr: Number(formData.maxAllInTradeLossInr),
-        maxAllInDailyLossInr: Number(formData.maxAllInDailyLossInr),
-        targetNetProfitInr: Number(formData.targetNetProfitInr),
-      },
-      maxCapitalInr: Number(formData.maxCapitalInr),
-      maxAllInTradeLossInr: Number(formData.maxAllInTradeLossInr),
-      maxAllInDailyLossInr: Number(formData.maxAllInDailyLossInr),
-      targetNetProfitInr: Number(formData.targetNetProfitInr),
-    };
-
-    updatedStrategy.versionHash = calculateStrategyVersionHash(updatedStrategy);
-
-    setStrategies((prev) => prev.map((s) => (s.id === selectedStrategy.id ? updatedStrategy : s)));
-
-    // Record into history
-    setVersionHistory((prev) => {
-      const existingHistory = prev[selectedStrategy.id] || [];
-      return {
-        ...prev,
-        [selectedStrategy.id]: [...existingHistory, updatedStrategy],
-      };
-    });
-
-    // If currently armed, auto-disarm because config changed
-    if (sessionStatus.isArmed) {
-      handleDisarm('STRATEGY_CONFIG_OR_VERSION_MUTATED');
-    }
-
-    apiClient.updateStrategy(selectedStrategy.id, updatedStrategy).catch(() => {});
-
-    setIsEditorOpen(false);
-    setFeedbackMessage(
-      `Strategy published as immutable version v${newVersion} (${updatedStrategy.versionHash}). Previous revisions preserved in audit ledger.`,
-    );
-  };
-
-  const formatCountdown = (totalSec: number) => {
-    const mins = Math.floor(totalSec / 60);
-    const secs = totalSec % 60;
-    return `${mins}m ${secs < 10 ? '0' : ''}${secs}s`;
-  };
-
-  const historyList: StrategyConfig[] = versionHistory[selectedStrategy.id] ?? [selectedStrategy];
-
-  const handleApplyToDailyBot = () => {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      try {
-        const raw = window.localStorage.getItem('TRADING_BOT_DAILY_DRAFT');
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (parsed?.draft) {
-            parsed.draft.strategyId = selectedStrategy.id;
-            parsed.step = 4;
-            window.localStorage.setItem('TRADING_BOT_DAILY_DRAFT', JSON.stringify(parsed));
-          }
+      const data = await apiClient.getStrategies();
+      if (data && data.length > 0) {
+        setStrategies(data);
+        if (!selectedStrategyId || !data.some((s) => s.id === selectedStrategyId)) {
+          setSelectedStrategyId(data[0]!.id);
+          setBacktestUnderlying((data[0]!.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
         }
-      } catch {}
+      }
+    } catch (err: any) {
+      setFeedback({ message: `Failed to load strategies: ${err.message}`, type: 'error' });
+    } finally {
+      setIsLoading(false);
     }
-    router.push('/');
+  };
+
+  useEffect(() => {
+    loadStrategies();
+  }, []);
+
+  const activeStrategy = strategies.find((s) => s.id === selectedStrategyId) || strategies[0];
+
+  // Helper to flash notifications
+  const showFeedback = (msg: string, type: 'success' | 'info' | 'error' = 'success') => {
+    setFeedback({ message: msg, type });
+    setTimeout(() => setFeedback(null), 6000);
+  };
+
+  // Select strategy for Daily Bot
+  const handleUseInDailyBot = (strategy: StrategyConfig) => {
+    const todayStr = tradingDateInIst();
+    let currentStored = loadSavedDraft(todayStr);
+
+    if (currentStored && currentStored.draft) {
+      // Update strategy in draft
+      currentStored.draft.strategyId = strategy.id;
+      currentStored.draft.dailyCapitalBudget = String(strategy.risk?.maxCapitalInr ?? 10000);
+      currentStored.draft.maxCapitalPerTrade = String(strategy.risk?.maxCapitalInr ?? 10000);
+      currentStored.draft.perTradeMaxLossAllIn = String(strategy.risk?.maxAllInTradeLossInr ?? 200);
+      currentStored.draft.dailyMaxLossAllIn = String(strategy.risk?.maxAllInDailyLossInr ?? 600);
+      saveDraftToStorage(todayStr, currentStored.draft, currentStored.step, currentStored.savedSetupId);
+    } else {
+      // Create new draft with this strategy
+      const freshDraft = createDailyBotDraft(todayStr, strategy);
+      saveDraftToStorage(todayStr, freshDraft, 0, null);
+    }
+
+    showFeedback(`Strategy "${strategy.name}" selected! Navigating to Daily Bot...`, 'success');
+    setTimeout(() => {
+      router.push('/');
+    }, 600);
+  };
+
+  // Run backtest
+  const handleRunBacktest = async (strategyToTest?: StrategyConfig) => {
+    const strat = strategyToTest || activeStrategy;
+    if (!strat) return;
+
+    setBacktestLoading(true);
+    setBacktestResult(null);
+
+    try {
+      const result = await apiClient.runBacktest(strat.id, {
+        days: backtestDays,
+        initialCapital: backtestCapital,
+        underlying: backtestUnderlying,
+      });
+      setBacktestResult(result);
+      showFeedback(`Backtest completed for ${strat.name}: ${result.totalTrades} simulated trades.`, 'success');
+    } catch (err: any) {
+      showFeedback(`Backtest failed: ${err.message}`, 'error');
+    } finally {
+      setBacktestLoading(false);
+    }
+  };
+
+  // Quick edit strategy
+  const handleOpenEdit = (strat: StrategyConfig) => {
+    setSelectedStrategyId(strat.id);
+    setEditForm({
+      name: strat.name,
+      emaPeriod: strat.entry?.emaPeriod ?? 20,
+      rsiPeriod: strat.entry?.rsiPeriod ?? 14,
+      rsiThreshold: strat.entry?.rsiThreshold ?? 55,
+      maxCapitalInr: strat.risk?.maxCapitalInr ?? 10000,
+      maxAllInTradeLossInr: strat.risk?.maxAllInTradeLossInr ?? 200,
+      targetNetProfitInr: strat.risk?.targetNetProfitInr ?? 300,
+      maxTradesPerDay: strat.risk?.maxTradesPerDay ?? 3,
+    });
+    setIsEditModalOpen(true);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!activeStrategy) return;
+    try {
+      const updated = await apiClient.updateStrategy(activeStrategy.id, {
+        name: editForm.name,
+        entry: {
+          ...activeStrategy.entry,
+          emaPeriod: Number(editForm.emaPeriod),
+          rsiPeriod: Number(editForm.rsiPeriod),
+          rsiThreshold: Number(editForm.rsiThreshold),
+        },
+        risk: {
+          ...activeStrategy.risk,
+          maxCapitalInr: Number(editForm.maxCapitalInr),
+          maxAllInTradeLossInr: Number(editForm.maxAllInTradeLossInr),
+          targetNetProfitInr: Number(editForm.targetNetProfitInr),
+          maxTradesPerDay: Number(editForm.maxTradesPerDay),
+        },
+        maxCapitalInr: Number(editForm.maxCapitalInr),
+        maxAllInTradeLossInr: Number(editForm.maxAllInTradeLossInr),
+        targetNetProfitInr: Number(editForm.targetNetProfitInr),
+      });
+
+      setStrategies((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+      setIsEditModalOpen(false);
+      showFeedback(`Updated strategy "${updated.name}" to Revision v${updated.version}!`, 'success');
+    } catch (err: any) {
+      showFeedback(`Failed to update strategy: ${err.message}`, 'error');
+    }
+  };
+
+  // Create new strategy
+  const handleCreateStrategy = async () => {
+    if (!createForm.name.trim()) {
+      showFeedback('Please provide a strategy name.', 'error');
+      return;
+    }
+
+    try {
+      const newStrategyPayload = {
+        name: createForm.name.trim(),
+        version: 1,
+        status: StrategyStatus.PAPER_ACTIVE,
+        tradeMode: TradeMode.PAPER,
+        market: 'NSE_FO',
+        underlying: createForm.underlying,
+        allowedInstruments: [createForm.direction],
+        timeframe: createForm.timeframe,
+        session: { start: '09:25', lastEntry: '14:45', timezone: 'Asia/Kolkata' },
+        entry: {
+          emaPeriod: Number(createForm.emaPeriod),
+          rsiPeriod: Number(createForm.rsiPeriod),
+          rsiThreshold: Number(createForm.rsiThreshold),
+          maxBidAskSpreadPct: 1.0,
+          minVolume: 1000,
+        },
+        selection: {
+          expiry: 'NEAREST_ELIGIBLE',
+          moneyness: MoneynessType.ATM,
+          minVolume: 1000,
+        },
+        risk: {
+          maxCapitalInr: Number(createForm.maxCapitalInr),
+          maxAllInTradeLossInr: Number(createForm.maxAllInTradeLossInr),
+          maxAllInDailyLossInr: Number(createForm.maxAllInTradeLossInr) * 3,
+          maxOpenPositions: 1,
+          maxTradesPerDay: Number(createForm.maxTradesPerDay),
+          targetNetProfitInr: Number(createForm.targetNetProfitInr),
+          maxRoundTripCostBudgetInr: 60,
+        },
+        exit: {
+          stopBasis: 'OPTION_PREMIUM',
+          marketCutoff: '15:10',
+        },
+        maxCapitalInr: Number(createForm.maxCapitalInr),
+        maxAllInTradeLossInr: Number(createForm.maxAllInTradeLossInr),
+        maxAllInDailyLossInr: Number(createForm.maxAllInTradeLossInr) * 3,
+        targetNetProfitInr: Number(createForm.targetNetProfitInr),
+        maxRoundTripCostBudgetInr: 60,
+        maxOpenPositions: 1,
+        requiresApproval: true,
+      };
+
+      const created = await apiClient.createStrategy(newStrategyPayload);
+      setStrategies((prev) => [...prev, created]);
+      setSelectedStrategyId(created.id);
+      setBacktestUnderlying(created.underlying as 'NIFTY' | 'BANKNIFTY');
+      setIsCreateModalOpen(false);
+      setCreateForm({
+        name: '',
+        underlying: 'NIFTY',
+        direction: AllowedOptionType.LONG_CALL,
+        timeframe: '5m',
+        emaPeriod: 20,
+        rsiPeriod: 14,
+        rsiThreshold: 55,
+        maxCapitalInr: 10000,
+        maxAllInTradeLossInr: 200,
+        targetNetProfitInr: 300,
+        maxTradesPerDay: 3,
+      });
+      showFeedback(`Strategy "${created.name}" created successfully!`, 'success');
+    } catch (err: any) {
+      showFeedback(`Failed to create strategy: ${err.message}`, 'error');
+    }
+  };
+
+  // View version history
+  const handleOpenHistory = async (strat: StrategyConfig) => {
+    setSelectedStrategyId(strat.id);
+    try {
+      const history = await apiClient.getStrategyVersions(strat.id);
+      setHistoryList(history && history.length > 0 ? history : [strat]);
+      setIsHistoryModalOpen(true);
+    } catch {
+      setHistoryList([strat]);
+      setIsHistoryModalOpen(true);
+    }
+  };
+
+  // Run live agent scan
+  const handleRunAgentScan = async (strat: StrategyConfig) => {
+    try {
+      showFeedback(`Triggering agent scanner for ${strat.name}...`, 'info');
+      const scan = await apiClient.runStrategyScan(strat.id);
+      if (scan?.proposal) {
+        showFeedback(`Scan generated a trade proposal for ${scan.proposal.symbol}! Check Proposals tab.`, 'success');
+      } else {
+        showFeedback(`Scan completed: Market checked. No setup confirmed at this minute.`, 'info');
+      }
+    } catch (err: any) {
+      showFeedback(`Agent scan failed: ${err.message}`, 'error');
+    }
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.lg, maxWidth: 1200, margin: '0 auto', width: '100%', paddingBottom: spacing.xxl }}>
-      {/* Daily Bot Setup In-Progress Banner */}
-      {dailyDraftDate && (
-        <div
-          style={{
-            backgroundColor: 'rgba(6, 182, 212, 0.12)',
-            border: `1px solid ${colors.cyan}`,
-            borderRadius: borderRadius.md,
-            padding: `${spacing.md}px`,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: spacing.sm,
-          }}
-        >
-          <div>
-            <div style={{ color: colors.cyan, fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.sm, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span>🤖</span> Daily Trading Bot Setup In Progress ({dailyDraftDate})
-            </div>
-            <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-              Your setup draft is safely saved. You can choose a strategy below or return to complete your daily configuration.
-            </p>
-          </div>
-          <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center' }}>
-            <button
-              onClick={handleApplyToDailyBot}
-              style={{
-                padding: `${spacing.sm}px ${spacing.md}px`,
-                borderRadius: borderRadius.md,
-                backgroundColor: colors.cyan,
-                color: '#05151B',
-                fontWeight: typography.fontWeight.bold,
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: typography.fontSize.xs,
-              }}
-            >
-              ✓ Use &apos;{selectedStrategy.name}&apos; for Today&apos;s Bot
-            </button>
-            <button
-              onClick={() => router.push('/')}
-              style={{
-                padding: `${spacing.sm}px ${spacing.md}px`,
-                borderRadius: borderRadius.md,
-                backgroundColor: colors.surfaceElevated,
-                color: colors.textPrimary,
-                fontWeight: typography.fontWeight.semibold,
-                border: `1px solid ${colors.borderHover}`,
-                cursor: 'pointer',
-                fontSize: typography.fontSize.xs,
-              }}
-            >
-              ← Return to Setup Wizard
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
+    <div style={{ padding: spacing.lg, maxWidth: 1280, margin: '0 auto', color: colors.textPrimary, fontFamily: typography.fontFamily.sans }}>
+      
+      {/* --- Top Banner / Header --- */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: spacing.md, marginBottom: spacing.lg }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
-            Strategy Workspace & Autonomous Engine
-          </h1>
-          <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
-            Deterministic rule-based strategy definitions with bounded autonomous execution & pre-flight gating.
+          <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, marginBottom: 4 }}>
+            <span style={{ fontSize: 24 }}>⚡</span>
+            <h1 style={{ fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold, margin: 0, color: colors.textPrimary }}>
+              Strategy Studio & Backtesting
+            </h1>
+          </div>
+          <p style={{ margin: 0, color: colors.textSecondary, fontSize: typography.fontSize.base }}>
+            Manage simple rule-based F&O setups, run candle-by-candle historical backtests with SEBI levies, and link directly to your daily bot.
           </p>
         </div>
 
-        <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
-          <Badge
-            label={isLiveConnected ? '🟢 LIVE API SYNCED' : '⚠️ OFFLINE / PAPER SIMULATION'}
-            variant={isLiveConnected ? 'success' : 'purple'}
-          />
-          <button
-            onClick={() => setIsReadinessModalOpen(true)}
-            style={{
-              padding: `${spacing.sm}px ${spacing.md}px`,
-              borderRadius: borderRadius.md,
-              backgroundColor: colors.surfaceElevated,
-              color: readiness.isEligibleForAuto ? colors.cyan : colors.warning,
-              border: `1px solid ${readiness.isEligibleForAuto ? colors.cyan : colors.warning}`,
-              fontWeight: typography.fontWeight.semibold,
-              cursor: 'pointer',
-              fontSize: typography.fontSize.xs,
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-            }}
-          >
-            <span>{readiness.isEligibleForAuto ? '🛡️' : '⚠️'}</span>
-            Pre-Flight Gates ({readiness.items.filter((i) => i.passed).length}/6)
-          </button>
-
-          {!sessionStatus.isArmed ? (
+        <div style={{ display: 'flex', gap: spacing.sm, flexWrap: 'wrap' }}>
+          {dailyDraft && (
             <button
-              onClick={() => setIsArmingModalOpen(true)}
+              onClick={() => router.push('/')}
               style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
                 padding: `${spacing.sm}px ${spacing.md}px`,
+                backgroundColor: 'rgba(6, 182, 212, 0.15)',
+                border: `1px solid ${colors.cyan}`,
+                color: colors.cyan,
                 borderRadius: borderRadius.md,
-                backgroundColor: colors.profit,
-                color: '#FFFFFF',
-                fontWeight: typography.fontWeight.bold,
-                border: 'none',
                 cursor: 'pointer',
-                fontSize: typography.fontSize.xs,
-                boxShadow: '0 2px 8px rgba(16, 185, 129, 0.3)',
+                fontWeight: typography.fontWeight.semibold,
+                fontSize: typography.fontSize.sm,
               }}
             >
-              ⚡ Arm Autonomous Mode
-            </button>
-          ) : (
-            <button
-              onClick={() => handleDisarm('Operator Manual Disarm')}
-              style={{
-                padding: `${spacing.sm}px ${spacing.md}px`,
-                borderRadius: borderRadius.md,
-                backgroundColor: colors.loss,
-                color: '#FFFFFF',
-                fontWeight: typography.fontWeight.bold,
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: typography.fontSize.xs,
-                boxShadow: '0 2px 8px rgba(239, 68, 68, 0.4)',
-              }}
-            >
-              🛑 DISARM SESSION NOW
+              <span>←</span>
+              <span>Back to Daily Bot ({dailyDraft.tradingDate})</span>
             </button>
           )}
 
           <button
-            onClick={() => {
-              setFormData({
-                name: selectedStrategy.name,
-                underlying: selectedStrategy.underlying,
-                timeframe: selectedStrategy.timeframe,
-                emaPeriod: selectedStrategy.entry.emaPeriod,
-                rsiPeriod: selectedStrategy.entry.rsiPeriod,
-                rsiThreshold: selectedStrategy.entry.rsiThreshold,
-                maxBidAskSpreadPct: selectedStrategy.entry.maxBidAskSpreadPct,
-                minVolume: selectedStrategy.entry.minVolume,
-                moneyness: selectedStrategy.selection.moneyness as any,
-                maxCapitalInr: selectedStrategy.risk.maxCapitalInr,
-                maxAllInTradeLossInr: selectedStrategy.risk.maxAllInTradeLossInr,
-                maxAllInDailyLossInr: selectedStrategy.risk.maxAllInDailyLossInr,
-                targetNetProfitInr: selectedStrategy.risk.targetNetProfitInr,
-              });
-              setIsEditorOpen(true);
-            }}
+            onClick={() => setIsCreateModalOpen(true)}
             style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
               padding: `${spacing.sm}px ${spacing.md}px`,
-              borderRadius: borderRadius.md,
               backgroundColor: colors.cyan,
-              color: '#082F49',
-              fontWeight: typography.fontWeight.bold,
               border: 'none',
+              color: '#082F49',
+              borderRadius: borderRadius.md,
               cursor: 'pointer',
-              fontSize: typography.fontSize.xs,
+              fontWeight: typography.fontWeight.bold,
+              fontSize: typography.fontSize.sm,
             }}
           >
-            ✏️ Edit Rules
+            <span>➕</span>
+            <span>Create New Strategy</span>
           </button>
 
           <button
-            onClick={() => setIsHistoryOpen(true)}
+            onClick={loadStrategies}
+            disabled={isLoading}
             style={{
               padding: `${spacing.sm}px ${spacing.md}px`,
-              borderRadius: borderRadius.md,
               backgroundColor: colors.surfaceElevated,
-              color: colors.textPrimary,
               border: `1px solid ${colors.border}`,
-              fontWeight: typography.fontWeight.semibold,
+              color: colors.textPrimary,
+              borderRadius: borderRadius.md,
               cursor: 'pointer',
-              fontSize: typography.fontSize.xs,
+              fontSize: typography.fontSize.sm,
             }}
           >
-            📜 Version History ({historyList.length})
+            {isLoading ? 'Refreshing...' : '🔄 Refresh'}
           </button>
         </div>
       </div>
 
-      {/* Status Feedback Toast */}
-      {feedbackMessage && (
+      {/* --- Feedback Alert Notification --- */}
+      {feedback && (
         <div
           style={{
-            padding: spacing.md,
-            backgroundColor: 'rgba(6, 182, 212, 0.12)',
-            border: `1px solid ${colors.cyan}`,
+            padding: `${spacing.sm}px ${spacing.md}px`,
             borderRadius: borderRadius.md,
-            color: colors.cyan,
-            fontSize: typography.fontSize.sm,
+            marginBottom: spacing.lg,
+            backgroundColor:
+              feedback.type === 'success'
+                ? colors.profitMuted
+                : feedback.type === 'error'
+                ? colors.lossMuted
+                : 'rgba(6, 182, 212, 0.15)',
+            border: `1px solid ${
+              feedback.type === 'success'
+                ? colors.profitBorder
+                : feedback.type === 'error'
+                ? colors.lossBorder
+                : colors.cyan
+            }`,
+            color:
+              feedback.type === 'success'
+                ? colors.profit
+                : feedback.type === 'error'
+                ? colors.loss
+                : colors.cyan,
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
+            fontSize: typography.fontSize.sm,
           }}
         >
-          <span>{feedbackMessage}</span>
+          <span>{feedback.message}</span>
           <button
-            onClick={() => setFeedbackMessage(null)}
-            style={{ background: 'transparent', border: 'none', color: colors.textMuted, cursor: 'pointer' }}
+            onClick={() => setFeedback(null)}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 16 }}
           >
             ✕
           </button>
         </div>
       )}
 
-      {/* --- Phase 7 Autonomous Mode Active Banner --- */}
-      {sessionStatus.isArmed ? (
-        <div
-          style={{
-            backgroundColor: 'rgba(239, 68, 68, 0.12)',
-            border: `2px solid ${colors.loss}`,
-            borderRadius: borderRadius.md,
-            padding: spacing.lg,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: spacing.md,
-            boxShadow: '0 4px 20px rgba(239, 68, 68, 0.25)',
-          }}
-        >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: spacing.md }}>
-              <div
-                style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: '50%',
-                  backgroundColor: colors.loss,
-                  boxShadow: '0 0 10px #EF4444',
-                }}
-              />
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-                  <h3 style={{ margin: 0, fontSize: typography.fontSize.lg, color: colors.textPrimary }}>
-                    ARMED AUTONOMOUS EXECUTION ACTIVE
-                  </h3>
-                  <Badge label="BOUNDED AUTO" variant="danger" />
-                  <Badge label="GTT PROTECTED" variant="success" />
-                </div>
-                <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-                  Strategy: <strong>{sessionStatus.strategyName}</strong> (v{sessionStatus.strategyVersion}) | Auto-disarming timer active.
-                </p>
-              </div>
-            </div>
-
-            <div style={{ display: 'flex', gap: spacing.xl, alignItems: 'center', flexWrap: 'wrap' }}>
-              <div>
-                <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>SESSION COUNTDOWN</div>
-                <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.loss, fontFamily: typography.fontFamily.mono }}>
-                  ⏱️ {formatCountdown(countdownSeconds)}
-                </div>
-              </div>
-
-              <div>
-                <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>SESSION TRADES CAP</div>
-                <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.textPrimary, fontFamily: typography.fontFamily.mono }}>
-                  {sessionStatus.tradesExecutedInSession} / {sessionStatus.maxSessionTrades} Trades
-                </div>
-              </div>
-
-              <button
-                onClick={() => handleDisarm('Operator Emergency Disarm Button')}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.lg}px`,
-                  borderRadius: borderRadius.md,
-                  backgroundColor: colors.loss,
-                  color: '#FFFFFF',
-                  fontWeight: typography.fontWeight.bold,
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontSize: typography.fontSize.sm,
-                }}
-              >
-                DISARM SESSION
-              </button>
-            </div>
-          </div>
+      {/* --- Section 1: Registered Strategies Cards --- */}
+      <div style={{ marginBottom: spacing.xl }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
+          <h2 style={{ fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold, margin: 0 }}>
+            Available Strategies ({strategies.length})
+          </h2>
+          <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
+            All strategies strictly enforce statutory SEBI limits & single-position bounds
+          </span>
         </div>
-      ) : (
-        <div
-          style={{
-            backgroundColor: colors.surface,
-            border: `1px solid ${colors.border}`,
-            borderRadius: borderRadius.md,
-            padding: spacing.md,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: spacing.md,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: spacing.md }}>
-            <span style={{ fontSize: 20 }}>🔒</span>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-                <span style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.sm, color: colors.textPrimary }}>
-                  Autonomous Mode State: DISARMED
-                </span>
-                <Badge label="SUPERVISED ONLY" variant="neutral" />
-                <Badge label="6/6 GATES PASSING" variant="success" />
-              </div>
-              <p style={{ margin: '2px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-                {sessionStatus.lastDisarmReason
-                  ? `Last session disarmed: ${sessionStatus.lastDisarmReason}`
-                  : 'Engine is safe in default paper/supervised state. Bounded arming is ready.'}
-              </p>
-            </div>
-          </div>
 
-          <div style={{ display: 'flex', gap: spacing.sm }}>
-            <button
-              onClick={handleAuditReadiness}
-              style={{
-                padding: `${spacing.xs}px ${spacing.md}px`,
-                borderRadius: borderRadius.sm,
-                backgroundColor: colors.surfaceElevated,
-                color: colors.textPrimary,
-                border: `1px solid ${colors.border}`,
-                cursor: 'pointer',
-                fontSize: typography.fontSize.xs,
-              }}
-            >
-              🔄 Re-Audit Gates
-            </button>
-            <button
-              onClick={() => setIsArmingModalOpen(true)}
-              style={{
-                padding: `${spacing.xs}px ${spacing.md}px`,
-                borderRadius: borderRadius.sm,
-                backgroundColor: colors.cyan,
-                color: '#082F49',
-                fontWeight: typography.fontWeight.bold,
-                border: 'none',
-                cursor: 'pointer',
-                fontSize: typography.fontSize.xs,
-              }}
-            >
-              ⚡ Arm Session
-            </button>
+        {isLoading && strategies.length === 0 ? (
+          <div style={{ padding: spacing.xl, backgroundColor: colors.surface, borderRadius: borderRadius.lg, textAlign: 'center', color: colors.textSecondary }}>
+            Loading strategies from API...
           </div>
-        </div>
-      )}
-
-      {/* Active Strategy Card */}
-      <div
-        style={{
-          backgroundColor: colors.surface,
-          border: `1px solid ${colors.border}`,
-          borderRadius: borderRadius.md,
-          padding: spacing.lg,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: spacing.md,
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.sm }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-              <h2 style={{ margin: 0, fontSize: typography.fontSize.lg }}>{selectedStrategy.name}</h2>
-              <Badge label={`v${selectedStrategy.version}.0`} variant="primary" />
-              <Badge label={selectedStrategy.versionHash || 'v1-337f4ea9'} variant="neutral" />
-              <Badge
-                label={sessionStatus.isArmed ? StrategyStatus.ARMED : selectedStrategy.status}
-                variant={sessionStatus.isArmed ? 'danger' : 'purple'}
-              />
-            </div>
-            <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-              Underlying: {selectedStrategy.underlying} | Timeframe: {selectedStrategy.timeframe} | Moneyness: {selectedStrategy.selection.moneyness} | Allowed: LONG_CALL
-            </p>
-          </div>
-
-          <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center' }}>
-            {dailyDraftDate && (
-              <button
-                onClick={handleApplyToDailyBot}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.md}px`,
-                  borderRadius: borderRadius.md,
-                  backgroundColor: colors.cyan,
-                  color: '#05151B',
-                  fontWeight: typography.fontWeight.bold,
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontSize: typography.fontSize.xs,
-                }}
-              >
-                ✓ Use for Today&apos;s Bot
-              </button>
-            )}
+        ) : strategies.length === 0 ? (
+          <div style={{ padding: spacing.xl, backgroundColor: colors.surface, borderRadius: borderRadius.lg, textAlign: 'center' }}>
+            <p style={{ color: colors.textSecondary, marginBottom: spacing.md }}>No strategies found.</p>
             <button
-              onClick={() => handleRunScan(selectedStrategy)}
-              disabled={isScanning}
+              onClick={() => setIsCreateModalOpen(true)}
               style={{
                 padding: `${spacing.sm}px ${spacing.md}px`,
-                borderRadius: borderRadius.md,
-                backgroundColor: isScanning ? colors.surfaceElevated : colors.profit,
-                color: isScanning ? colors.textMuted : '#FFFFFF',
-                fontWeight: typography.fontWeight.bold,
+                backgroundColor: colors.cyan,
                 border: 'none',
-                cursor: isScanning ? 'not-allowed' : 'pointer',
-                fontSize: typography.fontSize.xs,
+                color: '#082F49',
+                borderRadius: borderRadius.md,
+                cursor: 'pointer',
+                fontWeight: typography.fontWeight.bold,
               }}
             >
-              {isScanning ? '⏳ Scanning Market...' : '🤖 Trigger Agent Scan'}
+              ➕ Create Your First Strategy
             </button>
-            <Badge
-              label={sessionStatus.isArmed ? 'AUTO EXECUTING' : 'APPROVAL REQUIRED'}
-              variant={sessionStatus.isArmed ? 'danger' : 'warning'}
-            />
           </div>
-        </div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: spacing.md }}>
+            {strategies.map((strat) => {
+              const isSelected = strat.id === selectedStrategyId;
+              const isCall = strat.allowedInstruments?.includes(AllowedOptionType.LONG_CALL);
 
-        {/* Configuration Rules Grid */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: spacing.md }}>
-          {/* Entry Conditions */}
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontSize: typography.fontSize.xs, fontWeight: typography.fontWeight.bold, color: colors.cyan, marginBottom: spacing.xs }}>
-              ENTRY CRITERIA (ALL ON 5M CLOSED BARS)
-            </div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.6 }}>
-              <li>EMA({selectedStrategy.entry.emaPeriod}) Bullish Cross on confirmed closed bar</li>
-              <li>RSI({selectedStrategy.entry.rsiPeriod}) &gt; {selectedStrategy.entry.rsiThreshold} momentum confirmation</li>
-              <li>Bid/Ask spread &lt; {selectedStrategy.entry.maxBidAskSpreadPct}% maximum liquidity filter</li>
-              <li>Min contract volume: {selectedStrategy.entry.minVolume.toLocaleString()} units</li>
-              <li>Selection: {selectedStrategy.selection.expiry}, {selectedStrategy.selection.moneyness} strike</li>
-            </ul>
-          </div>
-
-          {/* Risk Guardrails */}
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontSize: typography.fontSize.xs, fontWeight: typography.fontWeight.bold, color: colors.warning, marginBottom: spacing.xs }}>
-              RISK GUARDRAILS (HARD GATES)
-            </div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.6 }}>
-              <li>Max Capital: ₹{selectedStrategy.risk.maxCapitalInr.toLocaleString()} (Account budget)</li>
-              <li>Max All-In Trade Loss: ₹{selectedStrategy.risk.maxAllInTradeLossInr.toFixed(2)} (Stop loss + roundtrip costs)</li>
-              <li>Max Daily Loss: ₹{selectedStrategy.risk.maxAllInDailyLossInr.toFixed(2)}</li>
-              <li>Target Net Profit: ₹{selectedStrategy.risk.targetNetProfitInr.toFixed(2)} net after ₹{selectedStrategy.risk.maxRoundTripCostBudgetInr} charges</li>
-              <li>Max Open Positions: {selectedStrategy.risk.maxOpenPositions} lot</li>
-            </ul>
-          </div>
-
-          {/* Exit Rules */}
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontSize: typography.fontSize.xs, fontWeight: typography.fontWeight.bold, color: colors.profit, marginBottom: spacing.xs }}>
-              EXIT RULES & TIMING CUTOFFS
-            </div>
-            <ul style={{ margin: 0, paddingLeft: 18, fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.6 }}>
-              <li>Stop basis: {selectedStrategy.exit.stopBasis} (Multi-leg bracket limit)</li>
-              <li>Target basis: Dynamic net profit reservation ₹{selectedStrategy.risk.targetNetProfitInr}</li>
-              <li>Intraday cutoff: {selectedStrategy.exit.marketCutoff} IST automatic square-off</li>
-              <li>Session window: {selectedStrategy.session.start} to {selectedStrategy.session.lastEntry} IST</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-
-      {/* --- Phase 7 Auto-Disarming Safeguards Matrix --- */}
-      <div
-        style={{
-          backgroundColor: colors.surface,
-          border: `1px solid ${colors.border}`,
-          borderRadius: borderRadius.md,
-          padding: spacing.lg,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: spacing.md,
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: typography.fontSize.md }}>
-              🛡️ Bounded Autonomous Safety Triggers & Disarming Invariants
-            </h3>
-            <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-              Automatic instantaneous disarming safeguards to protect capital under all operating conditions.
-            </p>
-          </div>
-          <Badge label="SEBI FEB 2025 COMPLIANT" variant="primary" />
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: spacing.md }}>
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, fontSize: typography.fontSize.xs, marginBottom: 4 }}>
-              1. ⏱️ Time-Bounded Expiry
-            </div>
-            <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-              Auto disarms immediately upon window countdown reaching 0 (15m, 30m, or 60m). Max lifetime 120m.
-            </div>
-          </div>
-
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, fontSize: typography.fontSize.xs, marginBottom: 4 }}>
-              2. 🎯 Session Trade Cap
-            </div>
-            <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-              Auto disarms immediately upon executing configured session trades limit (max 1, 2, or 3 trades).
-            </div>
-          </div>
-
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, fontSize: typography.fontSize.xs, marginBottom: 4 }}>
-              3. 📝 Config or Version Mutation
-            </div>
-            <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-              Any strategy parameter update generates a version hash bump and immediately invalidates active arming.
-            </div>
-          </div>
-
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, fontSize: typography.fontSize.xs, marginBottom: 4 }}>
-              4. 📡 Market Feed Latency &gt;3,000ms
-            </div>
-            <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-              Stale quote or feed disconnection instantly blocks executions and disarms autonomous state.
-            </div>
-          </div>
-
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, fontSize: typography.fontSize.xs, marginBottom: 4 }}>
-              5. ⚖️ Broker Ledger Discrepancy
-            </div>
-            <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-              Any divergence between broker and workstation orders/positions triggers critical freeze and disarm.
-            </div>
-          </div>
-
-          <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-            <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, fontSize: typography.fontSize.xs, marginBottom: 4 }}>
-              6. 🛑 Kill Switch / Manual Flatten
-            </div>
-            <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-              Operator emergency stop or automated daily drawdown limit breach halts trading immediately.
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* --- Phase 7 Autonomous Execution Log Stream --- */}
-      <div
-        style={{
-          backgroundColor: colors.surface,
-          border: `1px solid ${colors.border}`,
-          borderRadius: borderRadius.md,
-          padding: spacing.lg,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: spacing.md,
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: typography.fontSize.md }}>
-              📜 Autonomous Execution Audit Ledger
-            </h3>
-            <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-              Cryptographically timestamped action logs for arming, proposal execution, and disarming events.
-            </p>
-          </div>
-          <Badge label={`${executionLogs.length} Events`} variant="neutral" />
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs }}>
-          {executionLogs.length === 0 ? (
-            <div
-              style={{
-                padding: spacing.lg,
-                textAlign: 'center',
-                color: colors.textMuted,
-                fontSize: typography.fontSize.sm,
-                backgroundColor: colors.surfaceElevated,
-                borderRadius: borderRadius.sm,
-              }}
-            >
-              Zero autonomous events logged today. Execution events will stream here during bounded sessions.
-            </div>
-          ) : (
-            executionLogs.map((log) => (
-            <div
-              key={log.id}
-              style={{
-                backgroundColor: colors.surfaceElevated,
-                padding: spacing.md,
-                borderRadius: borderRadius.sm,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: spacing.md,
-                borderLeft: `4px solid ${
-                  log.action === 'AUTO_TRIGGERED'
-                    ? colors.profit
-                    : log.action === 'ORDER_DISPATCHED'
-                    ? colors.cyan
-                    : colors.warning
-                }`,
-              }}
-            >
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-                  <span style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.xs, color: colors.textPrimary }}>
-                    {log.action}
-                  </span>
-                  <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
-                    {new Date(log.timestamp).toLocaleTimeString()}
-                  </span>
-                </div>
-                <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, marginTop: 4 }}>
-                  {log.details}
-                </div>
-              </div>
-              <Badge
-                label={log.action === 'AUTO_TRIGGERED' ? 'ACTIVE' : log.action === 'ORDER_DISPATCHED' ? 'EXECUTED' : 'SAFE'}
-                variant={log.action === 'AUTO_TRIGGERED' ? 'success' : log.action === 'ORDER_DISPATCHED' ? 'primary' : 'neutral'}
-              />
-            </div>
-          )))}
-        </div>
-      </div>
-
-      {/* --- Readiness Gates Audit Modal --- */}
-      {isReadinessModalOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.75)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 100,
-            padding: spacing.md,
-          }}
-        >
-          <div
-            style={{
-              backgroundColor: colors.surface,
-              border: `1px solid ${colors.border}`,
-              borderRadius: borderRadius.md,
-              width: '100%',
-              maxWidth: 700,
-              maxHeight: '90vh',
-              overflowY: 'auto',
-              padding: spacing.lg,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: spacing.md,
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <h2 style={{ margin: 0, fontSize: typography.fontSize.lg }}>
-                  🛡️ Pre-Flight Autonomous Readiness Audit
-                </h2>
-                <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-                  All 6 mandatory gates must strictly pass before Armed Auto mode can be activated.
-                </p>
-              </div>
-              <button
-                onClick={() => setIsReadinessModalOpen(false)}
-                style={{ background: 'transparent', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 18 }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.sm }}>
-              {readiness.items.map((gate) => (
+              return (
                 <div
-                  key={gate.id}
+                  key={strat.id}
                   style={{
-                    backgroundColor: colors.surfaceElevated,
+                    backgroundColor: colors.surface,
+                    borderRadius: borderRadius.lg,
+                    border: `1px solid ${isSelected ? colors.cyan : colors.border}`,
                     padding: spacing.md,
-                    borderRadius: borderRadius.sm,
-                    border: `1px solid ${gate.passed ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: 6,
+                    justifyContent: 'space-between',
+                    boxShadow: isSelected ? '0 0 15px rgba(6, 182, 212, 0.15)' : 'none',
+                    transition: 'all 0.2s ease',
                   }}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-                      <span style={{ fontSize: 16 }}>{gate.passed ? '✅' : '❌'}</span>
-                      <strong style={{ fontSize: typography.fontSize.sm, color: colors.textPrimary }}>
-                        {gate.title}
-                      </strong>
+                  {/* Card Header */}
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing.sm }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: spacing.xs, flexWrap: 'wrap' }}>
+                          <span style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.md }}>{strat.name}</span>
+                          <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, backgroundColor: colors.surfaceElevated, padding: '2px 6px', borderRadius: borderRadius.sm }}>
+                            v{strat.version}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, marginTop: 2 }}>
+                          {strat.underlying} · {strat.timeframe} Candlestick · {strat.session?.start}–{strat.session?.lastEntry} IST
+                        </div>
+                      </div>
+                      <Badge
+                        label={strat.status === StrategyStatus.PAPER_ACTIVE ? 'PAPER ACTIVE' : 'LIVE READY'}
+                        variant={strat.status === StrategyStatus.PAPER_ACTIVE ? 'purple' : 'primary'}
+                      />
                     </div>
-                    <Badge label={gate.category} variant={gate.passed ? 'primary' : 'danger'} />
+
+                    {/* Quick Badges */}
+                    <div style={{ display: 'flex', gap: spacing.xs, flexWrap: 'wrap', marginBottom: spacing.md }}>
+                      <span style={{ fontSize: typography.fontSize.xs, padding: '3px 8px', borderRadius: borderRadius.sm, backgroundColor: isCall ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)', color: isCall ? colors.profit : colors.loss, fontWeight: typography.fontWeight.semibold }}>
+                        {isCall ? '📈 Long Call (CE)' : '📉 Long Put (PE)'}
+                      </span>
+                      <span style={{ fontSize: typography.fontSize.xs, padding: '3px 8px', borderRadius: borderRadius.sm, backgroundColor: colors.surfaceElevated, color: colors.textSecondary }}>
+                        ATM Strikes
+                      </span>
+                      <span style={{ fontSize: typography.fontSize.xs, padding: '3px 8px', borderRadius: borderRadius.sm, backgroundColor: colors.surfaceElevated, color: colors.textSecondary }}>
+                        EMA {strat.entry?.emaPeriod ?? 20} & RSI {strat.entry?.rsiThreshold ?? 55}+
+                      </span>
+                    </div>
+
+                    {/* Rule Metrics Grid */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.sm, backgroundColor: colors.surfaceElevated, padding: spacing.sm, borderRadius: borderRadius.md, marginBottom: spacing.md }}>
+                      <div>
+                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Max Capital</span>
+                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
+                          ₹{strat.risk?.maxCapitalInr?.toLocaleString('en-IN') ?? '10,000'}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Max Loss / Trade</span>
+                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.loss }}>
+                          ₹{strat.risk?.maxAllInTradeLossInr ?? 200}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Target Profit</span>
+                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.profit }}>
+                          ₹{strat.risk?.targetNetProfitInr ?? 300}
+                        </span>
+                      </div>
+                      <div>
+                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Daily Trades Cap</span>
+                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
+                          {strat.risk?.maxTradesPerDay ?? 3} trades
+                        </span>
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-                    {gate.description}
-                  </div>
-                  <div style={{ fontSize: typography.fontSize.xs, color: gate.passed ? colors.profit : colors.loss, fontWeight: typography.fontWeight.semibold }}>
-                    {gate.details}
+
+                  {/* Actions Bar */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, borderTop: `1px solid ${colors.border}`, paddingTop: spacing.sm }}>
+                    <div style={{ display: 'flex', gap: spacing.xs }}>
+                      <button
+                        onClick={() => handleUseInDailyBot(strat)}
+                        style={{
+                          flex: 1,
+                          padding: `${spacing.sm}px ${spacing.sm}px`,
+                          backgroundColor: colors.cyan,
+                          border: 'none',
+                          color: '#082F49',
+                          borderRadius: borderRadius.md,
+                          fontWeight: typography.fontWeight.bold,
+                          fontSize: typography.fontSize.xs,
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 4,
+                        }}
+                      >
+                        <span>⚡</span>
+                        <span>Use in Daily Bot</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setSelectedStrategyId(strat.id);
+                          setBacktestUnderlying((strat.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
+                          handleRunBacktest(strat);
+                          if (backtestRef.current) {
+                            backtestRef.current.scrollIntoView({ behavior: 'smooth' });
+                          }
+                        }}
+                        style={{
+                          flex: 1,
+                          padding: `${spacing.sm}px ${spacing.sm}px`,
+                          backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                          border: `1px solid ${colors.brand}`,
+                          color: colors.brand,
+                          borderRadius: borderRadius.md,
+                          fontWeight: typography.fontWeight.semibold,
+                          fontSize: typography.fontSize.xs,
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: 4,
+                        }}
+                      >
+                        <span>🧪</span>
+                        <span>Backtest</span>
+                      </button>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: spacing.xs }}>
+                      <button
+                        onClick={() => handleOpenEdit(strat)}
+                        style={{
+                          flex: 1,
+                          padding: '6px 8px',
+                          backgroundColor: colors.surfaceElevated,
+                          border: `1px solid ${colors.border}`,
+                          color: colors.textSecondary,
+                          borderRadius: borderRadius.sm,
+                          fontSize: typography.fontSize.xs,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        ✏️ Edit Rules
+                      </button>
+
+                      <button
+                        onClick={() => handleOpenHistory(strat)}
+                        style={{
+                          flex: 1,
+                          padding: '6px 8px',
+                          backgroundColor: colors.surfaceElevated,
+                          border: `1px solid ${colors.border}`,
+                          color: colors.textSecondary,
+                          borderRadius: borderRadius.sm,
+                          fontSize: typography.fontSize.xs,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        📜 History
+                      </button>
+
+                      <button
+                        onClick={() => handleRunAgentScan(strat)}
+                        style={{
+                          flex: 1,
+                          padding: '6px 8px',
+                          backgroundColor: colors.surfaceElevated,
+                          border: `1px solid ${colors.border}`,
+                          color: colors.textSecondary,
+                          borderRadius: borderRadius.sm,
+                          fontSize: typography.fontSize.xs,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        🔍 Scan
+                      </button>
+                    </div>
                   </div>
                 </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* --- Section 2: Historical Backtesting Engine --- */}
+      <div
+        ref={backtestRef}
+        style={{
+          backgroundColor: colors.surface,
+          borderRadius: borderRadius.lg,
+          border: `1px solid ${colors.border}`,
+          padding: spacing.lg,
+          marginBottom: spacing.xl,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: spacing.md, marginBottom: spacing.md }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: spacing.xs }}>
+              <span style={{ fontSize: 20 }}>🧪</span>
+              <h2 style={{ fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold, margin: 0 }}>
+                Historical Backtesting Engine
+              </h2>
+            </div>
+            <p style={{ margin: 0, color: colors.textSecondary, fontSize: typography.fontSize.sm, marginTop: 4 }}>
+              Simulate entry on confirmed bar closes (zero look-ahead bias), dynamic delta premium tracking, and SEBI statutory levies.
+            </p>
+          </div>
+
+          {activeStrategy && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: spacing.xs, backgroundColor: colors.surfaceElevated, padding: '4px 10px', borderRadius: borderRadius.md }}>
+              <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Target:</span>
+              <span style={{ fontSize: typography.fontSize.xs, fontWeight: typography.fontWeight.bold, color: colors.cyan }}>
+                {activeStrategy.name}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Backtest Control Bar */}
+        <div
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: spacing.md,
+            alignItems: 'center',
+            backgroundColor: colors.surfaceElevated,
+            padding: spacing.md,
+            borderRadius: borderRadius.md,
+            marginBottom: spacing.lg,
+          }}
+        >
+          {/* Strategy Picker */}
+          <div>
+            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Strategy</label>
+            <select
+              value={selectedStrategyId}
+              onChange={(e) => {
+                setSelectedStrategyId(e.target.value);
+                const found = strategies.find((s) => s.id === e.target.value);
+                if (found) setBacktestUnderlying((found.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
+              }}
+              style={{
+                backgroundColor: colors.surface,
+                border: `1px solid ${colors.border}`,
+                color: colors.textPrimary,
+                borderRadius: borderRadius.sm,
+                padding: '6px 10px',
+                fontSize: typography.fontSize.sm,
+              }}
+            >
+              {strategies.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} ({s.underlying})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Historical Period Pills */}
+          <div>
+            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Time Window</label>
+            <div style={{ display: 'flex', gap: 4 }}>
+              {[7, 14, 30, 60].map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setBacktestDays(d)}
+                  style={{
+                    padding: '6px 12px',
+                    borderRadius: borderRadius.sm,
+                    backgroundColor: backtestDays === d ? colors.cyan : colors.surface,
+                    color: backtestDays === d ? '#082F49' : colors.textPrimary,
+                    fontWeight: backtestDays === d ? typography.fontWeight.bold : typography.fontWeight.normal,
+                    border: `1px solid ${backtestDays === d ? colors.cyan : colors.border}`,
+                    cursor: 'pointer',
+                    fontSize: typography.fontSize.xs,
+                  }}
+                >
+                  {d} Days
+                </button>
               ))}
             </div>
+          </div>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: spacing.sm, marginTop: spacing.sm }}>
-              <button
-                onClick={() => {
-                  handleAuditReadiness();
-                  setIsReadinessModalOpen(false);
-                }}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.md}px`,
-                  borderRadius: borderRadius.sm,
-                  backgroundColor: colors.cyan,
-                  color: '#082F49',
-                  fontWeight: typography.fontWeight.bold,
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontSize: typography.fontSize.xs,
-                }}
-              >
-                Re-Verify All Gates
-              </button>
-              <button
-                onClick={() => setIsReadinessModalOpen(false)}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.md}px`,
-                  borderRadius: borderRadius.sm,
-                  backgroundColor: colors.surfaceElevated,
-                  color: colors.textPrimary,
-                  border: `1px solid ${colors.border}`,
-                  cursor: 'pointer',
-                  fontSize: typography.fontSize.xs,
-                }}
-              >
-                Close Audit
-              </button>
-            </div>
+          {/* Capital Input */}
+          <div>
+            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Initial Capital (₹)</label>
+            <input
+              type="number"
+              min={1000}
+              max={10000}
+              value={backtestCapital}
+              onChange={(e) => setBacktestCapital(Math.min(10000, Number(e.target.value)))}
+              style={{
+                backgroundColor: colors.surface,
+                border: `1px solid ${colors.border}`,
+                color: colors.textPrimary,
+                borderRadius: borderRadius.sm,
+                padding: '6px 10px',
+                fontSize: typography.fontSize.sm,
+                width: 110,
+              }}
+            />
+          </div>
+
+          {/* Underlying Selection */}
+          <div>
+            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Underlying</label>
+            <select
+              value={backtestUnderlying}
+              onChange={(e) => setBacktestUnderlying(e.target.value as 'NIFTY' | 'BANKNIFTY')}
+              style={{
+                backgroundColor: colors.surface,
+                border: `1px solid ${colors.border}`,
+                color: colors.textPrimary,
+                borderRadius: borderRadius.sm,
+                padding: '6px 10px',
+                fontSize: typography.fontSize.sm,
+              }}
+            >
+              <option value="NIFTY">NIFTY (Lot: 25)</option>
+              <option value="BANKNIFTY">BANKNIFTY (Lot: 15)</option>
+            </select>
+          </div>
+
+          {/* Run Button */}
+          <div style={{ marginLeft: 'auto', alignSelf: 'flex-end' }}>
+            <button
+              onClick={() => handleRunBacktest()}
+              disabled={backtestLoading}
+              style={{
+                padding: '8px 18px',
+                backgroundColor: colors.cyan,
+                border: 'none',
+                color: '#082F49',
+                borderRadius: borderRadius.md,
+                fontWeight: typography.fontWeight.bold,
+                fontSize: typography.fontSize.sm,
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              {backtestLoading ? (
+                <>
+                  <span>⏳</span>
+                  <span>Simulating Candles...</span>
+                </>
+              ) : (
+                <>
+                  <span>▶</span>
+                  <span>Run Historical Backtest</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
-      )}
 
-      {/* --- Armed Mode Activation Modal --- */}
-      {isArmingModalOpen && (
+        {/* Backtest Results Display */}
+        {backtestResult && (
+          <div>
+            {/* KPI Cards Row */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: spacing.md, marginBottom: spacing.lg }}>
+              {/* Net P&L */}
+              <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.md, borderLeft: `4px solid ${backtestResult.netPnl >= 0 ? colors.profit : colors.loss}` }}>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Net P&L (After Levies)</span>
+                <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: backtestResult.netPnl >= 0 ? colors.profit : colors.loss, marginTop: 4 }}>
+                  {backtestResult.netPnl >= 0 ? '+' : ''}₹{backtestResult.netPnl.toLocaleString('en-IN')}
+                </div>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
+                  Return: {((backtestResult.netPnl / backtestResult.initialCapital) * 100).toFixed(1)}%
+                </span>
+              </div>
+
+              {/* Win Rate */}
+              <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.md, borderLeft: `4px solid ${colors.cyan}` }}>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Win Rate</span>
+                <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.textPrimary, marginTop: 4 }}>
+                  {backtestResult.winRatePct}%
+                </div>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
+                  {backtestResult.winningTrades} Wins / {backtestResult.losingTrades} Losses
+                </span>
+              </div>
+
+              {/* Total Levies */}
+              <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.md, borderLeft: `4px solid ${colors.warning}` }}>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>SEBI & Brokerage Levies</span>
+                <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.warning, marginTop: 4 }}>
+                  ₹{backtestResult.totalCharges.toLocaleString('en-IN')}
+                </div>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
+                  Brokerage, STT, GST deducted
+                </span>
+              </div>
+
+              {/* Max Drawdown */}
+              <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.md, borderLeft: `4px solid ${colors.loss}` }}>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Max Drawdown</span>
+                <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.loss, marginTop: 4 }}>
+                  ₹{backtestResult.maxDrawdown.toLocaleString('en-IN')}
+                </div>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
+                  Peak-to-trough: {backtestResult.maxDrawdownPct}%
+                </span>
+              </div>
+
+              {/* Profit Factor */}
+              <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.md, borderLeft: `4px solid ${colors.purple}` }}>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Profit Factor</span>
+                <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.textPrimary, marginTop: 4 }}>
+                  {backtestResult.profitFactor}x
+                </div>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
+                  Gross PnL: ₹{backtestResult.grossPnl.toLocaleString('en-IN')}
+                </span>
+              </div>
+            </div>
+
+            {/* Trade Log */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm }}>
+                <h3 style={{ fontSize: typography.fontSize.md, fontWeight: typography.fontWeight.bold, margin: 0 }}>
+                  Simulated Trade History ({backtestResult.trades.length} Trades)
+                </h3>
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
+                  Candle timeframe: 5 minutes · Indian Market Hours (09:15-15:30 IST)
+                </span>
+              </div>
+
+              {backtestResult.trades.length === 0 ? (
+                <div style={{ padding: spacing.md, backgroundColor: colors.surfaceElevated, borderRadius: borderRadius.md, textAlign: 'center', color: colors.textMuted }}>
+                  No setup signals triggered during the {backtestDays}-day historical window under current indicator thresholds.
+                </div>
+              ) : (
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: typography.fontSize.xs, textAlign: 'left' }}>
+                    <thead>
+                      <tr style={{ borderBottom: `1px solid ${colors.border}`, color: colors.textMuted }}>
+                        <th style={{ padding: '8px 10px' }}>Entry Time (IST)</th>
+                        <th style={{ padding: '8px 10px' }}>Symbol</th>
+                        <th style={{ padding: '8px 10px' }}>Qty</th>
+                        <th style={{ padding: '8px 10px' }}>Entry ₹</th>
+                        <th style={{ padding: '8px 10px' }}>Exit ₹</th>
+                        <th style={{ padding: '8px 10px' }}>Gross ₹</th>
+                        <th style={{ padding: '8px 10px' }}>Levies ₹</th>
+                        <th style={{ padding: '8px 10px' }}>Net P&L ₹</th>
+                        <th style={{ padding: '8px 10px' }}>Exit Reason</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {backtestResult.trades.map((t, idx) => {
+                        const entryDate = new Date(t.entryTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+                        return (
+                          <tr
+                            key={t.id || idx}
+                            style={{
+                              borderBottom: `1px solid ${colors.border}`,
+                              backgroundColor: idx % 2 === 0 ? 'transparent' : 'rgba(255, 255, 255, 0.02)',
+                            }}
+                          >
+                            <td style={{ padding: '8px 10px', color: colors.textSecondary }}>{entryDate}</td>
+                            <td style={{ padding: '8px 10px', fontWeight: typography.fontWeight.semibold }}>{t.symbol}</td>
+                            <td style={{ padding: '8px 10px' }}>{t.quantity}</td>
+                            <td style={{ padding: '8px 10px' }}>₹{t.entryPrice.toFixed(2)}</td>
+                            <td style={{ padding: '8px 10px' }}>₹{t.exitPrice.toFixed(2)}</td>
+                            <td style={{ padding: '8px 10px', color: t.grossPnl >= 0 ? colors.profit : colors.loss }}>
+                              {t.grossPnl >= 0 ? '+' : ''}₹{t.grossPnl.toFixed(2)}
+                            </td>
+                            <td style={{ padding: '8px 10px', color: colors.warning }}>₹{t.charges.toFixed(2)}</td>
+                            <td style={{ padding: '8px 10px', fontWeight: typography.fontWeight.bold, color: t.netPnl >= 0 ? colors.profit : colors.loss }}>
+                              {t.netPnl >= 0 ? '+' : ''}₹{t.netPnl.toFixed(2)}
+                            </td>
+                            <td style={{ padding: '8px 10px' }}>
+                              <span
+                                style={{
+                                  padding: '2px 6px',
+                                  borderRadius: borderRadius.sm,
+                                  fontSize: 10,
+                                  fontWeight: typography.fontWeight.bold,
+                                  backgroundColor:
+                                    t.exitReason === 'TARGET_PROFIT'
+                                      ? colors.profitMuted
+                                      : t.exitReason === 'STOP_LOSS'
+                                      ? colors.lossMuted
+                                      : 'rgba(245, 158, 11, 0.15)',
+                                  color:
+                                    t.exitReason === 'TARGET_PROFIT'
+                                      ? colors.profit
+                                      : t.exitReason === 'STOP_LOSS'
+                                      ? colors.loss
+                                      : colors.warning,
+                                }}
+                              >
+                                {t.exitReason.replace(/_/g, ' ')}
+                              </span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* --- Modal: Create New Strategy --- */}
+      {isCreateModalOpen && (
         <div
           style={{
             position: 'fixed',
             inset: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.75)',
+            backgroundColor: 'rgba(0, 0, 0, 0.8)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            zIndex: 100,
+            zIndex: 1000,
             padding: spacing.md,
           }}
         >
           <div
             style={{
               backgroundColor: colors.surface,
+              borderRadius: borderRadius.lg,
               border: `1px solid ${colors.border}`,
-              borderRadius: borderRadius.md,
               width: '100%',
-              maxWidth: 600,
+              maxWidth: 580,
               maxHeight: '90vh',
               overflowY: 'auto',
               padding: spacing.lg,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: spacing.md,
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <h2 style={{ margin: 0, fontSize: typography.fontSize.lg, color: colors.textPrimary }}>
-                  ⚡ Arm Bounded Autonomous Session
-                </h2>
-                <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-                  Time-bounded autonomous execution with hard capital limits and protective GTT exits.
-                </p>
-              </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
+              <h2 style={{ margin: 0, fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold }}>
+                ➕ Create New Trading Strategy
+              </h2>
               <button
-                onClick={() => setIsArmingModalOpen(false)}
-                style={{ background: 'transparent', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 18 }}
+                onClick={() => setIsCreateModalOpen(false)}
+                style={{ background: 'none', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 20 }}
               >
                 ✕
               </button>
             </div>
 
-            {/* Strategy Selection Recap */}
-            <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-              <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>TARGET STRATEGY</div>
-              <div style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.sm, color: colors.textPrimary }}>
-                {selectedStrategy.name} (v{selectedStrategy.version}.0)
-              </div>
-              <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, marginTop: 2 }}>
-                Hash: {selectedStrategy.versionHash} | Underlying: {selectedStrategy.underlying} | Mode: PAPER
-              </div>
-            </div>
-
-            {/* Time Window Duration Selector */}
-            <div>
-              <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, fontWeight: typography.fontWeight.bold }}>
-                1. SELECT BOUNDED TIME WINDOW
-              </label>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: spacing.sm, marginTop: 6 }}>
-                {[15, 30, 60].map((mins) => (
-                  <button
-                    key={mins}
-                    type="button"
-                    onClick={() => setArmDurationMinutes(mins)}
-                    style={{
-                      padding: spacing.md,
-                      borderRadius: borderRadius.sm,
-                      backgroundColor: armDurationMinutes === mins ? 'rgba(6, 182, 212, 0.15)' : colors.surfaceElevated,
-                      border: `1px solid ${armDurationMinutes === mins ? colors.cyan : colors.border}`,
-                      color: armDurationMinutes === mins ? colors.cyan : colors.textPrimary,
-                      fontWeight: typography.fontWeight.bold,
-                      cursor: 'pointer',
-                      fontSize: typography.fontSize.sm,
-                    }}
-                  >
-                    ⏱️ {mins} Minutes
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Max Trades Per Session Cap */}
-            <div>
-              <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, fontWeight: typography.fontWeight.bold }}>
-                2. SESSION TRADE COUNT CAP (AUTO-DISARMS UPON REACHING)
-              </label>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: spacing.sm, marginTop: 6 }}>
-                {[1, 2, 3].map((trades) => (
-                  <button
-                    key={trades}
-                    type="button"
-                    onClick={() => setMaxTradesCap(trades)}
-                    style={{
-                      padding: spacing.md,
-                      borderRadius: borderRadius.sm,
-                      backgroundColor: maxTradesCap === trades ? 'rgba(16, 185, 129, 0.15)' : colors.surfaceElevated,
-                      border: `1px solid ${maxTradesCap === trades ? colors.profit : colors.border}`,
-                      color: maxTradesCap === trades ? colors.profit : colors.textPrimary,
-                      fontWeight: typography.fontWeight.bold,
-                      cursor: 'pointer',
-                      fontSize: typography.fontSize.sm,
-                    }}
-                  >
-                    🎯 Max {trades} Trade{trades > 1 ? 's' : ''}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Hard Risk Caps Recap */}
-            <div style={{ backgroundColor: 'rgba(245, 158, 11, 0.08)', border: `1px solid ${colors.warning}`, padding: spacing.md, borderRadius: borderRadius.sm }}>
-              <div style={{ fontSize: typography.fontSize.xs, fontWeight: typography.fontWeight.bold, color: colors.warning, marginBottom: 4 }}>
-                HARD RISK CAPS ENFORCED FOR SESSION:
-              </div>
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.5 }}>
-                <li>Maximum capital reservation: ₹10,000 per entry</li>
-                <li>Maximum all-in trade loss: ₹500 (premium + ₹60 roundtrip costs)</li>
-                <li>Mandatory multi-leg GTT bracket protection on broker fill</li>
-                <li>Pre-trade revalidation: Spread &le; 1.0%, Quote latency &lt; 3,000ms</li>
-                <li>Automatic disarming upon session timer expiry or trade cap</li>
-              </ul>
-            </div>
-
-            {/* Operator Consent Checkbox */}
-            <label style={{ display: 'flex', alignItems: 'flex-start', gap: spacing.sm, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={operatorConsent}
-                onChange={(e) => setOperatorConsent(e.target.checked)}
-                style={{ marginTop: 3 }}
-              />
-              <span style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-                I acknowledge the hard risk limits and consent to bounded autonomous execution. I understand this session will automatically disarm after {armDurationMinutes} minutes or upon completing {maxTradesCap} trade{maxTradesCap > 1 ? 's' : ''}.
-              </span>
-            </label>
-
-            {/* Confirmation Code Input */}
-            <div>
-              <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-                Type <code style={{ color: colors.loss, fontWeight: 'bold' }}>CONFIRM_AUTO_EXECUTION</code> to activate:
-              </label>
-              <input
-                type="text"
-                value={confirmationCode}
-                onChange={(e) => setConfirmationCode(e.target.value)}
-                placeholder="CONFIRM_AUTO_EXECUTION"
-                style={{
-                  width: '100%',
-                  padding: spacing.sm,
-                  backgroundColor: colors.surfaceElevated,
-                  border: `1px solid ${confirmationCode === 'CONFIRM_AUTO_EXECUTION' ? colors.profit : colors.border}`,
-                  color: colors.textPrimary,
-                  borderRadius: borderRadius.sm,
-                  marginTop: 4,
-                  fontFamily: typography.fontFamily.mono,
-                  letterSpacing: '0.05em',
-                }}
-              />
-            </div>
-
-            {/* Action Buttons */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: spacing.sm, marginTop: spacing.sm }}>
-              <button
-                type="button"
-                onClick={() => setIsArmingModalOpen(false)}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.md}px`,
-                  borderRadius: borderRadius.sm,
-                  backgroundColor: colors.surfaceElevated,
-                  color: colors.textPrimary,
-                  border: `1px solid ${colors.border}`,
-                  cursor: 'pointer',
-                  fontSize: typography.fontSize.xs,
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleArmSession}
-                disabled={confirmationCode !== 'CONFIRM_AUTO_EXECUTION' || !operatorConsent}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.md}px`,
-                  borderRadius: borderRadius.sm,
-                  backgroundColor:
-                    confirmationCode === 'CONFIRM_AUTO_EXECUTION' && operatorConsent
-                      ? colors.profit
-                      : colors.surfaceElevated,
-                  color:
-                    confirmationCode === 'CONFIRM_AUTO_EXECUTION' && operatorConsent
-                      ? '#FFFFFF'
-                      : colors.textMuted,
-                  fontWeight: typography.fontWeight.bold,
-                  border: 'none',
-                  cursor:
-                    confirmationCode === 'CONFIRM_AUTO_EXECUTION' && operatorConsent
-                      ? 'pointer'
-                      : 'not-allowed',
-                  fontSize: typography.fontSize.xs,
-                }}
-              >
-                ⚡ Arm {armDurationMinutes}m Autonomous Session
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* --- Strategy Editor Modal --- */}
-      {isEditorOpen && (
-        <div
-          style={{
-            position: 'fixed',
-            inset: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.75)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 100,
-            padding: spacing.md,
-          }}
-        >
-          <div
-            style={{
-              backgroundColor: colors.surface,
-              border: `1px solid ${colors.border}`,
-              borderRadius: borderRadius.md,
-              width: '100%',
-              maxWidth: 600,
-              maxHeight: '90vh',
-              overflowY: 'auto',
-              padding: spacing.lg,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: spacing.md,
-            }}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h2 style={{ margin: 0, fontSize: typography.fontSize.lg }}>Edit Strategy Rules (Draft v{selectedStrategy.version + 1})</h2>
-              <button
-                onClick={() => setIsEditorOpen(false)}
-                style={{ background: 'transparent', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 18 }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <p style={{ margin: 0, fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-              Any modification to indicators or risk parameters will automatically generate an immutable published version bump.
+            <p style={{ margin: '0 0 16px 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
+              Define execution rules, indicator filters, and statutory risk limits. Newly created strategies are immediately ready for backtesting and Daily Bot execution.
             </p>
 
-            {/* Form Fields */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.md }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.md }}>
+              {/* Strategy Name */}
               <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Strategy Name</label>
+                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                  Strategy Name
+                </label>
                 <input
                   type="text"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                  placeholder="e.g. NIFTY Momentum Scalper"
+                  value={createForm.name}
+                  onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
                   style={{
                     width: '100%',
                     padding: spacing.sm,
@@ -1520,298 +1043,466 @@ export default function StrategiesScreen() {
                     border: `1px solid ${colors.border}`,
                     color: colors.textPrimary,
                     borderRadius: borderRadius.sm,
-                    marginTop: 4,
+                    boxSizing: 'border-box',
                   }}
                 />
               </div>
 
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Underlying Asset</label>
-                <select
-                  value={formData.underlying}
-                  onChange={(e) => setFormData({ ...formData, underlying: e.target.value })}
+              {/* Underlying & Direction */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.sm }}>
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Underlying Index
+                  </label>
+                  <select
+                    value={createForm.underlying}
+                    onChange={(e) => setCreateForm({ ...createForm, underlying: e.target.value as 'NIFTY' | 'BANKNIFTY' })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                    }}
+                  >
+                    <option value="NIFTY">NIFTY (Lot 25)</option>
+                    <option value="BANKNIFTY">BANKNIFTY (Lot 15)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Option Direction
+                  </label>
+                  <select
+                    value={createForm.direction}
+                    onChange={(e) => setCreateForm({ ...createForm, direction: e.target.value as AllowedOptionType })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                    }}
+                  >
+                    <option value={AllowedOptionType.LONG_CALL}>Long Call (CE)</option>
+                    <option value={AllowedOptionType.LONG_PUT}>Long Put (PE)</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Indicators */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: spacing.sm }}>
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    EMA Period
+                  </label>
+                  <input
+                    type="number"
+                    value={createForm.emaPeriod}
+                    onChange={(e) => setCreateForm({ ...createForm, emaPeriod: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    RSI Period
+                  </label>
+                  <input
+                    type="number"
+                    value={createForm.rsiPeriod}
+                    onChange={(e) => setCreateForm({ ...createForm, rsiPeriod: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    RSI Trigger Level
+                  </label>
+                  <input
+                    type="number"
+                    value={createForm.rsiThreshold}
+                    onChange={(e) => setCreateForm({ ...createForm, rsiThreshold: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Risk Limits */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.sm }}>
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Max Trade Capital (₹, Max 10,000)
+                  </label>
+                  <input
+                    type="number"
+                    max={10000}
+                    value={createForm.maxCapitalInr}
+                    onChange={(e) => setCreateForm({ ...createForm, maxCapitalInr: Math.min(10000, Number(e.target.value)) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Max Loss Per Trade (₹)
+                  </label>
+                  <input
+                    type="number"
+                    value={createForm.maxAllInTradeLossInr}
+                    onChange={(e) => setCreateForm({ ...createForm, maxAllInTradeLossInr: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Target Profit (₹)
+                  </label>
+                  <input
+                    type="number"
+                    value={createForm.targetNetProfitInr}
+                    onChange={(e) => setCreateForm({ ...createForm, targetNetProfitInr: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Max Trades / Day
+                  </label>
+                  <input
+                    type="number"
+                    value={createForm.maxTradesPerDay}
+                    onChange={(e) => setCreateForm({ ...createForm, maxTradesPerDay: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Action buttons */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: spacing.sm, marginTop: spacing.md }}>
+                <button
+                  type="button"
+                  onClick={() => setIsCreateModalOpen(false)}
                   style={{
-                    width: '100%',
-                    padding: spacing.sm,
+                    padding: `${spacing.sm}px ${spacing.md}px`,
                     backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
                     color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
+                    border: `1px solid ${colors.border}`,
+                    borderRadius: borderRadius.md,
+                    cursor: 'pointer',
                   }}
                 >
-                  <option value="NIFTY">NIFTY (Lot: 25)</option>
-                  <option value="BANKNIFTY">BANKNIFTY (Lot: 15)</option>
-                </select>
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Timeframe</label>
-                <input
-                  type="text"
-                  value={formData.timeframe}
-                  disabled
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCreateStrategy}
                   style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textMuted,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Moneyness Selection</label>
-                <select
-                  value={formData.moneyness}
-                  onChange={(e) => setFormData({ ...formData, moneyness: e.target.value as any })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
+                    padding: `${spacing.sm}px ${spacing.lg}px`,
+                    backgroundColor: colors.cyan,
+                    color: '#082F49',
+                    fontWeight: typography.fontWeight.bold,
+                    border: 'none',
+                    borderRadius: borderRadius.md,
+                    cursor: 'pointer',
                   }}
                 >
-                  <option value={MoneynessType.ATM}>ATM (At-The-Money)</option>
-                  <option value={MoneynessType.ITM_1}>ITM1 (In-The-Money 1)</option>
-                  <option value={MoneynessType.OTM_1}>OTM1 (Out-Of-The-Money 1)</option>
-                </select>
+                  Create Strategy
+                </button>
               </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>EMA Period</label>
-                <input
-                  type="number"
-                  value={formData.emaPeriod}
-                  onChange={(e) => setFormData({ ...formData, emaPeriod: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>RSI Period</label>
-                <input
-                  type="number"
-                  value={formData.rsiPeriod}
-                  onChange={(e) => setFormData({ ...formData, rsiPeriod: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>RSI Momentum Threshold</label>
-                <input
-                  type="number"
-                  value={formData.rsiThreshold}
-                  onChange={(e) => setFormData({ ...formData, rsiThreshold: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Max Bid/Ask Spread (%)</label>
-                <input
-                  type="number"
-                  step="0.1"
-                  value={formData.maxBidAskSpreadPct}
-                  onChange={(e) => setFormData({ ...formData, maxBidAskSpreadPct: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Max Capital (INR)</label>
-                <input
-                  type="number"
-                  value={formData.maxCapitalInr}
-                  onChange={(e) => setFormData({ ...formData, maxCapitalInr: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Max All-In Trade Loss (INR)</label>
-                <input
-                  type="number"
-                  value={formData.maxAllInTradeLossInr}
-                  onChange={(e) => setFormData({ ...formData, maxAllInTradeLossInr: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Max Daily Loss (INR)</label>
-                <input
-                  type="number"
-                  value={formData.maxAllInDailyLossInr}
-                  onChange={(e) => setFormData({ ...formData, maxAllInDailyLossInr: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Target Net Profit (INR)</label>
-                <input
-                  type="number"
-                  value={formData.targetNetProfitInr}
-                  onChange={(e) => setFormData({ ...formData, targetNetProfitInr: Number(e.target.value) })}
-                  style={{
-                    width: '100%',
-                    padding: spacing.sm,
-                    backgroundColor: colors.surfaceElevated,
-                    border: `1px solid ${colors.border}`,
-                    color: colors.textPrimary,
-                    borderRadius: borderRadius.sm,
-                    marginTop: 4,
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: spacing.sm, marginTop: spacing.md }}>
-              <button
-                type="button"
-                onClick={() => setIsEditorOpen(false)}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.md}px`,
-                  borderRadius: borderRadius.sm,
-                  backgroundColor: colors.surfaceElevated,
-                  color: colors.textPrimary,
-                  border: `1px solid ${colors.border}`,
-                  cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleSaveStrategy}
-                style={{
-                  padding: `${spacing.sm}px ${spacing.md}px`,
-                  borderRadius: borderRadius.sm,
-                  backgroundColor: colors.cyan,
-                  color: '#082F49',
-                  fontWeight: typography.fontWeight.bold,
-                  border: 'none',
-                  cursor: 'pointer',
-                }}
-              >
-                Publish New Revision
-              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* --- Version History Modal --- */}
-      {isHistoryOpen && (
+      {/* --- Modal: Edit Strategy --- */}
+      {isEditModalOpen && (
         <div
           style={{
             position: 'fixed',
             inset: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.75)',
+            backgroundColor: 'rgba(0, 0, 0, 0.8)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            zIndex: 100,
+            zIndex: 1000,
             padding: spacing.md,
           }}
         >
           <div
             style={{
               backgroundColor: colors.surface,
+              borderRadius: borderRadius.lg,
               border: `1px solid ${colors.border}`,
-              borderRadius: borderRadius.md,
               width: '100%',
-              maxWidth: 600,
+              maxWidth: 540,
               padding: spacing.lg,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: spacing.md,
             }}
           >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <h2 style={{ margin: 0, fontSize: typography.fontSize.lg }}>Immutable Version Audit Ledger</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
+              <h2 style={{ margin: 0, fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold }}>
+                ✏️ Edit Strategy Rules (v{activeStrategy?.version})
+              </h2>
               <button
-                onClick={() => setIsHistoryOpen(false)}
-                style={{ background: 'transparent', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 18 }}
+                onClick={() => setIsEditModalOpen(false)}
+                style={{ background: 'none', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 20 }}
               >
                 ✕
               </button>
             </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.sm }}>
+            <p style={{ margin: '0 0 16px 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
+              Changing indicators or risk parameters automatically generates an immutable version revision bump with full audit tracking.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.md }}>
+              <div>
+                <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                  Strategy Name
+                </label>
+                <input
+                  type="text"
+                  value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
+                  style={{
+                    width: '100%',
+                    padding: spacing.sm,
+                    backgroundColor: colors.surfaceElevated,
+                    border: `1px solid ${colors.border}`,
+                    color: colors.textPrimary,
+                    borderRadius: borderRadius.sm,
+                    boxSizing: 'border-box',
+                  }}
+                />
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.sm }}>
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    EMA Period
+                  </label>
+                  <input
+                    type="number"
+                    value={editForm.emaPeriod}
+                    onChange={(e) => setEditForm({ ...editForm, emaPeriod: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    RSI Threshold
+                  </label>
+                  <input
+                    type="number"
+                    value={editForm.rsiThreshold}
+                    onChange={(e) => setEditForm({ ...editForm, rsiThreshold: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.sm }}>
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Max Loss / Trade (₹)
+                  </label>
+                  <input
+                    type="number"
+                    value={editForm.maxAllInTradeLossInr}
+                    onChange={(e) => setEditForm({ ...editForm, maxAllInTradeLossInr: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+
+                <div>
+                  <label style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, display: 'block', marginBottom: 4 }}>
+                    Target Profit (₹)
+                  </label>
+                  <input
+                    type="number"
+                    value={editForm.targetNetProfitInr}
+                    onChange={(e) => setEditForm({ ...editForm, targetNetProfitInr: Number(e.target.value) })}
+                    style={{
+                      width: '100%',
+                      padding: spacing.sm,
+                      backgroundColor: colors.surfaceElevated,
+                      border: `1px solid ${colors.border}`,
+                      color: colors.textPrimary,
+                      borderRadius: borderRadius.sm,
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: spacing.sm, marginTop: spacing.md }}>
+                <button
+                  type="button"
+                  onClick={() => setIsEditModalOpen(false)}
+                  style={{
+                    padding: `${spacing.sm}px ${spacing.md}px`,
+                    backgroundColor: colors.surfaceElevated,
+                    color: colors.textPrimary,
+                    border: `1px solid ${colors.border}`,
+                    borderRadius: borderRadius.md,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveEdit}
+                  style={{
+                    padding: `${spacing.sm}px ${spacing.lg}px`,
+                    backgroundColor: colors.cyan,
+                    color: '#082F49',
+                    fontWeight: typography.fontWeight.bold,
+                    border: 'none',
+                    borderRadius: borderRadius.md,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Publish New Revision
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- Modal: Version Audit History --- */}
+      {isHistoryModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.8)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000,
+            padding: spacing.md,
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: colors.surface,
+              borderRadius: borderRadius.lg,
+              border: `1px solid ${colors.border}`,
+              width: '100%',
+              maxWidth: 580,
+              padding: spacing.lg,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
+              <h2 style={{ margin: 0, fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold }}>
+                📜 Immutable Revision Audit Log
+              </h2>
+              <button
+                onClick={() => setIsHistoryModalOpen(false)}
+                style={{ background: 'none', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 20 }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.sm, maxHeight: '60vh', overflowY: 'auto' }}>
               {historyList.map((ver) => (
                 <div
-                  key={ver.versionHash}
+                  key={ver.versionHash || ver.version}
                   style={{
                     backgroundColor: colors.surfaceElevated,
                     padding: spacing.md,
                     borderRadius: borderRadius.sm,
-                    border: `1px solid ${ver.version === selectedStrategy.version ? colors.cyan : colors.border}`,
+                    border: `1px solid ${ver.version === activeStrategy?.version ? colors.cyan : colors.border}`,
                     display: 'flex',
                     justifyContent: 'space-between',
                     alignItems: 'center',
@@ -1819,10 +1510,10 @@ export default function StrategiesScreen() {
                 >
                   <div>
                     <div style={{ fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
-                      Revision v{ver.version}.0 {ver.version === selectedStrategy.version && '(Active)'}
+                      Revision v{ver.version}.0 {ver.version === activeStrategy?.version && '(Active)'}
                     </div>
-                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, fontFamily: typography.fontFamily.mono }}>
-                      Hash: {ver.versionHash} | EMA: {ver.entry.emaPeriod} | RSI: {ver.entry.rsiThreshold} | Max Loss: ₹{ver.risk.maxAllInTradeLossInr}
+                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, fontFamily: typography.fontFamily.mono, marginTop: 4 }}>
+                      EMA: {ver.entry?.emaPeriod ?? 20} | RSI: {ver.entry?.rsiThreshold ?? 55} | Max Loss: ₹{ver.risk?.maxAllInTradeLossInr ?? 200}
                     </div>
                   </div>
                   <Badge label="VERIFIED" variant="primary" />
@@ -1832,6 +1523,7 @@ export default function StrategiesScreen() {
           </div>
         </div>
       )}
+
     </div>
   );
 }

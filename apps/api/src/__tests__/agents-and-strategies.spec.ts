@@ -170,5 +170,52 @@ describe('Agents, Tools & Strategy Engine (Phase 2)', () => {
       // Already approved cannot be re-approved
       expect(() => proposalsService.approveProposal(proposal.id)).toThrow();
     });
+
+    it('creates a custom strategy with valid UUID and permits backtesting', async () => {
+      const created = strategiesService.createStrategy({
+        name: 'BANKNIFTY Scalper',
+        market: 'NSE_FO',
+        underlying: 'BANKNIFTY',
+        tradeMode: TradeMode.PAPER,
+        allowedInstruments: ['LONG_CALL'],
+        timeframe: '5m',
+        session: { start: '09:25', lastEntry: '14:45', timezone: 'Asia/Kolkata' },
+        entry: { emaPeriod: 20, rsiPeriod: 14, rsiThreshold: 50, maxBidAskSpreadPct: 1, minVolume: 1000 },
+        selection: { expiry: 'NEAREST_ELIGIBLE', moneyness: 'ATM', minVolume: 1000 },
+        risk: {
+          maxCapitalInr: 10000,
+          maxAllInTradeLossInr: 300,
+          maxAllInDailyLossInr: 900,
+          maxOpenPositions: 1,
+          maxTradesPerDay: 4,
+          targetNetProfitInr: 500,
+          maxRoundTripCostBudgetInr: 80,
+        },
+        exit: { stopBasis: 'OPTION_PREMIUM', marketCutoff: '15:10' },
+        maxCapitalInr: 10000,
+        maxAllInTradeLossInr: 300,
+        maxAllInDailyLossInr: 900,
+        targetNetProfitInr: 500,
+        maxRoundTripCostBudgetInr: 80,
+        maxOpenPositions: 1,
+        requiresApproval: true,
+      });
+
+      expect(created.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      expect(created.name).toBe('BANKNIFTY Scalper');
+
+      const backtest = await strategiesService.runBacktest(created.id, {
+        days: 7,
+        initialCapital: 10000,
+        underlying: 'BANKNIFTY',
+      });
+
+      expect(backtest.strategyId).toBe(created.id);
+      expect(backtest.periodDays).toBe(7);
+      expect(backtest.initialCapital).toBe(10000);
+      expect(backtest.winRatePct).toBeGreaterThanOrEqual(0);
+      expect(backtest.winRatePct).toBeLessThanOrEqual(100);
+      expect(backtest.netPnl).toBe(Number((backtest.grossPnl - backtest.totalCharges).toFixed(2)));
+    });
   });
 });

@@ -1,6 +1,10 @@
 import { Injectable, NotFoundException, Inject } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import {
   AllowedOptionType,
+  BacktestRequest,
+  BacktestRequestSchema,
+  BacktestResult,
   MoneynessType,
   StrategyConfig,
   StrategyConfigSchema,
@@ -9,7 +13,9 @@ import {
 } from '@trading-bot/contracts';
 import {
   calculateStrategyVersionHash,
+  generateHistoricalMarketCandles,
   requiresVersionBump,
+  runStrategyBacktest,
 } from '@trading-bot/domain';
 import { AgentCoordinatorService } from '../agents/agent-coordinator.service';
 import { ProposalsService } from '../proposals/proposals.service';
@@ -43,7 +49,7 @@ export class StrategiesService {
   }
 
   public createStrategy(dto: any): StrategyConfig {
-    const id = dto.id || `strat_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const id = dto.id || randomUUID();
     const parsed = StrategyConfigSchema.parse({
       ...dto,
       id,
@@ -98,6 +104,22 @@ export class StrategiesService {
     }
 
     return result;
+  }
+
+  public async runBacktest(id: string, reqDto: Partial<BacktestRequest>): Promise<BacktestResult> {
+    const strategy = this.getStrategy(id);
+    const parsedReq = BacktestRequestSchema.parse(reqDto || {});
+
+    // Generate deterministic candle history based on requested days and strategy underlying
+    const underlying = parsedReq.underlying || strategy.underlying || 'NIFTY';
+    const timeframeMins = strategy.timeframe === '15m' ? 15 : strategy.timeframe === '1m' ? 1 : 5;
+    const candles = generateHistoricalMarketCandles(underlying, parsedReq.days, timeframeMins);
+
+    return runStrategyBacktest({
+      strategy,
+      candles,
+      request: parsedReq,
+    });
   }
 
   private seedDefaultStrategies(): void {

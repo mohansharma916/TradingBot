@@ -35,6 +35,8 @@ import {
   DailyBotSetup,
   DailyBotStartRequest,
   DailyBotToday,
+  BacktestRequest,
+  BacktestResult,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -340,6 +342,13 @@ export class TradingPlatformClient {
   public async runStrategyScan(id: string): Promise<any> {
     return this.request(`/strategies/${id}/scan`, {
       method: 'POST',
+    });
+  }
+
+  public async runBacktest(strategyId: string, options?: Partial<BacktestRequest>): Promise<BacktestResult> {
+    return this.request(`/strategies/${strategyId}/backtest`, {
+      method: 'POST',
+      body: JSON.stringify(options ?? {}),
     });
   }
 

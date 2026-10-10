@@ -234,6 +234,53 @@ export const StrategyConfigSchema = z.object({
 
 export type StrategyConfig = z.infer<typeof StrategyConfigSchema>;
 
+// Backtest Schemas
+export const BacktestTradeRecordSchema = z.object({
+  id: z.string(),
+  entryTime: z.string(),
+  exitTime: z.string(),
+  symbol: z.string(),
+  side: z.string(),
+  entryPrice: z.number(),
+  exitPrice: z.number(),
+  quantity: z.number(),
+  grossPnl: z.number(),
+  charges: z.number(),
+  netPnl: z.number(),
+  exitReason: z.string(),
+});
+export type BacktestTradeRecord = z.infer<typeof BacktestTradeRecordSchema>;
+
+export const BacktestRequestSchema = z.object({
+  days: z.number().int().min(1).max(90).default(14),
+  initialCapital: z.number().positive().default(10000),
+  underlying: z.enum(['NIFTY', 'BANKNIFTY']).default('NIFTY'),
+});
+export type BacktestRequest = z.infer<typeof BacktestRequestSchema>;
+
+export const BacktestResultSchema = z.object({
+  strategyId: z.string(),
+  strategyName: z.string(),
+  version: z.number(),
+  periodDays: z.number(),
+  fromDate: z.string(),
+  toDate: z.string(),
+  initialCapital: z.number(),
+  finalCapital: z.number(),
+  totalTrades: z.number(),
+  winningTrades: z.number(),
+  losingTrades: z.number(),
+  winRatePct: z.number(),
+  grossPnl: z.number(),
+  totalCharges: z.number(),
+  netPnl: z.number(),
+  maxDrawdown: z.number(),
+  maxDrawdownPct: z.number(),
+  profitFactor: z.number(),
+  trades: z.array(BacktestTradeRecordSchema),
+});
+export type BacktestResult = z.infer<typeof BacktestResultSchema>;
+
 // Agent Read-Only Tool Schemas
 export const ToolScanUniverseInputSchema = z.object({
   underlying: z.string().default('NIFTY'),
