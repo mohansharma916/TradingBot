@@ -53,6 +53,20 @@ export const InstrumentSchema = z.object({
 
 export type Instrument = z.infer<typeof InstrumentSchema>;
 
+// Market Depth Schema (5-level bid/ask)
+export const MarketDepthLevelSchema = z.object({
+  price: z.number().nonnegative(),
+  quantity: z.number().int().nonnegative(),
+  orders: z.number().int().nonnegative().optional(),
+});
+
+export const MarketDepthSchema = z.object({
+  bids: z.array(MarketDepthLevelSchema).max(5),
+  asks: z.array(MarketDepthLevelSchema).max(5),
+});
+
+export type MarketDepth = z.infer<typeof MarketDepthSchema>;
+
 // Market Quote Schema
 export const QuoteSnapshotSchema = z.object({
   instrumentKey: z.string(),
@@ -65,9 +79,80 @@ export const QuoteSnapshotSchema = z.object({
   openInterest: z.number().int().nonnegative(),
   timestamp: z.string().datetime(),
   isStale: z.boolean().default(false),
+  netChange: z.number().optional().default(0),
+  netChangePct: z.number().optional().default(0),
+  openPrice: z.number().nonnegative().optional(),
+  highPrice: z.number().nonnegative().optional(),
+  lowPrice: z.number().nonnegative().optional(),
+  closePrice: z.number().nonnegative().optional(),
+  depth: MarketDepthSchema.optional(),
 });
 
 export type QuoteSnapshot = z.infer<typeof QuoteSnapshotSchema>;
+
+// Market Calendar Schema
+export const MarketCalendarSchema = z.object({
+  session: z.string(), // MarketSession enum value
+  isOpen: z.boolean(),
+  currentTimeIst: z.string(),
+  sessionStartTime: z.string(),
+  sessionEndTime: z.string(),
+  timeUntilOpenMs: z.number().nonnegative(),
+  timeUntilCloseMs: z.number().nonnegative(),
+  isHoliday: z.boolean(),
+  holidayName: z.string().optional(),
+});
+
+export type MarketCalendar = z.infer<typeof MarketCalendarSchema>;
+
+// Option Chain Item & Result Schemas
+export const OptionChainStrikeSchema = z.object({
+  strikePrice: z.number().positive(),
+  call: z.object({
+    instrumentKey: z.string(),
+    symbol: z.string(),
+    lastPrice: z.number().nonnegative(),
+    bidPrice: z.number().nonnegative(),
+    askPrice: z.number().nonnegative(),
+    volume: z.number().int().nonnegative(),
+    openInterest: z.number().int().nonnegative(),
+    netChangePct: z.number(),
+    isStale: z.boolean().default(false),
+  }).optional(),
+  put: z.object({
+    instrumentKey: z.string(),
+    symbol: z.string(),
+    lastPrice: z.number().nonnegative(),
+    bidPrice: z.number().nonnegative(),
+    askPrice: z.number().nonnegative(),
+    volume: z.number().int().nonnegative(),
+    openInterest: z.number().int().nonnegative(),
+    netChangePct: z.number(),
+    isStale: z.boolean().default(false),
+  }).optional(),
+});
+
+export const OptionChainResultSchema = z.object({
+  underlying: z.string(),
+  spotPrice: z.number().positive(),
+  expiryDate: z.string(),
+  availableExpiries: z.array(z.string()),
+  lotSize: z.number().int().positive(),
+  strikes: z.array(OptionChainStrikeSchema),
+  timestamp: z.string().datetime(),
+});
+
+export type OptionChainResult = z.infer<typeof OptionChainResultSchema>;
+
+// Instrument Search Query Schema
+export const SearchInstrumentsQuerySchema = z.object({
+  query: z.string().min(1),
+  underlying: z.string().optional(),
+  instrumentType: z.nativeEnum(InstrumentType).optional(),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
+export type SearchInstrumentsQuery = z.infer<typeof SearchInstrumentsQuerySchema>;
 
 // Strategy Config Schema
 export const StrategyConfigSchema = z.object({

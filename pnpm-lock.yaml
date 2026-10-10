@@ -65,6 +65,9 @@ importers:
       pg:
         specifier: ^8.13.1
         version: 8.23.1
+      protobufjs:
+        specifier: ^8.8.0
+        version: 8.8.0
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2
@@ -90,6 +93,9 @@ importers:
       '@types/pg':
         specifier: ^8.11.10
         version: 8.23.1
+      '@types/protobufjs':
+        specifier: ^6.0.0
+        version: 6.0.0
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.2
@@ -187,6 +193,9 @@ importers:
       pg:
         specifier: ^8.13.1
         version: 8.23.1
+      protobufjs:
+        specifier: ^8.8.0
+        version: 8.8.0
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2
@@ -206,6 +215,9 @@ importers:
       '@types/pg':
         specifier: ^8.11.10
         version: 8.23.1
+      '@types/protobufjs':
+        specifier: ^6.0.0
+        version: 6.0.0
       tsx:
         specifier: ^4.19.2
         version: 4.23.15
@@ -1964,6 +1976,10 @@ packages:
   '@types/prop-types@15.7.15':
     resolution: {integrity: sha512-F6bEyamV9jKGAFBEmlQnesRPGOQqS2+Uwi0Em15xenOxHaf2hv6L8YCVn3rPdPJOiJfPiCnLIRyvwVaqMY3MIw==}
 
+  '@types/protobufjs@6.0.0':
+    resolution: {integrity: sha512-A27RDExpAf3rdDjIrHKiJK6x8kqqJ4CmoChwtipfhVAn1p7+wviQFFP7dppn8FslSbHtQeVPvi8wNKkDjSYjHw==}
+    deprecated: This is a stub types definition for protobufjs (https://github.com/dcodeIO/ProtoBuf.js). protobufjs provides its own type definitions, so you don't need @types/protobufjs installed!
+
   '@types/qs@6.15.1':
     resolution: {integrity: sha512-GZHUBZR9hckSUhrxmp1nG6NwdpM9fCunJwyThLW1X3AyHgd9IlHb6VANpQQqDr2o/qQp6McZ3y/IA2rVzKzSbw==}
 
@@ -3458,6 +3474,9 @@ packages:
     resolution: {integrity: sha512-VeIAFslyIerEJLXHziedo2basKbMKtTw3vfn5IzG0XTjhAVEJyNHnL2p7vc+wBDSdQuUpNw3M2u6xb9QsAY5Eg==}
     engines: {node: '>=4'}
 
+  long@5.3.2:
+    resolution: {integrity: sha512-mNAgZ1GmyNhD7AuqnTG3/VQ26o760+ZYBPKjPvugO8+nLbYfX6TVpJPseBvopbdY+qpZ/lKUnmEc1LeZYS3QAA==}
+
   loose-envify@1.4.0:
     resolution: {integrity: sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==}
     hasBin: true
@@ -4008,6 +4027,10 @@ packages:
 
   prop-types@15.8.1:
     resolution: {integrity: sha512-oj87CgZICdulUohogVAR7AjlC0327U4el4L6eAvOqCeudMDVU0NThNaV+b9Df4dXgSP1gXMTnPdhfe/2qDH5cg==}
+
+  protobufjs@8.8.0:
+    resolution: {integrity: sha512-N3xhQ5yyBx3vQq4gubBfASzYhJGNzeDbjqBpu61g7UVylsN/qyffU96TKWD3GbbLOKF82VGNRNvv1+BFgE31Eg==}
+    engines: {node: '>=12.0.0'}
 
   proxy-addr@2.0.8:
     resolution: {integrity: sha512-5nnx0yGyVUcY6t9RnWcARWtwT9F1D8O9rt08htPvnd49W1IgZtmLkhu9WfMzQj1cFxjHIO6connUNVW5k7AVyQ==}
@@ -7095,6 +7118,10 @@ snapshots:
 
   '@types/prop-types@15.7.15': {}
 
+  '@types/protobufjs@6.0.0':
+    dependencies:
+      protobufjs: 8.8.0
+
   '@types/qs@6.15.1': {}
 
   '@types/range-parser@1.2.7': {}
@@ -8807,6 +8834,8 @@ snapshots:
     dependencies:
       chalk: 2.4.2
 
+  long@5.3.2: {}
+
   loose-envify@1.4.0:
     dependencies:
       js-tokens: 4.0.0
@@ -9402,6 +9431,10 @@ snapshots:
       loose-envify: 1.4.0
       object-assign: 4.1.1
       react-is: 16.13.1
+
+  protobufjs@8.8.0:
+    dependencies:
+      long: 5.3.2
 
   proxy-addr@2.0.8:
     dependencies:

@@ -16,6 +16,7 @@
     "@trading-bot/domain": "workspace:*",
     "dotenv": "^16.4.5",
     "pg": "^8.13.1",
+    "protobufjs": "^8.8.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
     "zod": "^3.23.8"
@@ -24,6 +25,7 @@
     "@trading-bot/config": "workspace:*",
     "@types/node": "^22.8.7",
     "@types/pg": "^8.11.10",
+    "@types/protobufjs": "^6.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.3"

@@ -5,6 +5,9 @@ import {
   QuoteSnapshot,
   RiskStatus,
   TradeProposal,
+  Instrument,
+  OptionChainResult,
+  MarketCalendar,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -72,6 +75,10 @@ export class TradingPlatformClient {
     return this.request('/broker/health');
   }
 
+  public async getBrokerFunds(): Promise<any> {
+    return this.request('/broker/funds');
+  }
+
   // Risk
   public async getRiskStatus(): Promise<RiskStatus> {
     return this.request('/risk/status');
@@ -99,6 +106,46 @@ export class TradingPlatformClient {
   // Markets
   public async getWatchlist(): Promise<QuoteSnapshot[]> {
     return this.request('/markets/watchlist');
+  }
+
+  public async getOptionChain(underlying = 'NIFTY', expiry?: string): Promise<OptionChainResult> {
+    const params = new URLSearchParams({ underlying });
+    if (expiry) params.set('expiry', expiry);
+    return this.request(`/markets/options-chain?${params.toString()}`);
+  }
+
+  public async getMarketCalendar(): Promise<MarketCalendar> {
+    return this.request('/markets/calendar');
+  }
+
+  public async getFeedHealth(): Promise<any> {
+    return this.request('/markets/feed-health');
+  }
+
+  public async subscribeInstruments(keys: string[]): Promise<{ success: boolean }> {
+    return this.request('/markets/subscribe', {
+      method: 'POST',
+      body: JSON.stringify({ instrumentKeys: keys }),
+    });
+  }
+
+  public async unsubscribeInstruments(keys: string[]): Promise<{ success: boolean }> {
+    return this.request('/markets/unsubscribe', {
+      method: 'POST',
+      body: JSON.stringify({ instrumentKeys: keys }),
+    });
+  }
+
+  // Instruments
+  public async searchInstruments(query: string, underlying?: string, instrumentType?: string): Promise<Instrument[]> {
+    const params = new URLSearchParams({ query });
+    if (underlying) params.set('underlying', underlying);
+    if (instrumentType) params.set('instrumentType', instrumentType);
+    return this.request(`/instruments/search?${params.toString()}`);
+  }
+
+  public async getInstrument(key: string): Promise<Instrument> {
+    return this.request(`/instruments/${encodeURIComponent(key)}`);
   }
 
   // Positions

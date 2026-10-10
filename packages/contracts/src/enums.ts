@@ -98,3 +98,25 @@ export enum BrokerHealthStatus {
   AUTH_EXPIRED = 'AUTH_EXPIRED',
   IP_MISMATCH = 'IP_MISMATCH',
 }
+
+export enum MarketSession {
+  PRE_OPEN = 'PRE_OPEN',
+  REGULAR_SESSION = 'REGULAR_SESSION',
+  POST_CLOSE = 'POST_CLOSE',
+  MARKET_CLOSED = 'MARKET_CLOSED',
+  HOLIDAY = 'HOLIDAY',
+  WEEKEND = 'WEEKEND',
+}
+
+export enum FeedSubscriptionMode {
+  LTPC = 'ltpc',
+  FULL = 'full',
+}
+
+export enum FeedStatus {
+  DISCONNECTED = 'DISCONNECTED',
+  CONNECTING = 'CONNECTING',
+  CONNECTED = 'CONNECTED',
+  STALE = 'STALE',
+  AUTH_FAILED = 'AUTH_FAILED',
+}

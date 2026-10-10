@@ -1,26 +1,31 @@
 import { Controller, Get, Post, Query, Inject } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
-import { BrokerHealth, BrokerHealthStatus } from '@trading-bot/contracts';
+import { BrokerHealth } from '@trading-bot/contracts';
+import { PaperBrokerAdapter } from './paper-broker.adapter';
+import { UpstoxBrokerAdapter } from './upstox-broker.adapter';
 
 @Controller('broker')
 export class BrokerController {
-  constructor(@Inject(EnvService) private readonly envService: EnvService) {}
+  constructor(
+    @Inject(EnvService) private readonly envService: EnvService,
+    @Inject(PaperBrokerAdapter) private readonly paperBroker: PaperBrokerAdapter,
+    @Inject(UpstoxBrokerAdapter) private readonly upstoxBroker: UpstoxBrokerAdapter,
+  ) {}
+
+  private getActiveAdapter() {
+    return this.envService.config.SYSTEM_MODE === 'PAPER'
+      ? this.paperBroker
+      : this.upstoxBroker;
+  }
 
   @Get('health')
-  getBrokerHealth(): BrokerHealth {
-    const cfg = this.envService.config;
-    return {
-      broker: 'UPSTOX',
-      status: BrokerHealthStatus.HEALTHY,
-      isAuthenticated: Boolean(cfg.UPSTOX_API_KEY && cfg.UPSTOX_API_KEY !== 'mock_key'),
-      tokenExpiresAt: new Date(Date.now() + 86400000).toISOString(),
-      registeredEgressIp: cfg.UPSTOX_EGRESS_IP,
-      currentEgressIp: cfg.UPSTOX_EGRESS_IP,
-      ipMatches: true,
-      marketFeedConnected: true,
-      feedLatencyMs: 18,
-      lastSeenAt: new Date().toISOString(),
-    };
+  async getBrokerHealth(): Promise<BrokerHealth> {
+    return this.getActiveAdapter().getConnectionHealth();
+  }
+
+  @Get('funds')
+  async getFunds() {
+    return this.getActiveAdapter().getFunds();
   }
 
   @Post('upstox/connect')
