@@ -15,6 +15,19 @@ import {
   UpstoxOAuthConnectResponse,
   UpstoxSessionStatus,
   ReconciliationReport,
+  GoLiveChecklist,
+  GoLiveChecklistItem,
+  SupervisedExecutionRequest,
+  SupervisedExecutionResult,
+  FlattenPositionsResult,
+  SystemAlert,
+  DiagnosticsReport,
+  ReconciliationScheduleStatus,
+  AlertSeverity,
+  AutonomousReadinessReport,
+  AutonomousArmRequest,
+  AutonomousSessionStatus,
+  AutonomousExecutionLog,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -146,6 +159,18 @@ export class TradingPlatformClient {
     });
   }
 
+  public async resetKillSwitch(): Promise<RiskStatus> {
+    return this.request('/risk/reset-kill-switch', {
+      method: 'POST',
+    });
+  }
+
+  public async flattenPositions(): Promise<FlattenPositionsResult> {
+    return this.request('/risk/flatten-request', {
+      method: 'POST',
+    });
+  }
+
   // Markets
   public async getWatchlist(): Promise<QuoteSnapshot[]> {
     return this.request('/markets/watchlist');
@@ -220,6 +245,34 @@ export class TradingPlatformClient {
     });
   }
 
+  // Supervised Live Execution & Protective GTT Exits
+  public async executeSupervisedProposal(
+    req: SupervisedExecutionRequest,
+  ): Promise<SupervisedExecutionResult> {
+    return this.request('/orders/supervised-execute', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
+  }
+
+  public async getGoLiveChecklist(): Promise<GoLiveChecklist> {
+    return this.request('/orders/go-live-checklist');
+  }
+
+  public async signOffGoLiveChecklist(signedOffBy?: string): Promise<GoLiveChecklist> {
+    return this.request('/orders/go-live-checklist/sign-off', {
+      method: 'POST',
+      body: JSON.stringify({ signedOffBy }),
+    });
+  }
+
+  public async signOffChecklistItem(id: string, evidence?: string): Promise<GoLiveChecklistItem> {
+    return this.request('/orders/go-live-checklist/sign-off-item', {
+      method: 'POST',
+      body: JSON.stringify({ id, evidence }),
+    });
+  }
+
   // Trade Proposals
   public async getPendingProposals(): Promise<TradeProposal[]> {
     return this.request('/trade-proposals');
@@ -280,8 +333,108 @@ export class TradingPlatformClient {
     return this.request('/agents/tools');
   }
 
-  // Reports
+  // Reports & CSV Export
   public async getDailyReport(): Promise<DailyReport> {
     return this.request('/reports/daily');
+  }
+
+  public async exportDailyReportCsv(): Promise<string> {
+    const headers: Record<string, string> = {};
+    if (this.authToken) {
+      headers['Authorization'] = `Bearer ${this.authToken}`;
+    }
+    const res = await this.fetch(`${this.baseUrl}/reports/daily/export-csv`, {
+      headers,
+    });
+    return res.text();
+  }
+
+  // Health & Diagnostics
+  public async getDiagnostics(): Promise<DiagnosticsReport> {
+    return this.request('/health/diagnostics');
+  }
+
+  // Alerts & Notifications
+  public async getAlerts(limit = 50): Promise<SystemAlert[]> {
+    return this.request(`/alerts?limit=${limit}`);
+  }
+
+  public async acknowledgeAlert(id: string): Promise<SystemAlert> {
+    return this.request(`/alerts/${id}/acknowledge`, {
+      method: 'POST',
+    });
+  }
+
+  public async triggerDrillAlert(params?: {
+    severity?: AlertSeverity;
+    category?: any;
+    title?: string;
+    message?: string;
+  }): Promise<SystemAlert> {
+    return this.request('/alerts/test', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+  }
+
+  // Reconciliation Schedule
+  public async getReconciliationSchedule(): Promise<ReconciliationScheduleStatus> {
+    return this.request('/broker/reconciliation/schedule');
+  }
+
+  public async getReconciliationHistory(): Promise<ReconciliationReport[]> {
+    return this.request('/broker/reconciliation/history');
+  }
+
+  public async startReconciliationSchedule(
+    intervalSeconds = 60,
+  ): Promise<ReconciliationScheduleStatus> {
+    return this.request('/broker/reconciliation/schedule/start', {
+      method: 'POST',
+      body: JSON.stringify({ intervalSeconds }),
+    });
+  }
+
+  public async stopReconciliationSchedule(): Promise<ReconciliationScheduleStatus> {
+    return this.request('/broker/reconciliation/schedule/stop', {
+      method: 'POST',
+    });
+  }
+
+  // Phase 7: Bounded Autonomous Mode
+  public async getAutonomousReadiness(): Promise<AutonomousReadinessReport> {
+    return this.request('/autonomous/readiness');
+  }
+
+  public async getAutonomousStatus(): Promise<AutonomousSessionStatus> {
+    return this.request('/autonomous/status');
+  }
+
+  public async armAutonomous(req: AutonomousArmRequest): Promise<AutonomousSessionStatus> {
+    return this.request('/autonomous/arm', {
+      method: 'POST',
+      body: JSON.stringify(req),
+    });
+  }
+
+  public async disarmAutonomous(
+    reason = 'Operator Manual Disarm',
+  ): Promise<AutonomousSessionStatus> {
+    return this.request('/autonomous/disarm', {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+  }
+
+  public async executeAutonomousProposal(
+    proposalId: string,
+  ): Promise<SupervisedExecutionResult> {
+    return this.request(`/autonomous/execute/${proposalId}`, {
+      method: 'POST',
+    });
+  }
+
+  public async getAutonomousLogs(): Promise<AutonomousExecutionLog[]> {
+    return this.request('/autonomous/logs');
   }
 }

@@ -11,6 +11,8 @@ import {
   OrderType,
   ProductType,
   QuoteSnapshot,
+  ExitProtectionStatus,
+  ProtectionResult,
 } from '@trading-bot/contracts';
 import { calculateOptionCharges, ChargeBreakdown } from '@trading-bot/domain';
 import { InstrumentCatalogService } from '../instruments/instrument-catalog.service';
@@ -272,6 +274,41 @@ export class PaperBrokerAdapter implements BrokerPort {
       this.orders.set(orderId, existing);
       this.gateway.broadcast('order.changed', existing);
     }
+  }
+
+  async placeProtectiveExit(req: {
+    instrumentKey: string;
+    stopLossPrice: number;
+    targetPrice: number;
+    quantity: number;
+  }): Promise<ProtectionResult> {
+    const existing = this.positions.get(req.instrumentKey);
+    if (!existing) {
+      return {
+        success: false,
+        protectionStatus: ExitProtectionStatus.PROTECTION_FAILED,
+        stopLossPrice: req.stopLossPrice,
+        targetPrice: req.targetPrice,
+        confirmedQty: req.quantity,
+        message: `No active open position found for instrument ${req.instrumentKey}. Protection failed.`,
+      };
+    }
+
+    existing.stopLossPrice = req.stopLossPrice;
+    existing.targetPrice = req.targetPrice;
+    existing.lastVerifiedAt = new Date().toISOString();
+    this.positions.set(req.instrumentKey, existing);
+
+    const gttOrderId = `gtt_paper_${Date.now()}`;
+    return {
+      success: true,
+      gttOrderId,
+      protectionStatus: ExitProtectionStatus.PROTECTED_GTT,
+      stopLossPrice: req.stopLossPrice,
+      targetPrice: req.targetPrice,
+      confirmedQty: req.quantity,
+      message: `Paper GTT protective exits placed successfully (Stop: ₹${req.stopLossPrice}, Target: ₹${req.targetPrice}). Triggers submit limit orders; not a guaranteed stop.`,
+    };
   }
 
   private updatePositionFromFill(

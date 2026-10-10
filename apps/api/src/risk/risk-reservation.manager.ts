@@ -220,6 +220,14 @@ export class RiskReservationManager {
     }
     this.activeSignalKeys.delete(signalKey);
 
+    // Mark matching reservation as RELEASED
+    for (const [id, record] of this.reservations.entries()) {
+      if (record.signalKey === signalKey && (record.status === 'HELD' || record.status === 'COMMITTED')) {
+        record.status = 'RELEASED';
+        this.reservations.set(id, record);
+      }
+    }
+
     // Return principal + net P&L to cash
     this.availableCash = Number((this.availableCash + initialCapital + realizedNetPnl).toFixed(2));
 
@@ -269,6 +277,10 @@ export class RiskReservationManager {
       if (record.status === 'HELD') count++;
     }
     return count;
+  }
+
+  public getHeldReservations(): ReservationRecord[] {
+    return Array.from(this.reservations.values()).filter((r) => r.status === 'HELD');
   }
 
   public getRemainingDailyRiskBudget(): number {

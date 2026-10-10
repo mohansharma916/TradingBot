@@ -679,20 +679,20 @@ The system must never increase risk or force trades to hit ₹4,000/day.
 
 ## 20. Final user acceptance checklist
 
-- [ ] Web, Android and iOS share one Expo app, typed contracts and visual system.
-- [ ] User can connect/disconnect Upstox without exposing credentials in clients.
-- [ ] User sees live market quotes with freshness timestamp and option contract details.
-- [ ] User can create, version, test and pause strategies.
-- [ ] Agents explain candidate trades and operate without order-placement permissions.
-- [ ] All-in fees and slippage reserve affect trade admission and net target calculations.
-- [ ] Risk policies are authoritative across all agents and devices.
-- [ ] Paper broker reproduces order statuses, fees, partial fills and trading ledger.
-- [ ] Live approval flow rechecks risk immediately before broker submission.
-- [ ] Every entry state is reconciled; protective-exit failures are visible and actionable.
-- [ ] Daily max loss causes immediate no-new-entry state; profit goal never overrides it.
-- [ ] EOD, market holiday, auth expiry, stale-feed and restart behavior are tested.
-- [ ] All execution actions have an immutable audit trail and incident runbooks.
-- [ ] AUTO cannot be enabled without explicit owner action and verified go-live gates.
+- [x] Web, Android and iOS share one Expo app, typed contracts and visual system.
+- [x] User can connect/disconnect Upstox without exposing credentials in clients.
+- [x] User sees live market quotes with freshness timestamp and option contract details.
+- [x] User can create, version, test and pause strategies.
+- [x] Agents explain candidate trades and operate without order-placement permissions.
+- [x] All-in fees and slippage reserve affect trade admission and net target calculations.
+- [x] Risk policies are authoritative across all agents and devices.
+- [x] Paper broker reproduces order statuses, fees, partial fills and trading ledger.
+- [x] Live approval flow rechecks risk immediately before broker submission.
+- [x] Every entry state is reconciled; protective-exit failures are visible and actionable.
+- [x] Daily max loss causes immediate no-new-entry state; profit goal never overrides it.
+- [x] EOD, market holiday, auth expiry, stale-feed and restart behavior are tested.
+- [x] All execution actions have an immutable audit trail and incident runbooks.
+- [x] AUTO cannot be enabled without explicit owner action and verified go-live gates.
 
 ## 21. Recommended source documentation (official references)
 

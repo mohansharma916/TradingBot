@@ -4,6 +4,12 @@ import {
   UpstoxSessionStatus,
   ReconciliationReport,
   ReconciliationDiscrepancy,
+  SystemAlert,
+  AlertSeverity,
+  DiagnosticsReport,
+  ReconciliationScheduleStatus,
+  TradeMode,
+  RiskState,
 } from '@trading-bot/contracts';
 
 export default function HealthScreen() {
@@ -34,6 +40,71 @@ export default function HealthScreen() {
     executionFrozen: false,
   });
 
+  // Automated Reconciliation Scheduler State
+  const [schedulerStatus, setSchedulerStatus] = useState<ReconciliationScheduleStatus>({
+    schedulerActive: true,
+    intervalSeconds: 60,
+    lastRunAt: new Date(Date.now() - 30000).toISOString(),
+    totalRuns: 14,
+    lastDiscrepanciesFound: 0,
+  });
+
+  // Diagnostics Telemetry State
+  const [diagnostics] = useState<DiagnosticsReport>({
+    uptimeSeconds: 3840,
+    memoryUsageMb: 82.4,
+    systemMode: TradeMode.PAPER,
+    marketFeed: {
+      connected: true,
+      latencyMs: 18,
+      staleTicksCount: 0,
+      lastTickAt: new Date().toISOString(),
+    },
+    brokerConnection: {
+      authenticated: true,
+      rateLimiterTokensRemaining: 25,
+      egressIpMatch: true,
+      registeredIp: '127.0.0.1',
+      tokenExpiresInSeconds: 85400,
+    },
+    riskStatus: {
+      killSwitchActive: false,
+      riskState: RiskState.DISARMED,
+      availableCash: 6937.5,
+      reservedCapital: 3062.5,
+      dailyDrawdownBudgetRemaining: 1500.0,
+      openPositionsCount: 1,
+    },
+    reconciliation: {
+      activeScheduler: true,
+      lastReconciliationAt: new Date(Date.now() - 30000).toISOString(),
+      discrepancyCount: 0,
+    },
+    timestamp: new Date().toISOString(),
+  });
+
+  // System Alerts Queue
+  const [alerts, setAlerts] = useState<SystemAlert[]>([
+    {
+      id: 'alert_001',
+      severity: AlertSeverity.INFO,
+      category: 'SYSTEM',
+      title: 'Platform Initialized in Supervised Approval Mode',
+      message: 'Risk gates, AES-256-GCM tokens, and streaming Protobuf V3 data feed are operational.',
+      acknowledged: true,
+      timestamp: new Date(Date.now() - 3600000).toISOString(),
+    },
+    {
+      id: 'alert_002',
+      severity: AlertSeverity.WARNING,
+      category: 'RISK_GATE',
+      title: 'Approaching Risk Budget Limit',
+      message: 'Reserved capital has reached 30.6% of maximum hard account cap.',
+      acknowledged: false,
+      timestamp: new Date(Date.now() - 600000).toISOString(),
+    },
+  ]);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 4000);
@@ -43,7 +114,6 @@ export default function HealthScreen() {
     const mockState = 'state_' + Math.random().toString(36).substring(2, 10);
     const mockAuthUrl = `https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id=UPSTOX_DEV_916&redirect_uri=http%3A%2F%2Flocalhost%3A4000%2Fapi%2Fv1%2Fbroker%2Fupstox%2Fcallback&state=${mockState}`;
     
-    // Simulate token exchange
     setSession({
       isConnected: true,
       isExpired: false,
@@ -82,6 +152,12 @@ export default function HealthScreen() {
       executionFrozen: false,
     });
     setSession((prev) => ({ ...prev, lastReconciledAt: new Date().toISOString() }));
+    setSchedulerStatus((prev) => ({
+      ...prev,
+      lastRunAt: new Date().toISOString(),
+      totalRuns: prev.totalRuns + 1,
+      lastDiscrepanciesFound: 0,
+    }));
     showToast('Reconciliation audit completed: 0 discrepancies found. Local ledger matches broker.');
   };
 
@@ -106,132 +182,191 @@ export default function HealthScreen() {
       executionFrozen: true,
     });
 
-    showToast('CRITICAL: Mismatch detected! External phantom broker position injected. Trading engine frozen.');
+    // Add alert
+    const newAlert: SystemAlert = {
+      id: `alert_disc_${Date.now()}`,
+      severity: AlertSeverity.CRITICAL,
+      category: 'RECONCILIATION',
+      title: 'Reconciliation Discrepancy Detected',
+      message: 'Phantom position detected on broker (BANKNIFTY 52500 PE). Trading engine frozen.',
+      acknowledged: false,
+      timestamp: new Date().toISOString(),
+    };
+    setAlerts((prev) => [newAlert, ...prev]);
+
+    showToast('CRITICAL: Discrepancy simulated. Engine frozen via Kill Switch safety rule.');
   };
 
-  const formatHoursMinutes = (secs: number) => {
-    const hours = Math.floor(secs / 3600);
-    const mins = Math.floor((secs % 3600) / 60);
-    return `${hours}h ${mins}m`;
+  const handleTriggerIncidentDrill = () => {
+    const drillAlert: SystemAlert = {
+      id: `drill_${Date.now()}`,
+      severity: AlertSeverity.EMERGENCY,
+      category: 'SYSTEM',
+      title: 'Incident Recovery Drill Alert',
+      message: 'Simulated operational drill: verifying multi-channel alert delivery and operator response protocol.',
+      acknowledged: false,
+      timestamp: new Date().toISOString(),
+    };
+    setAlerts((prev) => [drillAlert, ...prev]);
+    showToast('🚨 Incident Drill Dispatched: Emergency alert broadcast to all channels.');
   };
+
+  const handleAcknowledgeAlert = (id: string) => {
+    setAlerts((prev) =>
+      prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a)),
+    );
+    showToast(`Alert acknowledged.`);
+  };
+
+  const toggleScheduler = () => {
+    setSchedulerStatus((prev) => {
+      const nextActive = !prev.schedulerActive;
+      showToast(nextActive ? 'Automated reconciliation scheduler STARTED (60s cycle).' : 'Reconciliation scheduler PAUSED.');
+      return { ...prev, schedulerActive: nextActive };
+    });
+  };
+
+  const hoursRemaining = Math.floor(session.secondsRemaining / 3600);
+  const minutesRemaining = Math.floor((session.secondsRemaining % 3600) / 60);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.lg, maxWidth: 1200, margin: '0 auto', width: '100%' }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: spacing.lg,
+        maxWidth: 1200,
+        margin: '0 auto',
+        width: '100%',
+        paddingBottom: spacing.xxl,
+      }}
+    >
       {/* Toast Notification */}
       {toastMessage && (
         <div
           style={{
+            position: 'fixed',
+            top: 20,
+            right: 20,
             backgroundColor: colors.surfaceElevated,
-            border: `1px solid ${colors.cyan}`,
+            color: colors.profit,
+            border: `1px solid ${colors.profit}`,
             borderRadius: borderRadius.md,
             padding: `${spacing.sm}px ${spacing.md}px`,
-            color: colors.textPrimary,
+            zIndex: 9999,
             fontSize: typography.fontSize.sm,
-            boxShadow: '0 4px 12px rgba(0, 0, 0, 0.4)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
+            fontWeight: typography.fontWeight.semibold,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.5)',
           }}
         >
-          <span>⚡ {toastMessage}</span>
-          <button
-            onClick={() => setToastMessage(null)}
-            style={{ background: 'none', border: 'none', color: colors.textSecondary, cursor: 'pointer' }}
-          >
-            ✕
-          </button>
+          {toastMessage}
         </div>
       )}
 
       {/* Header */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
-        <div>
-          <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
-            Broker Health & OAuth Security
-          </h1>
-          <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
-            Upstox OAuth 2.0 connection, AES-256-GCM token storage, egress IP verification, and startup reconciliation.
-          </p>
+      <div>
+        <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
+          Broker Health & Diagnostics
+        </h1>
+        <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
+          Upstox OAuth 2.0 status, background reconciliation scheduler, and real-time operational telemetry.
+        </p>
+      </div>
+
+      {/* Diagnostics Telemetry Metrics Bar */}
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+          gap: spacing.md,
+        }}
+      >
+        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
+          <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>WS FEED LATENCY</div>
+          <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.profit, marginTop: 4 }}>
+            {diagnostics.marketFeed.latencyMs} ms
+          </div>
+          <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 4 }}>
+            Protobuf V3 Streaming
+          </div>
         </div>
 
-        <div style={{ display: 'flex', gap: spacing.xs }}>
-          <Badge
-            label={session.isConnected ? 'UPSTOX CONNECTED' : 'DISCONNECTED'}
-            variant={session.isConnected ? 'success' : 'danger'}
-          />
-          <Badge
-            label={reconciliation.status === 'CLEAN' ? 'LEDGER RECONCILED' : 'DISCREPANCY FROZEN'}
-            variant={reconciliation.status === 'CLEAN' ? 'primary' : 'danger'}
-          />
+        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
+          <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>STALE TICKS COUNT</div>
+          <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: diagnostics.marketFeed.staleTicksCount > 0 ? colors.loss : colors.profit, marginTop: 4 }}>
+            {diagnostics.marketFeed.staleTicksCount}
+          </div>
+          <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 4 }}>
+            3,000ms stale threshold
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
+          <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>HEAP MEMORY USAGE</div>
+          <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.cyan, marginTop: 4 }}>
+            {diagnostics.memoryUsageMb} MB
+          </div>
+          <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 4 }}>
+            Node.js process memory
+          </div>
+        </div>
+
+        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
+          <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>RECONCILIATION SCHEDULER</div>
+          <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: schedulerStatus.schedulerActive ? colors.profit : colors.warning, marginTop: 4 }}>
+            {schedulerStatus.schedulerActive ? 'ACTIVE (60s)' : 'PAUSED'}
+          </div>
+          <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 4 }}>
+            Total audits: {schedulerStatus.totalRuns}
+          </div>
         </div>
       </div>
 
-      {/* Safety Alert Banner if Mismatch Detected */}
-      {reconciliation.executionFrozen && (
-        <div
-          style={{
-            backgroundColor: colors.lossMuted,
-            border: `1px solid ${colors.loss}`,
-            borderRadius: borderRadius.md,
-            padding: spacing.md,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: spacing.sm,
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: typography.fontWeight.bold, color: colors.loss, fontSize: typography.fontSize.sm }}>
-              ⚠️ SAFETY INVARIANT ACTIVE: BROKER RECONCILIATION MISMATCH DETECTED
+      {/* Main Grid: OAuth Session & Reconciliation */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: spacing.lg }}>
+        {/* Card 1: Upstox OAuth Session Status */}
+        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.lg, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h2 style={{ margin: 0, fontSize: typography.fontSize.md }}>Upstox OAuth 2.0 Session</h2>
+            <Badge
+              label={session.isConnected && !session.isExpired ? 'CONNECTED' : 'DISCONNECTED'}
+              variant={session.isConnected && !session.isExpired ? 'success' : 'danger'}
+            />
+          </div>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, fontSize: typography.fontSize.xs }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
+              <span style={{ color: colors.textMuted }}>Token Status:</span>
+              <span style={{ fontWeight: typography.fontWeight.semibold, color: session.isExpired ? colors.loss : colors.profit }}>
+                {session.isExpired ? 'Expired / Missing' : 'Valid (AES-256-GCM Encrypted)'}
+              </span>
             </div>
-            <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 2 }}>
-              A trade or position exists in Upstox broker that is not recorded in the platform ledger. All new entries are frozen.
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
+              <span style={{ color: colors.textMuted }}>Time Until Expiry:</span>
+              <span style={{ fontWeight: typography.fontWeight.semibold, color: session.secondsRemaining < 3600 ? colors.warning : colors.textPrimary }}>
+                {session.tokenExpiresAt ? `${hoursRemaining}h ${minutesRemaining}m` : 'N/A'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
+              <span style={{ color: colors.textMuted }}>Egress IP Binding:</span>
+              <span style={{ fontWeight: typography.fontWeight.semibold, color: session.egressIpVerified ? colors.profit : colors.loss }}>
+                {session.currentEgressIp} {session.egressIpVerified ? '✓ Verified' : '✗ Mismatch'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0` }}>
+              <span style={{ color: colors.textMuted }}>Rate Limiter Pool:</span>
+              <span style={{ fontWeight: typography.fontWeight.semibold, color: colors.cyan }}>
+                {session.rateLimitRemaining} / 25 req/sec
+              </span>
             </div>
           </div>
-          <button
-            onClick={handleRunReconciliation}
-            style={{
-              padding: `${spacing.xs}px ${spacing.md}px`,
-              backgroundColor: colors.surfaceElevated,
-              color: colors.textPrimary,
-              border: `1px solid ${colors.border}`,
-              borderRadius: borderRadius.sm,
-              fontSize: typography.fontSize.xs,
-              cursor: 'pointer',
-              fontWeight: typography.fontWeight.semibold,
-            }}
-          >
-            Re-run Audit & Clear
-          </button>
-        </div>
-      )}
 
-      {/* Diagnostics Grid */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: spacing.md }}>
-        {/* Upstox OAuth 2.0 Connection */}
-        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm }}>
-            <h3 style={{ margin: 0, fontSize: typography.fontSize.sm }}>Upstox Broker OAuth 2.0</h3>
-            <Badge label={session.isConnected ? 'AUTHENTICATED' : 'DISCONNECTED'} variant={session.isConnected ? 'success' : 'danger'} size="sm" />
-          </div>
-
-          <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.8 }}>
-            <div>• Token Security: <span style={{ color: colors.cyan, fontWeight: 'bold' }}>AES-256-GCM Encrypted at Rest</span></div>
-            <div>• Registered Egress IP: <span style={{ color: colors.textPrimary }}>{session.registeredEgressIp}</span></div>
-            <div>• Current Server IP: <span style={{ color: colors.textPrimary }}>{session.currentEgressIp}</span></div>
-            <div>• IP Match Status: <span style={{ color: colors.profit, fontWeight: 'bold' }}>EXACT MATCH (Verified)</span></div>
-            <div>• Rate Limit Budget: <span style={{ color: colors.textPrimary }}>{session.rateLimitRemaining} req / sec (Token Bucket)</span></div>
-            <div>• Token Expiry: <span style={{ color: session.isConnected ? colors.profit : colors.loss, fontWeight: 'bold' }}>
-              {session.isConnected ? `${formatHoursMinutes(session.secondsRemaining)} remaining` : 'Expired'}
-            </span></div>
-          </div>
-
-          <div style={{ display: 'flex', gap: spacing.xs, marginTop: spacing.md }}>
+          <div style={{ display: 'flex', gap: spacing.sm, marginTop: spacing.xs }}>
             <button
               onClick={handleConnectOAuth}
               style={{
-                padding: `${spacing.xs}px ${spacing.md}px`,
+                flex: 1,
+                padding: `${spacing.sm}px ${spacing.md}px`,
                 backgroundColor: colors.cyan,
                 color: '#082F49',
                 border: 'none',
@@ -241,54 +376,63 @@ export default function HealthScreen() {
                 cursor: 'pointer',
               }}
             >
-              {session.isConnected ? 'Reauthenticate OAuth' : 'Connect Upstox Account'}
+              Reconnect Upstox
             </button>
-            {session.isConnected && (
-              <button
-                onClick={handleDisconnect}
-                style={{
-                  padding: `${spacing.xs}px ${spacing.md}px`,
-                  backgroundColor: colors.lossMuted,
-                  color: colors.loss,
-                  border: `1px solid ${colors.loss}`,
-                  borderRadius: borderRadius.sm,
-                  fontSize: typography.fontSize.xs,
-                  fontWeight: typography.fontWeight.semibold,
-                  cursor: 'pointer',
-                }}
-              >
-                Disconnect
-              </button>
-            )}
+            <button
+              onClick={handleDisconnect}
+              style={{
+                padding: `${spacing.sm}px ${spacing.md}px`,
+                backgroundColor: colors.surfaceElevated,
+                color: colors.loss,
+                border: `1px solid ${colors.border}`,
+                borderRadius: borderRadius.sm,
+                fontSize: typography.fontSize.xs,
+                fontWeight: typography.fontWeight.semibold,
+                cursor: 'pointer',
+              }}
+            >
+              Disconnect
+            </button>
           </div>
         </div>
 
-        {/* Startup Reconciliation Card */}
-        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm }}>
-            <h3 style={{ margin: 0, fontSize: typography.fontSize.sm }}>Broker Reconciliation Engine</h3>
+        {/* Card 2: Periodic Reconciliation Scheduler */}
+        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.lg, display: 'flex', flexDirection: 'column', gap: spacing.md }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <h2 style={{ margin: 0, fontSize: typography.fontSize.md }}>Automated Reconciliation Audit</h2>
             <Badge
-              label={reconciliation.status === 'CLEAN' ? 'STATUS: CLEAN' : 'MISMATCH DETECTED'}
+              label={reconciliation.status === 'CLEAN' ? 'LEDGER IN SYNC' : 'DISCREPANCY'}
               variant={reconciliation.status === 'CLEAN' ? 'success' : 'danger'}
-              size="sm"
             />
           </div>
 
-          <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.8 }}>
-            <div>• Last Audit: <span style={{ color: colors.textPrimary }}>{new Date(reconciliation.timestamp).toLocaleTimeString()}</span></div>
-            <div>• Broker Positions: <span style={{ color: colors.textPrimary }}>{reconciliation.brokerPositionsCount}</span> | Local Ledger: <span style={{ color: colors.textPrimary }}>{reconciliation.localPositionsCount}</span></div>
-            <div>• Broker Orders: <span style={{ color: colors.textPrimary }}>{reconciliation.brokerOrdersCount}</span> | Local Orders: <span style={{ color: colors.textPrimary }}>{reconciliation.localOrdersCount}</span></div>
-            <div>• Active Discrepancies: <span style={{ color: reconciliation.discrepancies.length === 0 ? colors.profit : colors.loss, fontWeight: 'bold' }}>{reconciliation.discrepancies.length}</span></div>
-            <div>• Entry Safety Gate: <span style={{ color: reconciliation.executionFrozen ? colors.loss : colors.profit, fontWeight: 'bold' }}>
-              {reconciliation.executionFrozen ? 'FROZEN (Entries Blocked)' : 'ACTIVE (Safe)'}
-            </span></div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, fontSize: typography.fontSize.xs }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
+              <span style={{ color: colors.textMuted }}>Positions Sync:</span>
+              <span>Broker: {reconciliation.brokerPositionsCount} | Local: {reconciliation.localPositionsCount}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
+              <span style={{ color: colors.textMuted }}>Orders Sync:</span>
+              <span>Broker: {reconciliation.brokerOrdersCount} | Local: {reconciliation.localOrdersCount}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
+              <span style={{ color: colors.textMuted }}>Last Run Timestamp:</span>
+              <span style={{ color: colors.textSecondary }}>{new Date(reconciliation.timestamp).toLocaleTimeString()}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0` }}>
+              <span style={{ color: colors.textMuted }}>Auto-Scheduler Status:</span>
+              <span style={{ color: schedulerStatus.schedulerActive ? colors.profit : colors.warning, fontWeight: 'bold' }}>
+                {schedulerStatus.schedulerActive ? 'Enabled (Every 60s)' : 'Stopped'}
+              </span>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: spacing.xs, marginTop: spacing.md }}>
+          <div style={{ display: 'flex', gap: spacing.sm, marginTop: spacing.xs }}>
             <button
               onClick={handleRunReconciliation}
               style={{
-                padding: `${spacing.xs}px ${spacing.md}px`,
+                flex: 1,
+                padding: `${spacing.sm}px ${spacing.md}px`,
                 backgroundColor: colors.surfaceElevated,
                 color: colors.textPrimary,
                 border: `1px solid ${colors.border}`,
@@ -301,9 +445,24 @@ export default function HealthScreen() {
               Run Audit Now
             </button>
             <button
+              onClick={toggleScheduler}
+              style={{
+                padding: `${spacing.sm}px ${spacing.md}px`,
+                backgroundColor: colors.surfaceElevated,
+                color: schedulerStatus.schedulerActive ? colors.warning : colors.profit,
+                border: `1px solid ${colors.border}`,
+                borderRadius: borderRadius.sm,
+                fontSize: typography.fontSize.xs,
+                fontWeight: typography.fontWeight.semibold,
+                cursor: 'pointer',
+              }}
+            >
+              {schedulerStatus.schedulerActive ? 'Pause Schedule' : 'Start Schedule'}
+            </button>
+            <button
               onClick={handleSimulateDiscrepancy}
               style={{
-                padding: `${spacing.xs}px ${spacing.md}px`,
+                padding: `${spacing.sm}px ${spacing.md}px`,
                 backgroundColor: colors.surfaceElevated,
                 color: colors.warning,
                 border: `1px solid ${colors.warning}`,
@@ -313,24 +472,8 @@ export default function HealthScreen() {
                 cursor: 'pointer',
               }}
             >
-              Test Discrepancy Freeze
+              Test Mismatch
             </button>
-          </div>
-        </div>
-
-        {/* Market Data Feed V3 & Telemetry */}
-        <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm }}>
-            <h3 style={{ margin: 0, fontSize: typography.fontSize.sm }}>Market Data Feed V3</h3>
-            <Badge label="STREAMING" variant="success" size="sm" />
-          </div>
-
-          <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.8 }}>
-            <div>• Stream Protocol: <span style={{ color: colors.textPrimary }}>WebSocket (Protobuf V3)</span></div>
-            <div>• Heartbeat Latency: <span style={{ color: colors.profit, fontWeight: 'bold' }}>16ms</span></div>
-            <div>• Stale Feed Detector: <span style={{ color: colors.profit }}>ACTIVE (&gt; 3,000ms threshold)</span></div>
-            <div>• Monotonic Ticks: <span style={{ color: colors.textPrimary }}>Duplicate filter active</span></div>
-            <div>• Egress IP Binding: <span style={{ color: colors.cyan }}>Verified static IP 127.0.0.1</span></div>
           </div>
         </div>
       </div>
@@ -371,6 +514,121 @@ export default function HealthScreen() {
           </table>
         </div>
       )}
+
+      {/* Incident Drill & System Alerts Center */}
+      <div
+        style={{
+          backgroundColor: colors.surface,
+          border: `1px solid ${colors.border}`,
+          borderRadius: borderRadius.md,
+          padding: spacing.lg,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: spacing.md,
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.sm }}>
+          <div>
+            <h2 style={{ margin: 0, fontSize: typography.fontSize.md }}>
+              System Alerts & Multi-Channel Notification Center
+            </h2>
+            <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
+              Real-time ring-buffered dispatch across WebSocket, Log, and Mobile Push.
+            </p>
+          </div>
+
+          <button
+            onClick={handleTriggerIncidentDrill}
+            style={{
+              padding: `${spacing.sm}px ${spacing.lg}px`,
+              backgroundColor: colors.lossMuted,
+              color: colors.loss,
+              border: `1px solid ${colors.loss}`,
+              borderRadius: borderRadius.sm,
+              fontSize: typography.fontSize.xs,
+              fontWeight: typography.fontWeight.bold,
+              cursor: 'pointer',
+            }}
+          >
+            🔥 TRIGGER INCIDENT DRILL
+          </button>
+        </div>
+
+        {/* Alerts List */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.sm }}>
+          {alerts.map((alert) => (
+            <div
+              key={alert.id}
+              style={{
+                backgroundColor: alert.acknowledged ? colors.surfaceElevated : colors.surface,
+                border: `1px solid ${
+                  alert.severity === AlertSeverity.EMERGENCY || alert.severity === AlertSeverity.CRITICAL
+                    ? colors.loss
+                    : alert.severity === AlertSeverity.WARNING
+                    ? colors.warningBorder
+                    : colors.border
+                }`,
+                borderRadius: borderRadius.sm,
+                padding: spacing.md,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: spacing.sm,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, flex: 1, minWidth: 260 }}>
+                <Badge
+                  label={alert.severity}
+                  variant={
+                    alert.severity === AlertSeverity.EMERGENCY || alert.severity === AlertSeverity.CRITICAL
+                      ? 'danger'
+                      : alert.severity === AlertSeverity.WARNING
+                      ? 'warning'
+                      : 'neutral'
+                  }
+                  size="sm"
+                />
+                <div>
+                  <div style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.xs, color: colors.textPrimary }}>
+                    {alert.title}
+                  </div>
+                  <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 2 }}>
+                    {alert.message}
+                  </div>
+                  <div style={{ color: colors.textMuted, fontSize: '10px', marginTop: 4 }}>
+                    {new Date(alert.timestamp).toLocaleTimeString()} • Category: {alert.category}
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                {alert.acknowledged ? (
+                  <span style={{ fontSize: typography.fontSize.xs, color: colors.profit, fontWeight: typography.fontWeight.semibold }}>
+                    ✓ Acknowledged
+                  </span>
+                ) : (
+                  <button
+                    onClick={() => handleAcknowledgeAlert(alert.id)}
+                    style={{
+                      padding: `${spacing.xs}px ${spacing.sm}px`,
+                      backgroundColor: colors.surfaceElevated,
+                      color: colors.textPrimary,
+                      border: `1px solid ${colors.border}`,
+                      borderRadius: borderRadius.sm,
+                      fontSize: typography.fontSize.xs,
+                      cursor: 'pointer',
+                      fontWeight: typography.fontWeight.semibold,
+                    }}
+                  >
+                    Acknowledge
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

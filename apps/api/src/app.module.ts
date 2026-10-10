@@ -11,6 +11,7 @@ import { ProposalsController } from './proposals/proposals.controller';
 import { ProposalsService } from './proposals/proposals.service';
 import { OrdersController } from './orders/orders.controller';
 import { ReportsController } from './reports/reports.controller';
+import { ReportsService } from './reports/reports.service';
 import { StrategiesController } from './strategies/strategies.controller';
 import { StrategiesService } from './strategies/strategies.service';
 import { AgentsController } from './agents/agents.controller';
@@ -29,6 +30,13 @@ import { OrdersService } from './orders/orders.service';
 import { TokenStorageService } from './broker/token-storage.service';
 import { UpstoxOAuthService } from './broker/upstox-oauth.service';
 import { BrokerReconciliationService } from './broker/broker-reconciliation.service';
+import { ReconciliationSchedulerService } from './broker/reconciliation-scheduler.service';
+import { SupervisedExecutionService } from './orders/supervised-execution.service';
+import { GoLiveChecklistService } from './orders/go-live-checklist.service';
+import { NotificationsController } from './notifications/notifications.controller';
+import { NotificationsService } from './notifications/notifications.service';
+import { AutonomousController } from './orders/autonomous.controller';
+import { AutonomousExecutionService } from './orders/autonomous-execution.service';
 
 @Module({
   imports: [],
@@ -44,6 +52,8 @@ import { BrokerReconciliationService } from './broker/broker-reconciliation.serv
     AgentsController,
     OrdersController,
     ReportsController,
+    NotificationsController,
+    AutonomousController,
   ],
   providers: [
     EnvService,
@@ -65,6 +75,12 @@ import { BrokerReconciliationService } from './broker/broker-reconciliation.serv
     TokenStorageService,
     UpstoxOAuthService,
     BrokerReconciliationService,
+    ReconciliationSchedulerService,
+    SupervisedExecutionService,
+    GoLiveChecklistService,
+    NotificationsService,
+    ReportsService,
+    AutonomousExecutionService,
   ],
   exports: [
     EnvService,
@@ -86,6 +102,13 @@ import { BrokerReconciliationService } from './broker/broker-reconciliation.serv
     TokenStorageService,
     UpstoxOAuthService,
     BrokerReconciliationService,
+    ReconciliationSchedulerService,
+    SupervisedExecutionService,
+    GoLiveChecklistService,
+    NotificationsService,
+    ReportsService,
+    AutonomousExecutionService,
   ],
 })
 export class AppModule {}
+

@@ -3,6 +3,7 @@ import {
   BrokerOrder,
   Instrument,
   Position,
+  ProtectionResult,
 } from '@trading-bot/contracts';
 
 export interface FundsSnapshot {
@@ -39,4 +40,5 @@ export interface BrokerPort {
   placeOrder(req: any): Promise<OrderAcknowledgement>;
   modifyOrder(req: any): Promise<OrderAcknowledgement>;
   cancelOrder(orderId: string): Promise<void>;
+  placeProtectiveExit?(req: any): Promise<ProtectionResult>;
 }

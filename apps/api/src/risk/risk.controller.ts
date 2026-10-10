@@ -24,4 +24,14 @@ export class RiskController {
   emergencyStop() {
     return this.riskService.triggerEmergencyStop();
   }
+
+  @Post('reset-kill-switch')
+  resetKillSwitch() {
+    return this.riskService.resetKillSwitch();
+  }
+
+  @Post('flatten-request')
+  async flattenPositions() {
+    return this.riskService.flattenPositions();
+  }
 }

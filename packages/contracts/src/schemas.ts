@@ -15,6 +15,8 @@ import {
   RiskState,
   StrategyStatus,
   TradeMode,
+  ExitProtectionStatus,
+  AlertSeverity,
 } from './enums';
 
 // Environment Schema
@@ -39,6 +41,7 @@ export const EnvSchema = z.object({
   UPSTOX_BASE_URL: z.string().url().default('https://api.upstox.com/v3'),
   UPSTOX_HFT_URL: z.string().url().default('https://api-hft.upstox.com/v3'),
   TOKEN_ENCRYPTION_KEY: z.string().min(16).default('32_byte_aes_gcm_token_encryption_key_default'),
+  LIVE_EXECUTION_ENABLED: z.coerce.boolean().default(false),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;
@@ -582,3 +585,265 @@ export const ReconciliationReportSchema = z.object({
 });
 
 export type ReconciliationReport = z.infer<typeof ReconciliationReportSchema>;
+
+// Phase 5: GTT Protective Exit Schemas
+export const GTTRuleTypeSchema = z.enum(['ENTRY', 'TARGET', 'STOPLOSS']);
+export type GTTRuleType = z.infer<typeof GTTRuleTypeSchema>;
+
+export const GTTRuleSchema = z.object({
+  type: GTTRuleTypeSchema,
+  triggerPrice: z.number().positive(),
+  price: z.number().positive(),
+  quantity: z.number().int().positive(),
+});
+
+export type GTTRule = z.infer<typeof GTTRuleSchema>;
+
+export const GTTOrderPayloadSchema = z.object({
+  instrumentKey: z.string(),
+  type: z.literal('MULTIPLE'),
+  product: z.nativeEnum(ProductType),
+  rules: z.array(GTTRuleSchema).min(1),
+});
+
+export type GTTOrderPayload = z.infer<typeof GTTOrderPayloadSchema>;
+
+export const ProtectionResultSchema = z.object({
+  success: z.boolean(),
+  gttOrderId: z.string().optional(),
+  protectionStatus: z.nativeEnum(ExitProtectionStatus),
+  stopLossPrice: z.number().positive(),
+  targetPrice: z.number().positive(),
+  confirmedQty: z.number().int().positive(),
+  message: z.string(),
+});
+
+export type ProtectionResult = z.infer<typeof ProtectionResultSchema>;
+
+// Phase 5: Go-Live Checklist Schemas
+export const GoLiveChecklistItemSchema = z.object({
+  id: z.string(),
+  category: z.enum([
+    'REGULATORY',
+    'INFRASTRUCTURE',
+    'RISK_CAPS',
+    'BROKER_OAUTH',
+    'MARKET_DATA',
+    'PROTECTION_MECHANISM',
+    'CONSENT',
+  ]),
+  title: z.string(),
+  description: z.string(),
+  passed: z.boolean(),
+  verifiedAt: z.string().datetime().nullable(),
+  evidence: z.string().optional(),
+});
+
+export type GoLiveChecklistItem = z.infer<typeof GoLiveChecklistItemSchema>;
+
+export const GoLiveChecklistSchema = z.object({
+  allPassed: z.boolean(),
+  items: z.array(GoLiveChecklistItemSchema),
+  signedOffBy: z.string().nullable(),
+  signedOffAt: z.string().datetime().nullable(),
+  liveExecutionPermitted: z.boolean(),
+});
+
+export type GoLiveChecklist = z.infer<typeof GoLiveChecklistSchema>;
+
+// Phase 5: Supervised Live Execution Schemas
+export const SupervisedExecutionRequestSchema = z.object({
+  proposalId: z.string().uuid(),
+  revalidateFreshness: z.boolean().default(true),
+  simulateTimeout: z.boolean().optional(),
+  simulateProtectionFailure: z.boolean().optional(),
+  simulateUncoveredPosition: z.boolean().optional(),
+  simulateExitLimitUnfilled: z.boolean().optional(),
+});
+
+export type SupervisedExecutionRequest = z.infer<typeof SupervisedExecutionRequestSchema>;
+
+export const SupervisedExecutionResultSchema = z.object({
+  orderId: z.string(),
+  intentId: z.string(),
+  orderStatus: z.nativeEnum(OrderStatus),
+  protectionStatus: z.nativeEnum(ExitProtectionStatus),
+  filledQuantity: z.number().int().nonnegative(),
+  averagePrice: z.number().nonnegative(),
+  gttOrderId: z.string().optional(),
+  message: z.string(),
+});
+
+export type SupervisedExecutionResult = z.infer<typeof SupervisedExecutionResultSchema>;
+
+// Phase 6: Operational Resilience & Risk Center Schemas
+export const FlattenExitDetailSchema = z.object({
+  orderId: z.string(),
+  instrumentKey: z.string(),
+  symbol: z.string(),
+  quantity: z.number().int().positive(),
+  exitPrice: z.number().nonnegative(),
+  realizedPnl: z.number(),
+  charges: z.number().nonnegative(),
+  status: z.nativeEnum(OrderStatus),
+});
+
+export type FlattenExitDetail = z.infer<typeof FlattenExitDetailSchema>;
+
+export const FlattenPositionsResultSchema = z.object({
+  success: z.boolean(),
+  positionsClosed: z.number().int().nonnegative(),
+  exitOrders: z.array(FlattenExitDetailSchema),
+  totalRealizedNetPnl: z.number(),
+  totalActualCharges: z.number().nonnegative(),
+  message: z.string(),
+  disclaimer: z.string().default('Exits submitted as market orders; confirmed broker fill events finalize closed ledger state.'),
+});
+
+export type FlattenPositionsResult = z.infer<typeof FlattenPositionsResultSchema>;
+
+// Phase 6: System Alerts & Notifications Schemas
+export const SystemAlertSchema = z.object({
+  id: z.string().uuid(),
+  severity: z.nativeEnum(AlertSeverity),
+  category: z.enum([
+    'RISK_GATE',
+    'FEED_STALE',
+    'RECONCILIATION',
+    'KILL_SWITCH',
+    'ORDER_EXECUTION',
+    'PROTECTION_FAILURE',
+    'SYSTEM',
+  ]),
+  title: z.string(),
+  message: z.string(),
+  acknowledged: z.boolean(),
+  timestamp: z.string().datetime(),
+});
+
+export type SystemAlert = z.infer<typeof SystemAlertSchema>;
+
+// Phase 6: Live Health Diagnostics Schema
+export const DiagnosticsReportSchema = z.object({
+  uptimeSeconds: z.number().nonnegative(),
+  memoryUsageMb: z.number().nonnegative(),
+  systemMode: z.nativeEnum(TradeMode),
+  marketFeed: z.object({
+    connected: z.boolean(),
+    latencyMs: z.number().nonnegative(),
+    staleTicksCount: z.number().int().nonnegative(),
+    lastTickAt: z.string().datetime().nullable(),
+  }),
+  brokerConnection: z.object({
+    authenticated: z.boolean(),
+    rateLimiterTokensRemaining: z.number().nonnegative(),
+    egressIpMatch: z.boolean(),
+    registeredIp: z.string(),
+    tokenExpiresInSeconds: z.number().nullable(),
+  }),
+  riskStatus: z.object({
+    killSwitchActive: z.boolean(),
+    riskState: z.nativeEnum(RiskState),
+    availableCash: z.number().nonnegative(),
+    reservedCapital: z.number().nonnegative(),
+    dailyDrawdownBudgetRemaining: z.number().nonnegative(),
+    openPositionsCount: z.number().int().nonnegative(),
+  }),
+  reconciliation: z.object({
+    activeScheduler: z.boolean(),
+    lastReconciliationAt: z.string().datetime().nullable(),
+    discrepancyCount: z.number().int().nonnegative(),
+  }),
+  timestamp: z.string().datetime(),
+});
+
+export type DiagnosticsReport = z.infer<typeof DiagnosticsReportSchema>;
+
+// Phase 6: Reconciliation Schedule Status Schema
+export const ReconciliationScheduleStatusSchema = z.object({
+  schedulerActive: z.boolean(),
+  intervalSeconds: z.number().int().positive(),
+  lastRunAt: z.string().datetime().nullable(),
+  totalRuns: z.number().int().nonnegative(),
+  lastDiscrepanciesFound: z.number().int().nonnegative(),
+});
+
+export type ReconciliationScheduleStatus = z.infer<typeof ReconciliationScheduleStatusSchema>;
+
+// Phase 7: Bounded Autonomous Mode Schemas
+export const AutonomousReadinessItemSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  description: z.string(),
+  category: z.enum([
+    'REGULATORY',
+    'PAPER_PROOF',
+    'GO_LIVE',
+    'RECONCILIATION',
+    'BROKER_AUTH',
+    'FEED_HEALTH',
+  ]),
+  passed: z.boolean(),
+  details: z.string(),
+  verifiedAt: z.string().datetime(),
+});
+
+export type AutonomousReadinessItem = z.infer<typeof AutonomousReadinessItemSchema>;
+
+export const AutonomousReadinessReportSchema = z.object({
+  isEligibleForAuto: z.boolean(),
+  items: z.array(AutonomousReadinessItemSchema),
+  evaluatedAt: z.string().datetime(),
+  summary: z.string(),
+});
+
+export type AutonomousReadinessReport = z.infer<typeof AutonomousReadinessReportSchema>;
+
+export const AutonomousArmRequestSchema = z.object({
+  strategyId: z.string().uuid(),
+  windowMinutes: z.number().int().min(5).max(120).default(30),
+  maxSessionTrades: z.number().int().min(1).max(5).default(2),
+  confirmationCode: z.string().min(1),
+  operatorConsent: z.boolean().refine((val) => val === true, {
+    message: 'Explicit operator affirmative consent required for autonomous execution.',
+  }),
+});
+
+export type AutonomousArmRequest = z.infer<typeof AutonomousArmRequestSchema>;
+
+export const AutonomousSessionStatusSchema = z.object({
+  isArmed: z.boolean(),
+  strategyId: z.string().uuid().nullable(),
+  strategyName: z.string().nullable(),
+  strategyVersion: z.number().int().positive().nullable(),
+  versionHash: z.string().nullable(),
+  armedAt: z.string().datetime().nullable(),
+  armedUntil: z.string().datetime().nullable(),
+  remainingMinutes: z.number().nonnegative(),
+  tradesExecutedInSession: z.number().int().nonnegative(),
+  maxSessionTrades: z.number().int().positive(),
+  lastDisarmReason: z.string().nullable(),
+  systemMode: z.nativeEnum(TradeMode),
+});
+
+export type AutonomousSessionStatus = z.infer<typeof AutonomousSessionStatusSchema>;
+
+export const AutonomousExecutionLogSchema = z.object({
+  id: z.string().uuid(),
+  timestamp: z.string().datetime(),
+  strategyId: z.string().uuid(),
+  versionHash: z.string(),
+  action: z.enum([
+    'AUTO_TRIGGERED',
+    'PRE_TRADE_VALIDATED',
+    'ORDER_DISPATCHED',
+    'AUTO_DISARMED',
+    'AUTO_BLOCKED',
+  ]),
+  details: z.string(),
+  riskChecksPassed: z.boolean(),
+});
+
+export type AutonomousExecutionLog = z.infer<typeof AutonomousExecutionLogSchema>;
+
+

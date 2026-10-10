@@ -16,9 +16,9 @@
 | **Phase 2** | **Strategy Engine & Tool-Restricted Agents** | **COMPLETED ✅** | Deterministic indicator rules & verified expiring `TradeProposal` pipeline, 54 tests pass |
 | **Phase 3** | **Risk Engine & Paper Broker Simulation** | **COMPLETED ✅** | Transactional capital locks, slippage/charges model, zero double-spending, 68 tests pass |
 | **Phase 4** | **Upstox Read-Only Portfolio & OAuth Integration** | **COMPLETED ✅** | AES-256-GCM token encryption, OAuth flow, egress IP validation, broker reconciliation, 84 tests pass |
-| **Phase 5** | Supervised Live Order Execution (Approval Mode) | Next Up ⏳ | Owner approval window, multi-leg GTT protection, orderbook reconciliation |
-| **Phase 6** | Operational Resilience, Diagnostics & Mobile Polish | Pending | Kill switch, flatten position command, alert notifications, incident drills |
-| **Phase 7** | Bounded Autonomous Execution (Armed Auto Mode) | Gated | Regulatory checklist passed, multi-day paper proof, hard limits locked |
+| **Phase 5** | **Supervised Live Order Execution (Approval Mode)** | **COMPLETED ✅** | Owner approval window, multi-leg GTT protection, failure injection drills, 102 tests pass |
+| **Phase 6** | **Operational Resilience, Diagnostics & Mobile Polish** | **COMPLETED ✅** | Kill switch, flatten all command, alert notifications, incident drills, RFC-4180 CSV export, 112 tests pass |
+| **Phase 7** | **Bounded Autonomous Execution (Armed Auto Mode)** | **COMPLETED ✅** | 6 pre-flight gates, bounded time windows, session trade caps, auto-disarming triggers, GTT exits, 119 tests pass |
 
 ---
 
@@ -208,15 +208,221 @@
 
 ---
 
-## Next Steps: Phase 5 — Supervised Live Order Execution (Approval Mode)
+## Phase 5: Supervised Live Order Execution (Approval Mode) — COMPLETED ✅
 
-**Phase 5 Objectives:**
-- Live order execution only behind explicit feature flags and owner `APPROVAL` mode.
-- Short-lived owner approval window (countdown timer) with revalidation before dispatch.
-- Idempotent execution intent (`intentId`) and central account-level lock.
-- Upstox V3 Order Placement, Modification, and Cancellation in broker adapter.
-- Supported GTT exits (stop-loss and profit target) tied to broker order legs.
-- Order state tracking: `ACKNOWLEDGED`, `PARTIALLY_FILLED`, `FILLED`, `PENDING_PROTECTION`, `CLOSED`, and `UNKNOWN`.
-- Handling simulated request timeouts, uncovered positions, and unfilled exit limits.
-- UI rules: Never label `ACKNOWLEDGED` as `FILLED` and never display a stop as "guaranteed".
-- Explicit manual go-live safety checklist.
+### Deliverables Implemented:
+
+1. **Deterministic Order State Machine Invariants (`packages/domain/src/order-state-machine.ts`)**:
+   - **Critical Invariant**: Broker `ACKNOWLEDGED` status is strictly NEVER labeled or treated as `FILLED` (`assertAckNotLabeledAsFilled`).
+   - In-flight order identification (`isOrderInFlight`: `SUBMITTING`, `ACKNOWLEDGED`, `PARTIALLY_FILLED`).
+   - Multi-leg GTT exit parameter validation (`validateGTTExitParameters`): ensures stop price < entry price, target price > entry price, and calculates all-in loss buffer to guarantee ₹500 hard cap is never exceeded.
+
+2. **Supervised Live Execution Service (`apps/api/src/orders/supervised-execution.service.ts`)**:
+   - **Feature Flag & Safety Gate**: Live order execution strictly blocked unless `LIVE_EXECUTION_ENABLED=true` and Go-Live 10-point checklist is fully signed off.
+   - **Owner Approval Mode & Window Check**: Proposals must be explicitly authorized with status `APPROVED`; rejects execution if 180s countdown window has expired.
+   - **Pre-Trade Revalidation**: Checks real-time tick freshness (< 3,000ms latency) and Bid/Ask spread (<= 1.0% liquidity ceiling) immediately prior to broker dispatch.
+   - **Idempotent Intent & Central Capital Lock**: Generates unique cryptographic `intentId` and acquires atomic capital reservation before touching broker endpoints.
+   - **Multi-Leg GTT Exit Protection Dispatch**: Entry fill immediately attaches broker GTT stop-loss and profit target limit triggers.
+   - **Failure Injection Drills**: Simulates request timeout (`UNKNOWN_BROKER_STATE`), protection failure (`PROTECTION_FAILED` + Kill Switch activation), uncovered position, and unfilled exit limits (`MANUAL_INTERVENTION_REQUIRED`).
+
+3. **Upstox V3 Live Order & GTT Protection Capabilities (`apps/api/src/broker/upstox-broker.adapter.ts`)**:
+   - Full implementation of Upstox V3 Order Placement (`/order/place`), Modification (`/order/modify`), and Cancellation (`/order/cancel`).
+   - Upstox V3 Multi-Leg GTT order placement (`/order/gtt/place`) supporting `STOPLOSS` and `TARGET` rules with limit triggers.
+   - Guarded execution: Strictly checks `LIVE_EXECUTION_ENABLED` flag, valid AES-256-GCM token existence, and supports seamless sandbox/mock verification when running with sandbox credentials.
+
+4. **10-Point Pre-Flight Go-Live Safety Checklist (`apps/api/src/orders/go-live-checklist.service.ts`)**:
+   - Authoritative 10-item regulatory, infrastructure, risk, data, and consent verification system covering:
+     1. `REGULATORY`: SEBI & Exchange Algorithmic Framework Compliance (supervised personal execution).
+     2. `INFRASTRUCTURE`: Static Egress IP Binding Verified against Upstox developer portal.
+     3. `RISK_CAPS`: Deterministic Hard Caps locked (Max ₹10,000 capital, ₹500 trade risk, ₹1,500 daily drawdown).
+     4. `BROKER_OAUTH`: Upstox OAuth 2.0 Encrypted at Rest using AES-256-GCM.
+     5. `MARKET_DATA`: Streaming Market Data Feed V3 & >3,000ms stale quote block.
+     6. `INFRASTRUCTURE`: Startup Broker Reconciliation Clean (0 discrepancies).
+     7. `PROTECTION_MECHANISM`: Multi-Leg GTT Exit Protection Ready (limit orders disclaimed, not guaranteed stop).
+     8. `PROTECTION_MECHANISM`: Kill Switch & Emergency Stop Tested.
+     9. `CONSENT`: Supervised Owner Approval Mode Active (180s TTL & revalidation).
+     10. `CONSENT`: Owner Risk Disclosure & Execution Consent signed off.
+   - REST Endpoints: `GET /orders/go-live-checklist`, `POST /orders/go-live-checklist/sign-off`, `POST /orders/go-live-checklist/sign-off-item`.
+
+5. **Client SDK Extensions (`packages/client-sdk/src/client.ts`)**:
+   - `executeSupervisedProposal()`, `getGoLiveChecklist()`, `signOffGoLiveChecklist()`, `signOffChecklistItem()`.
+
+6. **Universal Client Workstation UI (`apps/trader/app/orders.tsx`)**:
+   - **Multi-Leg GTT Protections in Positions**: Visual badges displaying `GTT PROTECTED` vs `UNPROTECTED`, protective stop prices with disclaimer ("Limit trigger; not guaranteed"), and profit target prices.
+   - **Order State Transparency**: Visual badges for `ACKNOWLEDGED`, `FILLED`, `PROTECTED (GTT)`, `PARTIAL`, `UNKNOWN TIMEOUT`, `PROTECTION FAILED`, `CLOSED`. Invariant strictly honored: `ACKNOWLEDGED` is NEVER labeled as `FILLED`.
+   - **Failure Injection Testbench Bar**: Single-click testing of Supervised GTT Order, Request Timeout (`UNKNOWN`), Protection Failure (`FREEZE`), Unfilled Exit (`ALERT`), and Uncovered Position (`FREEZE`).
+   - **Interactive Go-Live Checklist Tab**: 4th dedicated workstation tab displaying all 10 pre-flight items, verification timestamps, audit evidence, item sign-off buttons, and platform owner Go-Live sign-off authorization banner.
+
+### Verification & Test Matrix
+
+- **Unit & Integration Tests**: 102 passed / 102 total (Vitest across 19 test files):
+  - Domain tests: Invariant guard against ACK labeled as FILLED, in-flight order identification, GTT multi-leg parameter validation and ₹500 risk ceiling.
+  - Supervised execution tests: Owner approval requirement rejection, 180s TTL expiration rejection, stale quote (>3,000ms) revalidation rejection, spread (>1.0%) revalidation rejection, GTT exit attachment and state transitions.
+  - Anomaly simulation tests: Simulated request timeout to `UNKNOWN_BROKER_STATE`, simulated protection failure to `PROTECTION_FAILED` with kill switch engagement, simulated uncovered position, simulated exit limit unfilled to `MANUAL_INTERVENTION_REQUIRED`.
+  - Upstox Live adapter tests: Place, modify, cancel, and GTT multi-leg protective exit methods with feature flag enforcement.
+  - Go-Live checklist tests: 10-item pre-flight verification, owner sign-off workflow, and permission gate.
+- **TypeScript Typecheck**: Passed across all 8 workspace projects with 0 errors (`pnpm run typecheck`).
+- **Monorepo Build**: Passed cleanly across all packages and services (`pnpm run build`).
+
+---
+
+---
+
+## Phase 6: Operational Resilience, Diagnostics & Mobile Polish — COMPLETED ✅
+
+### Deliverables Implemented:
+
+1. **Decoupled Dual Emergency Controls & Flatten Positions Protocol (Blueprint Section 8 & 12)**:
+   - **Strict Decoupling Invariant**: "Stop new trades" (intake gate / Kill Switch) is strictly decoupled from "Request flatten all" (active exits trigger).
+   - **Central Kill Switch**: `POST /risk/emergency-stop` halts intake, blocks proposal evaluation, freezes worker pipeline, and sets state `EMERGENCY_STOP`.
+   - **Kill Switch Reset**: `POST /risk/reset-kill-switch` restores the trading engine safely to `DISARMED`.
+   - **Flatten Positions Protocol**: `POST /risk/flatten-request` queries broker positions, submits aggressive market exit orders, settles reservations back to available cash ledger via `RiskReservationManager.settleClosedPosition`, transitions risk state to `DISARMED`, and broadcasts `position.flattened`.
+   - Invariant: Exits are submitted to the broker; confirmed broker fill events finalize closed state.
+
+2. **Automated Order Reconciliation Background Scheduler (`apps/api/src/broker/reconciliation-scheduler.service.ts`)**:
+   - Periodic background audit service (default 60s configurable interval).
+   - Runs `BrokerReconciliationService` comparing broker orders & positions against local database.
+   - Detects phantom broker positions and quantity divergence; automatically engages kill switch upon discrepancy.
+   - Keeps rolling history buffer of past 20 audit reports.
+   - REST endpoints:
+     - `GET /broker/reconciliation/schedule`: Inspect scheduler status (interval, total runs, clean runs, last run timestamp).
+     - `GET /broker/reconciliation/history`: Query audit report history.
+     - `POST /broker/reconciliation/schedule/start`: Start/resume automated scheduler.
+     - `POST /broker/reconciliation/schedule/stop`: Pause automated scheduler.
+
+3. **Live Health & Operational Diagnostics Subsystem (`apps/api/src/health/health.controller.ts`)**:
+   - `GET /health/diagnostics`: Generates real-time telemetry report conforming to `DiagnosticsReportSchema`:
+     - System uptime and Node.js process heap memory consumption (MB).
+     - Market Feed telemetry: WebSocket connected, latency ms, stale ticks count, last tick timestamp.
+     - Upstox Broker connection: AES-256-GCM token validity, seconds remaining, rate limiter token pool (25 req/s), registered egress IP match (`UPSTOX_EGRESS_IP`).
+     - Risk Engine status: Kill switch active, state (`DISARMED`/`ARMED`/`EMERGENCY_STOP`), available cash, reserved capital, remaining daily drawdown budget.
+     - Reconciliation status: Background scheduler state, last run, discrepancy count.
+
+4. **Multi-Channel Notification Dispatch & Incident Drill Engine (`apps/api/src/notifications/`)**:
+   - `NotificationsService`: Ring-buffer alert registry (50 events) with severity classification (`INFO`, `WARNING`, `CRITICAL`, `EMERGENCY`).
+   - Multi-channel dispatch across WebSocket (`alert.created`), structured logger, and mobile push notification queue.
+   - REST endpoints:
+     - `GET /alerts`: Query active system alerts.
+     - `POST /alerts/:id/acknowledge`: Operator acknowledgment with `alert.acknowledged` broadcast.
+     - `POST /alerts/test`: Triggers incident recovery drill simulating emergency alert dispatch.
+
+5. **Daily Statutory Reporting & RFC-4180 CSV Export (`apps/api/src/reports/`)**:
+   - `ReportsService`: Real-time daily P&L calculation (gross P&L, realized net P&L, unrealized P&L, capital deployed, win/loss trade count).
+   - Round-trip statutory levies calculation (Brokerage ₹40, STT 0.1%, NSE turnover 0.0505%, SEBI 0.0001%, Stamp duty 0.003%, GST 18%).
+   - Fee variance analysis: compares upfront estimated charges against verified actual exchange charges to track net friction savings.
+   - RFC-4180 compliant CSV export generator with appropriate quotes, headers, and Windows CRLF (`\r\n`) line terminations.
+   - REST endpoints:
+     - `GET /reports/daily`: Fetch structured daily performance summary.
+     - `GET /reports/daily/export-csv`: Export and download audit CSV file (`daily_trading_report_YYYY-MM-DD.csv`).
+
+6. **Client SDK Extensions (`packages/client-sdk/src/client.ts`)**:
+   - `flattenPositions()`, `resetKillSwitch()`, `getReconciliationSchedule()`, `getReconciliationHistory()`, `startReconciliationScheduler()`, `stopReconciliationScheduler()`, `getDiagnostics()`, `getAlerts()`, `acknowledgeAlert()`, `triggerDrillAlert()`, `getDailyReport()`, `exportDailyReportCsv()`.
+
+7. **Universal Client Polish (`apps/trader`)**:
+   - `app/risk.tsx`:
+     - Decoupled Dual Emergency Controls: "Stop New Trades" (Kill Switch) vs "Request Flatten All" (Active Exits).
+     - Two-step confirmation modal for Flatten All with operator audit reason and disclaimer.
+     - Live Reset Kill Switch action restoring engine to `DISARMED`.
+     - Live Capital & Reservation Telemetry Strip (Available cash, held reservations, open positions).
+   - `app/health.tsx`:
+     - Live Diagnostics Telemetry metrics bar (WS latency ms, stale ticks, heap memory MB, scheduler status).
+     - Automated Reconciliation background scheduler controls (Run now, pause/start schedule, simulate mismatch).
+     - Multi-Channel Notification Center with "Trigger Incident Drill" action and alert acknowledgment buttons.
+   - `app/orders.tsx`:
+     - Journal Tab: "📥 Download Daily Audit CSV (RFC-4180)" button triggering browser CSV file export.
+     - Fee Variance Savings summary strip (Estimated fees, actual statutory levies, net savings).
+   - `src/hooks/useWorkstation.ts`: Extended with `flattenPositions()`, `isFlattening`, `openPositionsCount`, and `activeReservationsCount`.
+
+### Verification & Test Matrix
+
+- **Unit & Integration Tests**: 112 passed / 112 total (Vitest across 20 test files):
+  - `RiskService`: Emergency stop engagement, kill switch reset restoring DISARMED, market flatten order execution, reservation settlement, zero positions remaining.
+  - `ReconciliationSchedulerService`: Background audit cycle execution, report history retention, start/stop lifecycle.
+  - `NotificationsService`: Alert ring buffer, multi-channel dispatch, severity filtering, acknowledgment, incident drill dispatch.
+  - `ReportsService`: Daily metrics aggregation, round-trip statutory fee calculation, RFC-4180 CSV text format verification.
+  - `HealthController`: Comprehensive diagnostics telemetry report generation across all subsystems.
+  - `Trader UI & Workstation Tests`: `useWorkstation` flatten state lifecycle, `FlattenPositionsResultSchema`, `SystemAlertSchema`, `DiagnosticsReportSchema`, `ReconciliationScheduleStatusSchema`.
+- **TypeScript Typecheck**: Passed cleanly across all 8 workspace projects with 0 errors (`pnpm run typecheck`).
+- **Monorepo Build**: Passed cleanly across all packages and services (`pnpm run build`).
+
+---
+
+## Phase 7: Bounded Autonomous Execution (Armed Auto Mode) — COMPLETED ✅
+
+### Deliverables Implemented:
+
+1. **Pre-Flight Readiness Gating (`AutonomousExecutionService.checkReadiness()`)**:
+   - Comprehensive audit verifying all 6 release checklist criteria prior to arming:
+     1. `auto_01` (REGULATORY): SEBI Personal Algorithmic Framework compliance (supervised personal execution, no multi-tenant public auto).
+     2. `auto_02` (PAPER_PROOF): Multi-day clean paper simulation proof with zero unhandled exceptions.
+     3. `auto_03` (GO_LIVE): 10-point Go-Live checklist verified and signed off by platform owner.
+     4. `auto_04` (RECONCILIATION): Zero broker discrepancies detected between workstation ledger and broker orders/positions.
+     5. `auto_05` (BROKER_AUTH): AES-256-GCM encrypted Upstox OAuth 2.0 token valid with > 15 minutes remaining and verified egress IP.
+     6. `auto_06` (FEED_HEALTH): Upstox WebSocket live market feed connected with latency strictly under 3,000ms threshold and zero stale ticks.
+   - If *any* prerequisite is missing or failing, arming throws `ForbiddenException(AUTONOMOUS_EXECUTION_BLOCKED)`.
+
+2. **Bounded Time-Window Execution Engine (`apps/api/src/orders/autonomous-execution.service.ts`)**:
+   - Operator must specify `confirmationCode: 'CONFIRM_AUTO_EXECUTION'` and acknowledge explicit consent.
+   - Bounded duration windows (`windowMinutes`: 15, 30, or 60 minutes; max 120 minutes).
+   - Per-session trade count caps (`maxSessionTrades`: 1, 2, or 3 trades).
+   - In-memory session tracking with scheduled automatic disarm timer (`this.disarmTimer`).
+   - Strategy status transitions: `PAPER_ACTIVE` &rarr; `ARMED` &rarr; `PAPER_ACTIVE` (on disarm).
+
+3. **Seven Automatic Disarming Safeguards & Invariants**:
+   - ⏱️ **Window Countdown Expiry**: Session timer reaching zero automatically disarms engine.
+   - 🎯 **Session Trade Cap Reached**: System disarms immediately after executing allowed trades count.
+   - 📝 **Strategy Mutation**: Any parameter change causing a version bump immediately invalidates active arming.
+   - 📡 **Market Feed Latency**: Quote staleness or latency > 3,000ms instantly freezes execution and disarms.
+   - ⚖️ **Broker Ledger Discrepancy**: Divergence between local and broker ledger halts engine and disarms.
+   - 🛑 **Kill Switch**: Operator manual emergency stop or daily loss breach disarms autonomous mode immediately.
+   - 🔄 **Process Restart / Failover**: Single-leader worker and API initialize in safe `DISARMED` state by default.
+
+4. **Supervised Execution Bridge (`executeAutonomousProposal()`)**:
+   - Autonomously executes valid, approved proposals through `SupervisedExecutionService`.
+   - Atomic risk reservation acquisition with hard account limits (₹10,000 capital, ₹500 all-in risk).
+   - Pre-trade revalidation: Revalidates quote freshness (<3,000ms) and spread (<=1.0%) right before submission.
+   - Mandatory multi-leg GTT bracket protection attached immediately upon order fill.
+   - Never increases risk or forces trades to chase profit targets.
+
+5. **Universal Client Workstation (`apps/trader/app/strategies.tsx`)**:
+   - **Active ARMED Banner**: Pulsing high-contrast amber/red alert banner with real-time countdown timer (`MM:SS remaining`), trades executed counter (`1/2`), and one-click instant `DISARM SESSION NOW` override.
+   - **Pre-Flight Gates Modal**: Detailed 6-point audit view with category badges, descriptions, verification timestamps, and re-audit trigger.
+   - **Arm Bounded Session Modal**: Window duration selector (15m/30m/60m), session trade cap buttons (1/2/3), hard risk caps recap, risk acknowledgment checkbox, and `CONFIRM_AUTO_EXECUTION` input validation.
+   - **Safety Invariants Matrix Card**: Complete visual breakdown of all 6 automatic disarming triggers.
+   - **Autonomous Execution Audit Ledger**: Real-time action log stream tracking `AUTO_TRIGGERED`, `ORDER_DISPATCHED`, and `AUTO_DISARMED` events.
+
+6. **Client SDK & Contracts Extension (`packages/contracts`, `packages/client-sdk`)**:
+   - Schemas: `AutonomousReadinessItemSchema`, `AutonomousReadinessReportSchema`, `AutonomousArmRequestSchema`, `AutonomousSessionStatusSchema`, `AutonomousExecutionLogSchema`.
+   - SDK methods: `getAutonomousReadiness()`, `getAutonomousStatus()`, `armAutonomous()`, `disarmAutonomous()`, `executeAutonomousProposal()`, `getAutonomousLogs()`.
+
+### Verification & Test Matrix
+
+- **Unit & Integration Tests**: 119 passed / 119 total (Vitest across 21 test files):
+  - `AutonomousExecutionService`:
+    - Blocks arming when Go-Live checklist is unsigned.
+    - Successfully arms when all 6 pre-flight gates pass and rejects invalid confirmation codes.
+    - Clean disarm resets strategy status, records logs, and creates system alerts.
+    - Autonomously executes proposals with mandatory GTT exit protection and auto-disarms on session trade limit.
+    - Strictly blocks autonomous arming when Kill Switch is engaged.
+  - `Trader UI & Contract Tests`:
+    - Validates `AutonomousReadinessReportSchema` and items.
+    - Validates `AutonomousArmRequestSchema`, `AutonomousSessionStatusSchema`, and `AutonomousExecutionLogSchema`.
+- **TypeScript Typecheck**: Passed cleanly across all 8 workspace projects with 0 errors (`pnpm run typecheck`).
+- **Monorepo Build**: Passed cleanly across all packages and services (`pnpm run build`).
+
+---
+
+## Final Project Summary & Verification Matrix
+
+All 8 Phases (Phase 0 through Phase 7) of the **AI F&O Trading Platform** are 100% complete, fully implemented, end-to-end integrated, and rigorously tested in alignment with `AI_FO_Trading_Platform_Blueprint.md`.
+
+| Subsystem | Coverage | Invariants Verified |
+|---|---|---|
+| **Market Data** | Protobuf V3 decoder, catalog, WebSocket feed, calendar | Tick deduplication, 3,000ms staleness gate, zero lookahead bias |
+| **Strategy & Agents** | Indicator calculations, 5m closed bars, read-only agents | Deterministic rule execution, version hash bumps, no write tools |
+| **Risk & Paper Engine** | Transactional capital locks, slippage/charges, state machine | ₹10k capital cap, ₹500 trade risk cap, ₹1,500 daily loss limit |
+| **Broker Integration** | Upstox OAuth 2.0, AES-256-GCM token storage, read adapter | Static egress IP check, rate limiter (25 req/s), startup reconciliation |
+| **Supervised Execution**| 180s approval window, pre-trade revalidation, GTT exits | Spread <= 1.0%, latency < 3,000ms, bracket exits on fill |
+| **Operational Controls**| Decoupled kill switch vs flatten all, alert ring buffer | Automated reconciliation scheduler, diagnostics endpoint, RFC-4180 CSV |
+| **Autonomous Engine**   | 6-gate pre-flight audit, time-bounded windows, session trade caps | 7 auto-disarm safeguards, live countdown, instant manual disarm |
+

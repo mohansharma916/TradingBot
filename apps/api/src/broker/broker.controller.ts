@@ -9,11 +9,17 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
-import { BrokerHealth, UpstoxSessionStatus, ReconciliationReport } from '@trading-bot/contracts';
+import {
+  BrokerHealth,
+  UpstoxSessionStatus,
+  ReconciliationReport,
+  ReconciliationScheduleStatus,
+} from '@trading-bot/contracts';
 import { PaperBrokerAdapter } from './paper-broker.adapter';
 import { UpstoxBrokerAdapter } from './upstox-broker.adapter';
 import { UpstoxOAuthService } from './upstox-oauth.service';
 import { BrokerReconciliationService } from './broker-reconciliation.service';
+import { ReconciliationSchedulerService } from './reconciliation-scheduler.service';
 
 @Controller('broker')
 export class BrokerController {
@@ -23,6 +29,7 @@ export class BrokerController {
     @Inject(UpstoxBrokerAdapter) private readonly upstoxBroker: UpstoxBrokerAdapter,
     @Inject(UpstoxOAuthService) private readonly oauthService: UpstoxOAuthService,
     @Inject(BrokerReconciliationService) private readonly reconciliationService: BrokerReconciliationService,
+    @Inject(ReconciliationSchedulerService) private readonly reconciliationScheduler: ReconciliationSchedulerService,
   ) {}
 
   private getActiveAdapter() {
@@ -94,5 +101,29 @@ export class BrokerController {
   @HttpCode(HttpStatus.OK)
   async triggerReconciliation(): Promise<ReconciliationReport> {
     return this.reconciliationService.runReconciliation();
+  }
+
+  @Get('reconciliation/schedule')
+  getReconciliationSchedule(): ReconciliationScheduleStatus {
+    return this.reconciliationScheduler.getStatus();
+  }
+
+  @Get('reconciliation/history')
+  getReconciliationHistory(): ReconciliationReport[] {
+    return this.reconciliationScheduler.getHistory();
+  }
+
+  @Post('reconciliation/schedule/start')
+  @HttpCode(HttpStatus.OK)
+  startReconciliationSchedule(@Body('intervalSeconds') interval = 60) {
+    this.reconciliationScheduler.startScheduler(interval);
+    return this.reconciliationScheduler.getStatus();
+  }
+
+  @Post('reconciliation/schedule/stop')
+  @HttpCode(HttpStatus.OK)
+  stopReconciliationSchedule() {
+    this.reconciliationScheduler.stopScheduler();
+    return this.reconciliationScheduler.getStatus();
   }
 }

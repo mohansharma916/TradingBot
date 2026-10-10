@@ -145,3 +145,18 @@ export enum MoneynessType {
   ITM_1 = 'ITM_1',
   OTM_1 = 'OTM_1',
 }
+
+export enum ExitProtectionStatus {
+  UNPROTECTED = 'UNPROTECTED',
+  PENDING_PROTECTION = 'PENDING_PROTECTION',
+  PROTECTED_GTT = 'PROTECTED_GTT',
+  PROTECTED_SERVER = 'PROTECTED_SERVER',
+  PROTECTION_FAILED = 'PROTECTION_FAILED',
+}
+
+export enum AlertSeverity {
+  INFO = 'INFO',
+  WARNING = 'WARNING',
+  CRITICAL = 'CRITICAL',
+  EMERGENCY = 'EMERGENCY',
+}

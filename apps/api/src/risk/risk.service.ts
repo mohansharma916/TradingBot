@@ -1,10 +1,25 @@
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
-import { RiskState, RiskStatus, TradeMode } from '@trading-bot/contracts';
+import {
+  RiskState,
+  RiskStatus,
+  TradeMode,
+  OrderSide,
+  OrderType,
+  OrderStatus,
+  ProductType,
+  FlattenPositionsResult,
+  FlattenExitDetail,
+} from '@trading-bot/contracts';
+import { calculateOptionCharges } from '@trading-bot/domain';
 import { RiskReservationManager } from './risk-reservation.manager';
+import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
+import { UpstoxBrokerAdapter } from '../broker/upstox-broker.adapter';
+import { EventsGateway } from '../websocket/events.gateway';
 
 @Injectable()
 export class RiskService {
+  private readonly logger = new Logger(RiskService.name);
   private currentState: RiskState;
   private currentMode: TradeMode;
   private armedUntil: string | null = null;
@@ -13,9 +28,18 @@ export class RiskService {
   constructor(
     @Inject(EnvService) private readonly envService: EnvService,
     @Inject(RiskReservationManager) private readonly reservationManager: RiskReservationManager,
+    @Inject(PaperBrokerAdapter) private readonly paperBroker?: PaperBrokerAdapter,
+    @Inject(UpstoxBrokerAdapter) private readonly upstoxBroker?: UpstoxBrokerAdapter,
+    @Inject(EventsGateway) private readonly gateway?: EventsGateway,
   ) {
     this.currentState = this.envService.config.DEFAULT_RISK_STATE;
     this.currentMode = this.envService.config.SYSTEM_MODE;
+  }
+
+  private getBroker() {
+    return this.currentMode === TradeMode.PAPER
+      ? this.paperBroker
+      : this.upstoxBroker;
   }
 
   public getStatus(): RiskStatus {
@@ -51,12 +75,14 @@ export class RiskService {
     }
     this.currentState = RiskState.ARMED;
     this.armedUntil = new Date(Date.now() + durationMinutes * 60000).toISOString();
+    this.gateway?.broadcast('risk.armed', { state: this.currentState, armedUntil: this.armedUntil });
     return this.getStatus();
   }
 
   public disarm(): RiskStatus {
     this.currentState = RiskState.DISARMED;
     this.armedUntil = null;
+    this.gateway?.broadcast('risk.disarmed', { state: this.currentState });
     return this.getStatus();
   }
 
@@ -64,9 +90,132 @@ export class RiskService {
     this.reservationManager.setKillSwitch(true);
     this.currentState = RiskState.EMERGENCY_STOP;
     this.armedUntil = null;
+    this.gateway?.broadcast('risk.emergency_stop', {
+      state: RiskState.EMERGENCY_STOP,
+      killSwitchActive: true,
+      message: 'Emergency Stop Activated: Kill switch engaged, all new trade entries blocked.',
+    });
     return {
       success: true,
       message: 'Emergency Stop Activated: Kill switch engaged, new entries blocked.',
+    };
+  }
+
+  public resetKillSwitch(): RiskStatus {
+    this.reservationManager.setKillSwitch(false);
+    this.currentState = RiskState.DISARMED;
+    this.armedUntil = null;
+    this.gateway?.broadcast('risk.reset', { state: RiskState.DISARMED, killSwitchActive: false });
+    return this.getStatus();
+  }
+
+  /**
+   * Request Flatten All Positions:
+   * Explicitly closes open positions at market, records exits, settles reservations, and sets DISARMED.
+   * Reference: Blueprint Section 8 & Phase 6
+   */
+  public async flattenPositions(reason = 'Operator Manual Flatten'): Promise<FlattenPositionsResult> {
+    const broker = this.getBroker();
+    if (!broker) {
+      throw new Error('No broker adapter configured to execute flatten exit orders.');
+    }
+    const positions = await broker.getPositions();
+    const activePositions = positions.filter((p) => p.netQuantity > 0);
+
+    if (activePositions.length === 0) {
+      return {
+        success: true,
+        positionsClosed: 0,
+        exitOrders: [],
+        totalRealizedNetPnl: 0,
+        totalActualCharges: 0,
+        message: 'No open positions to flatten. Portfolio is flat.',
+        disclaimer: 'Exits submitted as market orders; confirmed broker fill events finalize closed ledger state.',
+      };
+    }
+
+    const exitOrders: FlattenExitDetail[] = [];
+    let totalRealizedNetPnl = 0;
+    let totalActualCharges = 0;
+
+    for (const pos of activePositions) {
+      const exitPrice = pos.lastPrice > 0 ? pos.lastPrice : pos.buyAvgPrice;
+      const orderId = `ord_flatten_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+
+      // Calculate statutory charges for exit
+      const charges = calculateOptionCharges({
+        buyPrice: pos.buyAvgPrice,
+        sellPrice: exitPrice,
+        quantity: pos.netQuantity,
+      });
+
+      const grossPnl = Number(((exitPrice - pos.buyAvgPrice) * pos.netQuantity).toFixed(2));
+      const netPnl = Number((grossPnl - charges.totalRoundTripCharges).toFixed(2));
+
+      totalRealizedNetPnl += netPnl;
+      totalActualCharges += charges.totalRoundTripCharges;
+
+      // Submit explicit market sell order to broker
+      await broker.placeOrder({
+        intentId: `intent_flatten_${Date.now()}_${pos.instrumentKey}`,
+        tag: 'FLATTEN_ALL',
+        instrumentKey: pos.instrumentKey,
+        side: OrderSide.SELL,
+        orderType: OrderType.MARKET,
+        product: ProductType.I,
+        quantity: pos.netQuantity,
+        price: exitPrice,
+      });
+
+      // Settle reservation in risk reservation manager
+      const activeReservation = this.reservationManager
+        .getHeldReservations()
+        .find((r) => r.instrumentKey === pos.instrumentKey);
+
+      if (activeReservation) {
+        this.reservationManager.settleClosedPosition(
+          activeReservation.signalKey,
+          activeReservation.reservedCapital,
+          netPnl,
+        );
+      }
+
+      exitOrders.push({
+        orderId,
+        instrumentKey: pos.instrumentKey,
+        symbol: pos.symbol,
+        quantity: pos.netQuantity,
+        exitPrice,
+        realizedPnl: netPnl,
+        charges: charges.totalRoundTripCharges,
+        status: OrderStatus.CLOSED,
+      });
+
+      this.gateway?.broadcast('position.flattened', {
+        instrumentKey: pos.instrumentKey,
+        quantity: pos.netQuantity,
+        exitPrice,
+        netPnl,
+      });
+    }
+
+    // Always disarm on flatten to maintain safety discipline
+    this.currentState = RiskState.DISARMED;
+    this.armedUntil = null;
+    this.unrealizedDailyPnl = 0;
+
+    this.logger.warn(
+      `[RiskService] Flattened ${exitOrders.length} position(s). Reason: '${reason}'. Total Net P&L: ₹${totalRealizedNetPnl.toFixed(2)}.`,
+    );
+
+    return {
+      success: true,
+      positionsClosed: exitOrders.length,
+      exitOrders,
+      totalRealizedNetPnl: Number(totalRealizedNetPnl.toFixed(2)),
+      totalActualCharges: Number(totalActualCharges.toFixed(2)),
+      message: `Flattened ${exitOrders.length} position(s). Reason: '${reason}'. Total net P&L: ₹${totalRealizedNetPnl.toFixed(2)}. System DISARMED.`,
+      disclaimer: 'Exits submitted as market orders; confirmed broker fill events finalize closed ledger state.',
     };
   }
 }

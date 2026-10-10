@@ -1,5 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { StrategyConfigSchema, TradeProposalSchema, AgentTaskSchema, AgentType, ProposalStatus, OrderSide, ProductType } from '@trading-bot/contracts';
+import {
+  StrategyConfigSchema,
+  TradeProposalSchema,
+  AgentTaskSchema,
+  AgentType,
+  ProposalStatus,
+  OrderSide,
+  ProductType,
+  AutonomousReadinessReportSchema,
+  AutonomousArmRequestSchema,
+  AutonomousSessionStatusSchema,
+  AutonomousExecutionLogSchema,
+} from '@trading-bot/contracts';
 import { calculateStrategyVersionHash } from '@trading-bot/domain';
 
 describe('Trader Client Strategy & Proposal Contracts', () => {
@@ -97,4 +109,72 @@ describe('Trader Client Strategy & Proposal Contracts', () => {
     expect(parsed.agentType).toBe(AgentType.COORDINATOR);
     expect(parsed.toolsInvoked.length).toBe(1);
   });
+
+  it('validates Phase 7 AutonomousReadinessReportSchema and items', () => {
+    const report = {
+      isEligibleForAuto: true,
+      evaluatedAt: new Date().toISOString(),
+      summary: 'All 6 gates passing',
+      items: [
+        {
+          id: 'auto_01',
+          title: 'SEBI Personal Algorithmic Compliance',
+          description: 'Supervised personal execution with time bounds',
+          category: 'REGULATORY',
+          passed: true,
+          details: 'SEBI personal API rules satisfied',
+          verifiedAt: new Date().toISOString(),
+        },
+      ],
+    };
+
+    const parsed = AutonomousReadinessReportSchema.parse(report);
+    expect(parsed.isEligibleForAuto).toBe(true);
+    expect(parsed.items.length).toBe(1);
+    expect(parsed.items[0].category).toBe('REGULATORY');
+  });
+
+  it('validates AutonomousArmRequestSchema and AutonomousSessionStatusSchema', () => {
+    const armReq = {
+      strategyId: '550e8400-e29b-41d4-a716-446655440002',
+      windowMinutes: 30,
+      maxSessionTrades: 2,
+      confirmationCode: 'CONFIRM_AUTO_EXECUTION',
+      operatorConsent: true,
+    };
+    const parsedArm = AutonomousArmRequestSchema.parse(armReq);
+    expect(parsedArm.windowMinutes).toBe(30);
+    expect(parsedArm.maxSessionTrades).toBe(2);
+
+    const sessionStatus = {
+      isArmed: true,
+      strategyId: '550e8400-e29b-41d4-a716-446655440002',
+      strategyName: 'NIFTY EMA20 RSI Long Call',
+      strategyVersion: 1,
+      versionHash: 'v1-337f4ea9',
+      armedAt: new Date().toISOString(),
+      armedUntil: new Date(Date.now() + 1800000).toISOString(),
+      remainingMinutes: 30,
+      maxSessionTrades: 2,
+      tradesExecutedInSession: 0,
+      lastDisarmReason: null,
+      systemMode: 'PAPER' as const,
+    };
+    const parsedSession = AutonomousSessionStatusSchema.parse(sessionStatus);
+    expect(parsedSession.isArmed).toBe(true);
+    expect(parsedSession.remainingMinutes).toBe(30);
+
+    const log = {
+      id: '550e8400-e29b-41d4-a716-446655440099',
+      timestamp: new Date().toISOString(),
+      strategyId: '550e8400-e29b-41d4-a716-446655440002',
+      versionHash: 'v1-337f4ea9',
+      action: 'AUTO_TRIGGERED' as const,
+      details: 'Strategy armed for 30m window.',
+      riskChecksPassed: true,
+    };
+    const parsedLog = AutonomousExecutionLogSchema.parse(log);
+    expect(parsedLog.action).toBe('AUTO_TRIGGERED');
+  });
 });
+
