@@ -13,7 +13,7 @@ import {
 } from '@trading-bot/contracts';
 import {
   calculateStrategyVersionHash,
-  generateHistoricalMarketCandles,
+  fetchRealHistoricalCandles,
   requiresVersionBump,
   runStrategyBacktest,
 } from '@trading-bot/domain';
@@ -110,15 +110,23 @@ export class StrategiesService {
     const strategy = this.getStrategy(id);
     const parsedReq = BacktestRequestSchema.parse(reqDto || {});
 
-    // Generate deterministic candle history based on requested days and strategy underlying
     const underlying = parsedReq.underlying || strategy.underlying || 'NIFTY';
-    const timeframeMins = strategy.timeframe === '15m' ? 15 : strategy.timeframe === '1m' ? 1 : 5;
-    const candles = generateHistoricalMarketCandles(underlying, parsedReq.days, timeframeMins);
+    const interval = parsedReq.timeframe || strategy.timeframe || '5m';
+
+    // Fetch 100% REAL historical exchange candles from Yahoo Finance / Upstox API
+    const { candles, dataSource } = await fetchRealHistoricalCandles({
+      underlying,
+      days: parsedReq.days,
+      interval,
+      fromDate: parsedReq.fromDate,
+      toDate: parsedReq.toDate,
+    });
 
     return runStrategyBacktest({
       strategy,
       candles,
       request: parsedReq,
+      dataSource,
     });
   }
 

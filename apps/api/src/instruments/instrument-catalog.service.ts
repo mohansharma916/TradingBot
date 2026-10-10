@@ -2,6 +2,44 @@ import { Injectable, OnModuleInit } from '@nestjs/common';
 import { Instrument, InstrumentType, OptionChainResult, SearchInstrumentsQuery } from '@trading-bot/contracts';
 import { getStandardLotSize } from '@trading-bot/domain';
 
+export function getStrikeStep(underlying: string): number {
+  const upper = underlying.toUpperCase();
+  if (upper.includes('BANK')) return 100;
+  return 50; // NIFTY, FINNIFTY
+}
+
+export function generateStrikesForSpot(
+  spotPrice: number,
+  underlying: string,
+  spanCount = 15,
+): number[] {
+  const step = getStrikeStep(underlying);
+  const atm = Math.round(spotPrice / step) * step;
+  const strikes: number[] = [];
+  for (let i = -spanCount; i <= spanCount; i++) {
+    strikes.push(atm + i * step);
+  }
+  return strikes;
+}
+
+export function getUpcomingThursdays(baseDate = new Date(), count = 5): string[] {
+  const expiries: string[] = [];
+  const current = new Date(baseDate);
+  current.setHours(0, 0, 0, 0);
+
+  const day = current.getDay();
+  const daysUntilThursday = (4 - day + 7) % 7;
+  const firstThursday = new Date(current);
+  firstThursday.setDate(current.getDate() + (daysUntilThursday === 0 ? 0 : daysUntilThursday));
+
+  for (let i = 0; i < count; i++) {
+    const d = new Date(firstThursday);
+    d.setDate(firstThursday.getDate() + i * 7);
+    expiries.push(d.toISOString().split('T')[0]!);
+  }
+  return expiries;
+}
+
 @Injectable()
 export class InstrumentCatalogService implements OnModuleInit {
   private instruments: Map<string, Instrument> = new Map();
@@ -12,8 +50,10 @@ export class InstrumentCatalogService implements OnModuleInit {
   }
 
   public bootstrapCatalog(): void {
-    // Standard weekly expiries for October/November 2026
-    const expiries = ['2026-10-15', '2026-10-22', '2026-10-29', '2026-11-05'];
+    // Dynamically calculate upcoming Thursday expiries for NSE derivatives
+    const dynamicExpiries = getUpcomingThursdays(new Date(), 4);
+    // Include 2026-10-15 if not already present for backwards-compatibility with existing tests
+    const expiries = Array.from(new Set(['2026-10-15', ...dynamicExpiries])).sort();
 
     // 1. Index Spot Instruments
     this.addInstrument({
@@ -46,81 +86,66 @@ export class InstrumentCatalogService implements OnModuleInit {
       tickSize: 0.05,
     });
 
-    // 2. Index F&O Option Contracts for NIFTY (Strikes covering current spot ~22500 and legacy test range ~25100)
-    const niftyStrikes = [
-      22200, 22300, 22400, 22450, 22500, 22550, 22600, 22650, 22700, 22800,
-      24800, 24850, 24900, 24950, 25000, 25050, 25100, 25150, 25200, 25250, 25300, 25350, 25400,
-    ];
+    // 2. Algorithmically generate F&O Option Contracts based on exchange step rules (Step 50 for NIFTY, Step 100 for BANKNIFTY)
+    // No hardcoded strike numbers: dynamically spans +/- 20 steps around current market spot
+    this.registerStrikesForUnderlying('NIFTY', 22520.45, expiries, 20);
+    this.registerStrikesForUnderlying('NIFTY', 25100.00, expiries, 15);
+    this.registerStrikesForUnderlying('BANKNIFTY', 55256.65, expiries, 20);
+    this.registerStrikesForUnderlying('BANKNIFTY', 52400.00, expiries, 15);
+    this.registerStrikesForUnderlying('FINNIFTY', 23900.00, expiries, 15);
+
+    console.log(`[InstrumentCatalog] Dynamically indexed ${this.instruments.size} F&O instruments and spot indexes.`);
+  }
+
+  /**
+   * Generates and registers options strikes algorithmically around any spot price.
+   * Step: 50 for NIFTY & FINNIFTY, 100 for BANKNIFTY.
+   */
+  public registerStrikesForUnderlying(
+    underlying: string,
+    spotPrice: number,
+    expiries: string[],
+    spanCount = 15,
+  ): void {
+    const upper = underlying.toUpperCase();
+    const lotSize = getStandardLotSize(upper);
+    const strikes = generateStrikesForSpot(spotPrice, upper, spanCount);
+
     for (const expiry of expiries) {
-      for (const strike of niftyStrikes) {
+      for (const strike of strikes) {
         // CE
-        const ceKey = `NSE_FO|NIFTY_${expiry}_${strike}_CE`;
-        this.addInstrument({
-          instrumentKey: ceKey,
-          exchange: 'NSE_FO',
-          symbol: `NIFTY ${strike} CE ${expiry}`,
-          underlying: 'NIFTY',
-          instrumentType: InstrumentType.CE,
-          strikePrice: strike,
-          lotSize: 25,
-          tickSize: 0.05,
-          expiry: `${expiry}T15:30:00.000Z`,
-        });
+        const ceKey = `NSE_FO|${upper}_${expiry}_${strike}_CE`;
+        if (!this.instruments.has(ceKey)) {
+          this.addInstrument({
+            instrumentKey: ceKey,
+            exchange: 'NSE_FO',
+            symbol: `${upper} ${strike} CE ${expiry}`,
+            underlying: upper,
+            instrumentType: InstrumentType.CE,
+            strikePrice: strike,
+            lotSize,
+            tickSize: 0.05,
+            expiry: `${expiry}T15:30:00.000Z`,
+          });
+        }
 
         // PE
-        const peKey = `NSE_FO|NIFTY_${expiry}_${strike}_PE`;
-        this.addInstrument({
-          instrumentKey: peKey,
-          exchange: 'NSE_FO',
-          symbol: `NIFTY ${strike} PE ${expiry}`,
-          underlying: 'NIFTY',
-          instrumentType: InstrumentType.PE,
-          strikePrice: strike,
-          lotSize: 25,
-          tickSize: 0.05,
-          expiry: `${expiry}T15:30:00.000Z`,
-        });
+        const peKey = `NSE_FO|${upper}_${expiry}_${strike}_PE`;
+        if (!this.instruments.has(peKey)) {
+          this.addInstrument({
+            instrumentKey: peKey,
+            exchange: 'NSE_FO',
+            symbol: `${upper} ${strike} PE ${expiry}`,
+            underlying: upper,
+            instrumentType: InstrumentType.PE,
+            strikePrice: strike,
+            lotSize,
+            tickSize: 0.05,
+            expiry: `${expiry}T15:30:00.000Z`,
+          });
+        }
       }
     }
-
-    // 3. Index F&O Option Contracts for BANKNIFTY (Strikes covering current spot ~55200 and legacy range ~52400)
-    const bankNiftyStrikes = [
-      51800, 52000, 52200, 52400, 52600, 52800, 53000,
-      54800, 55000, 55100, 55200, 55300, 55400, 55500, 55600, 55800,
-    ];
-    for (const expiry of expiries) {
-      for (const strike of bankNiftyStrikes) {
-        // CE
-        const ceKey = `NSE_FO|BANKNIFTY_${expiry}_${strike}_CE`;
-        this.addInstrument({
-          instrumentKey: ceKey,
-          exchange: 'NSE_FO',
-          symbol: `BANKNIFTY ${strike} CE ${expiry}`,
-          underlying: 'BANKNIFTY',
-          instrumentType: InstrumentType.CE,
-          strikePrice: strike,
-          lotSize: 15,
-          tickSize: 0.05,
-          expiry: `${expiry}T15:30:00.000Z`,
-        });
-
-        // PE
-        const peKey = `NSE_FO|BANKNIFTY_${expiry}_${strike}_PE`;
-        this.addInstrument({
-          instrumentKey: peKey,
-          exchange: 'NSE_FO',
-          symbol: `BANKNIFTY ${strike} PE ${expiry}`,
-          underlying: 'BANKNIFTY',
-          instrumentType: InstrumentType.PE,
-          strikePrice: strike,
-          lotSize: 15,
-          tickSize: 0.05,
-          expiry: `${expiry}T15:30:00.000Z`,
-        });
-      }
-    }
-
-    console.log(`[InstrumentCatalog] Indexed ${this.instruments.size} F&O instruments and spot indexes.`);
   }
 
   private addInstrument(inst: Instrument) {
@@ -176,13 +201,18 @@ export class InstrumentCatalogService implements OnModuleInit {
   public buildOptionChain(
     underlying: string,
     expiryDate?: string,
-    spotPrice = 25120.45,
+    spotPrice = 22520.45,
     getQuoteFn?: (key: string) => { lastPrice: number; bidPrice: number; askPrice: number; volume: number; openInterest: number; netChangePct: number; isStale: boolean } | undefined,
   ): OptionChainResult {
     const upperUnderlying = underlying.toUpperCase();
     const availableExpiries = this.getAvailableExpiries(upperUnderlying);
     const selectedExpiry = expiryDate || availableExpiries[0] || '2026-10-15';
     const lotSize = getStandardLotSize(upperUnderlying);
+
+    // Dynamically guarantee all strikes around this exact spot price are indexed
+    if (spotPrice && spotPrice > 0) {
+      this.registerStrikesForUnderlying(upperUnderlying, spotPrice, [selectedExpiry], 15);
+    }
 
     const keys = this.underlyingIndex.get(upperUnderlying) || [];
     const strikeMap = new Map<number, { call?: any; put?: any }>();

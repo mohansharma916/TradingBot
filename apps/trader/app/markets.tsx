@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { colors, spacing, borderRadius, typography } from '@trading-bot/ui';
 import { Badge } from '@trading-bot/ui';
+import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
 
 interface OptionStrikeRow {
@@ -37,6 +38,9 @@ export default function MarketsScreen() {
   const [feedLatencyMs, setFeedLatencyMs] = useState(16);
   const [isFeedStale, setIsFeedStale] = useState(false);
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
+  const [isMarketOpen, setIsMarketOpen] = useState<boolean>(() => isMarketOpenForTrading());
+  const [snapshotTrigger, setSnapshotTrigger] = useState<number>(0);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   const [liveOptionRows, setLiveOptionRows] = useState<OptionStrikeRow[] | null>(null);
   const [liveSpotPrice, setLiveSpotPrice] = useState<number | null>(null);
@@ -44,11 +48,15 @@ export default function MarketsScreen() {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, any>>({});
 
-  // Periodic sync of live option chain, watchlist quotes, and latency
+  // Periodic sync: only polls during active market hours; fetches once when market is closed
   useEffect(() => {
     let isMounted = true;
+    const marketOpen = isMarketOpenForTrading();
+    setIsMarketOpen(marketOpen);
+
     const fetchLiveChain = async () => {
       try {
+        setIsRefreshing(true);
         const [chain, diag, watchlist] = await Promise.all([
           apiClient.getOptionChain(selectedUnderlying, selectedExpiry).catch(() => null),
           apiClient.getDiagnostics().catch(() => null),
@@ -76,15 +84,27 @@ export default function MarketsScreen() {
         }
       } catch {
         // offline fallback
+      } finally {
+        if (isMounted) setIsRefreshing(false);
       }
     };
+
+    // Always fetch closing/live snapshot upon mount or selection change
     fetchLiveChain();
+
+    // If market is closed, DO NOT poll every 4 seconds. Save network, CPU, and API quotas.
+    if (!marketOpen) {
+      return () => {
+        isMounted = false;
+      };
+    }
+
     const interval = setInterval(fetchLiveChain, 4000);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [selectedUnderlying, selectedExpiry]);
+  }, [selectedUnderlying, selectedExpiry, snapshotTrigger]);
 
   // Live instrument catalog search
   useEffect(() => {
@@ -130,6 +150,11 @@ export default function MarketsScreen() {
               variant={isLiveConnected ? 'success' : 'purple'}
               size="sm"
             />
+            {isMarketOpen ? (
+              <Badge label="🟢 MARKET OPEN" variant="success" size="sm" />
+            ) : (
+              <Badge label="🌙 MARKET CLOSED (Polling Paused)" variant="neutral" size="sm" />
+            )}
           </div>
           <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
             Real-time Upstox Market Data Feed V3 Protobuf decoding & F&O strike ladder.
@@ -137,6 +162,26 @@ export default function MarketsScreen() {
         </div>
 
         <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
+          <button
+            onClick={() => setSnapshotTrigger((prev) => prev + 1)}
+            disabled={isRefreshing}
+            style={{
+              padding: `${spacing.xs}px ${spacing.md}px`,
+              borderRadius: borderRadius.md,
+              backgroundColor: colors.surfaceElevated,
+              color: colors.textPrimary,
+              border: `1px solid ${colors.border}`,
+              fontSize: typography.fontSize.xs,
+              cursor: isRefreshing ? 'wait' : 'pointer',
+              fontWeight: typography.fontWeight.semibold,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span>{isRefreshing ? '⏳ Refreshing...' : '🔄 Refresh Quotes'}</span>
+          </button>
+
           <button
             onClick={() => setIsSearchOpen(true)}
             style={{
@@ -172,6 +217,32 @@ export default function MarketsScreen() {
           </button>
         </div>
       </div>
+
+      {/* Market Closed Session Status Notice */}
+      {!isMarketOpen && (
+        <div
+          style={{
+            padding: `${spacing.sm}px ${spacing.md}px`,
+            backgroundColor: 'rgba(56, 189, 248, 0.08)',
+            border: '1px solid rgba(56, 189, 248, 0.25)',
+            borderRadius: borderRadius.md,
+            color: '#38bdf8',
+            fontSize: typography.fontSize.xs,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: spacing.xs,
+          }}
+        >
+          <span>
+            🌙 <strong>Market Closed</strong>: NSE trading hours are Mon–Fri 09:15–15:30 IST. API market data polling is paused to eliminate redundant bandwidth usage. Showing official exchange closing quotes.
+          </span>
+          <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
+            Click <strong>Refresh Quotes</strong> anytime to sync
+          </span>
+        </div>
+      )}
 
       {/* Stale Feed Warning Banner */}
       {isFeedStale && (

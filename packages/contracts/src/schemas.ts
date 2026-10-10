@@ -239,6 +239,7 @@ export const BacktestTradeRecordSchema = z.object({
   id: z.string(),
   entryTime: z.string(),
   exitTime: z.string(),
+  durationMinutes: z.number().optional(),
   symbol: z.string(),
   side: z.string(),
   entryPrice: z.number(),
@@ -253,8 +254,14 @@ export type BacktestTradeRecord = z.infer<typeof BacktestTradeRecordSchema>;
 
 export const BacktestRequestSchema = z.object({
   days: z.number().int().min(1).max(90).default(14),
+  fromDate: z.string().optional(),
+  toDate: z.string().optional(),
+  timeframe: z.enum(['1m', '5m', '15m', '30m', '1d']).default('5m'),
   initialCapital: z.number().positive().default(10000),
   underlying: z.enum(['NIFTY', 'BANKNIFTY']).default('NIFTY'),
+  useTrailingStop: z.boolean().default(true),
+  trailingActivationProfitInr: z.number().nonnegative().default(150),
+  trailingStepInr: z.number().nonnegative().default(50),
 });
 export type BacktestRequest = z.infer<typeof BacktestRequestSchema>;
 
@@ -263,8 +270,10 @@ export const BacktestResultSchema = z.object({
   strategyName: z.string(),
   version: z.number(),
   periodDays: z.number(),
+  timeframe: z.string().default('5m'),
   fromDate: z.string(),
   toDate: z.string(),
+  dataSource: z.string().default('REAL_MARKET_DATA'),
   initialCapital: z.number(),
   finalCapital: z.number(),
   totalTrades: z.number(),

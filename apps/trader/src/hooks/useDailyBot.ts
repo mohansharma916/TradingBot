@@ -3,6 +3,7 @@ import {
   DailyBotConfig, DailyBotControlAction, DailyBotPreflight, DailyBotSetup,
   DailyBotToday, DailyBotSession,
 } from '@trading-bot/contracts';
+import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { apiClient } from '../services/api';
 
 export function useDailyBot() {
@@ -36,7 +37,9 @@ export function useDailyBot() {
   useEffect(() => {
     mounted.current = true;
     void refresh();
-    const timer = setInterval(() => { if (!mutationLock.current) void refresh(); }, 5000);
+    // When market is closed, poll at relaxed 30s rate instead of aggressive 5s rate
+    const intervalMs = isMarketOpenForTrading() ? 5000 : 30000;
+    const timer = setInterval(() => { if (!mutationLock.current) void refresh(); }, intervalMs);
     return () => { mounted.current = false; ++requestVersion.current; clearInterval(timer); };
   }, [refresh]);
 

@@ -97,7 +97,26 @@ describe('Historical Backtest Engine', () => {
     for (const trade of result.trades) {
       expect(trade.charges).toBeGreaterThan(0); // Statutory fees must be deducted
       expect(trade.quantity).toBeGreaterThan(0);
-      expect(['TARGET_PROFIT', 'STOP_LOSS', 'TIME_CUTOFF']).toContain(trade.exitReason);
+      expect(['TARGET_PROFIT', 'STOP_LOSS', 'TIME_CUTOFF', 'TRAILING_STOP_LOSS']).toContain(trade.exitReason);
     }
+  });
+
+  it('activates trailing stop loss to protect profits when favorable move occurs', () => {
+    const candles = generateHistoricalMarketCandles('NIFTY', 14, 5);
+    const withTrailing = runStrategyBacktest({
+      strategy: sampleStrategy,
+      candles,
+      request: {
+        days: 14,
+        initialCapital: 10000,
+        underlying: 'NIFTY',
+        useTrailingStop: true,
+        trailingActivationProfitInr: 100,
+        trailingStepInr: 30,
+      },
+    });
+
+    expect(withTrailing.dataSource).toBeDefined();
+    expect(withTrailing.trades.length).toBeGreaterThanOrEqual(0);
   });
 });

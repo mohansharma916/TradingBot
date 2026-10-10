@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { colors, spacing, borderRadius, typography } from '@trading-bot/ui';
 import { StatCard, Badge } from '@trading-bot/ui';
 import { RiskStatus, DailyReport, Position, DiagnosticsReport } from '@trading-bot/contracts';
+import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
 import { tradingDateInIst } from '../src/features/daily-bot/config';
 
@@ -70,6 +71,9 @@ export default function DashboardScreen() {
 
   useEffect(() => {
     fetchLiveDashboard();
+    if (!isMarketOpenForTrading()) {
+      return;
+    }
     const interval = setInterval(fetchLiveDashboard, 4000);
     return () => clearInterval(interval);
   }, [fetchLiveDashboard]);

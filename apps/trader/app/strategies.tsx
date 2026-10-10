@@ -35,6 +35,13 @@ export default function StrategiesScreen() {
   const [backtestDays, setBacktestDays] = useState<number>(14);
   const [backtestCapital, setBacktestCapital] = useState<number>(10000);
   const [backtestUnderlying, setBacktestUnderlying] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
+  const [backtestTimeframe, setBacktestTimeframe] = useState<'1m' | '5m' | '15m' | '30m' | '1d'>('5m');
+  const [backtestFromDate, setBacktestFromDate] = useState<string>('');
+  const [backtestToDate, setBacktestToDate] = useState<string>('');
+  const [isCustomDateRange, setIsCustomDateRange] = useState<boolean>(false);
+  const [useTrailingStop, setUseTrailingStop] = useState<boolean>(true);
+  const [trailingActivationProfit, setTrailingActivationProfit] = useState<number>(150);
+  const [trailingStep, setTrailingStep] = useState<number>(50);
   const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
 
@@ -149,9 +156,15 @@ export default function StrategiesScreen() {
         days: backtestDays,
         initialCapital: backtestCapital,
         underlying: backtestUnderlying,
+        timeframe: backtestTimeframe,
+        fromDate: isCustomDateRange && backtestFromDate ? backtestFromDate : undefined,
+        toDate: isCustomDateRange && backtestToDate ? backtestToDate : undefined,
+        useTrailingStop,
+        trailingActivationProfitInr: trailingActivationProfit,
+        trailingStepInr: trailingStep,
       });
       setBacktestResult(result);
-      showFeedback(`Backtest completed for ${strat.name}: ${result.totalTrades} simulated trades.`, 'success');
+      showFeedback(`Backtest completed for ${strat.name}: ${result.totalTrades} trades simulated on real exchange candles.`, 'success');
     } catch (err: any) {
       showFeedback(`Backtest failed: ${err.message}`, 'error');
     } finally {
@@ -696,145 +709,318 @@ export default function StrategiesScreen() {
         <div
           style={{
             display: 'flex',
-            flexWrap: 'wrap',
+            flexDirection: 'column',
             gap: spacing.md,
-            alignItems: 'center',
             backgroundColor: colors.surfaceElevated,
             padding: spacing.md,
             borderRadius: borderRadius.md,
             marginBottom: spacing.lg,
           }}
         >
-          {/* Strategy Picker */}
-          <div>
-            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Strategy</label>
-            <select
-              value={selectedStrategyId}
-              onChange={(e) => {
-                setSelectedStrategyId(e.target.value);
-                const found = strategies.find((s) => s.id === e.target.value);
-                if (found) setBacktestUnderlying((found.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
-              }}
-              style={{
-                backgroundColor: colors.surface,
-                border: `1px solid ${colors.border}`,
-                color: colors.textPrimary,
-                borderRadius: borderRadius.sm,
-                padding: '6px 10px',
-                fontSize: typography.fontSize.sm,
-              }}
-            >
-              {strategies.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name} ({s.underlying})
-                </option>
-              ))}
-            </select>
-          </div>
+          {/* Row 1: Strategy, Underlying, Timeframe & Initial Capital */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.md, alignItems: 'center' }}>
+            {/* Strategy Picker */}
+            <div style={{ minWidth: 200, flex: '1 1 200px' }}>
+              <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Strategy</label>
+              <select
+                value={selectedStrategyId}
+                onChange={(e) => {
+                  setSelectedStrategyId(e.target.value);
+                  const found = strategies.find((s) => s.id === e.target.value);
+                  if (found) setBacktestUnderlying((found.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
+                }}
+                style={{
+                  backgroundColor: colors.surface,
+                  border: `1px solid ${colors.border}`,
+                  color: colors.textPrimary,
+                  borderRadius: borderRadius.sm,
+                  padding: '6px 10px',
+                  fontSize: typography.fontSize.sm,
+                  width: '100%',
+                }}
+              >
+                {strategies.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.underlying})
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          {/* Historical Period Pills */}
-          <div>
-            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Time Window</label>
-            <div style={{ display: 'flex', gap: 4 }}>
-              {[7, 14, 30, 60].map((d) => (
-                <button
-                  key={d}
-                  onClick={() => setBacktestDays(d)}
-                  style={{
-                    padding: '6px 12px',
-                    borderRadius: borderRadius.sm,
-                    backgroundColor: backtestDays === d ? colors.cyan : colors.surface,
-                    color: backtestDays === d ? '#082F49' : colors.textPrimary,
-                    fontWeight: backtestDays === d ? typography.fontWeight.bold : typography.fontWeight.normal,
-                    border: `1px solid ${backtestDays === d ? colors.cyan : colors.border}`,
-                    cursor: 'pointer',
-                    fontSize: typography.fontSize.xs,
-                  }}
-                >
-                  {d} Days
-                </button>
-              ))}
+            {/* Underlying Selection */}
+            <div>
+              <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Underlying</label>
+              <select
+                value={backtestUnderlying}
+                onChange={(e) => setBacktestUnderlying(e.target.value as 'NIFTY' | 'BANKNIFTY')}
+                style={{
+                  backgroundColor: colors.surface,
+                  border: `1px solid ${colors.border}`,
+                  color: colors.textPrimary,
+                  borderRadius: borderRadius.sm,
+                  padding: '6px 10px',
+                  fontSize: typography.fontSize.sm,
+                }}
+              >
+                <option value="NIFTY">NIFTY (Lot: 25)</option>
+                <option value="BANKNIFTY">BANKNIFTY (Lot: 15)</option>
+              </select>
+            </div>
+
+            {/* Timeframe Selector */}
+            <div>
+              <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Candle Timeframe</label>
+              <select
+                value={backtestTimeframe}
+                onChange={(e) => setBacktestTimeframe(e.target.value as any)}
+                style={{
+                  backgroundColor: colors.surface,
+                  border: `1px solid ${colors.border}`,
+                  color: colors.textPrimary,
+                  borderRadius: borderRadius.sm,
+                  padding: '6px 10px',
+                  fontSize: typography.fontSize.sm,
+                }}
+              >
+                <option value="1m">1m (Intraday Scalp)</option>
+                <option value="5m">5m (Recommended)</option>
+                <option value="15m">15m (Trend Swing)</option>
+                <option value="30m">30m (Positional)</option>
+                <option value="1d">1d (Daily EOD)</option>
+              </select>
+            </div>
+
+            {/* Capital Input */}
+            <div>
+              <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Initial Capital (₹)</label>
+              <input
+                type="number"
+                min={1000}
+                max={10000}
+                value={backtestCapital}
+                onChange={(e) => setBacktestCapital(Math.min(10000, Number(e.target.value)))}
+                style={{
+                  backgroundColor: colors.surface,
+                  border: `1px solid ${colors.border}`,
+                  color: colors.textPrimary,
+                  borderRadius: borderRadius.sm,
+                  padding: '6px 10px',
+                  fontSize: typography.fontSize.sm,
+                  width: 110,
+                }}
+              />
             </div>
           </div>
 
-          {/* Capital Input */}
-          <div>
-            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Initial Capital (₹)</label>
-            <input
-              type="number"
-              min={1000}
-              max={10000}
-              value={backtestCapital}
-              onChange={(e) => setBacktestCapital(Math.min(10000, Number(e.target.value)))}
-              style={{
-                backgroundColor: colors.surface,
-                border: `1px solid ${colors.border}`,
-                color: colors.textPrimary,
-                borderRadius: borderRadius.sm,
-                padding: '6px 10px',
-                fontSize: typography.fontSize.sm,
-                width: 110,
-              }}
-            />
-          </div>
+          {/* Row 2: Date Range Selection & Trailing Stop Loss */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: spacing.md, alignItems: 'center', paddingTop: spacing.xs, borderTop: `1px solid ${colors.border}` }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, marginBottom: 4 }}>
+                <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Date Range</label>
+                <button
+                  onClick={() => setIsCustomDateRange(!isCustomDateRange)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: colors.cyan,
+                    fontSize: 11,
+                    cursor: 'pointer',
+                    textDecoration: 'underline',
+                    padding: 0,
+                  }}
+                >
+                  {isCustomDateRange ? '⚡ Switch to Quick Days' : '📅 Custom Date Range'}
+                </button>
+              </div>
 
-          {/* Underlying Selection */}
-          <div>
-            <label style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block', marginBottom: 4 }}>Underlying</label>
-            <select
-              value={backtestUnderlying}
-              onChange={(e) => setBacktestUnderlying(e.target.value as 'NIFTY' | 'BANKNIFTY')}
-              style={{
-                backgroundColor: colors.surface,
-                border: `1px solid ${colors.border}`,
-                color: colors.textPrimary,
-                borderRadius: borderRadius.sm,
-                padding: '6px 10px',
-                fontSize: typography.fontSize.sm,
-              }}
-            >
-              <option value="NIFTY">NIFTY (Lot: 25)</option>
-              <option value="BANKNIFTY">BANKNIFTY (Lot: 15)</option>
-            </select>
-          </div>
-
-          {/* Run Button */}
-          <div style={{ marginLeft: 'auto', alignSelf: 'flex-end' }}>
-            <button
-              onClick={() => handleRunBacktest()}
-              disabled={backtestLoading}
-              style={{
-                padding: '8px 18px',
-                backgroundColor: colors.cyan,
-                border: 'none',
-                color: '#082F49',
-                borderRadius: borderRadius.md,
-                fontWeight: typography.fontWeight.bold,
-                fontSize: typography.fontSize.sm,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-              }}
-            >
-              {backtestLoading ? (
-                <>
-                  <span>⏳</span>
-                  <span>Simulating Candles...</span>
-                </>
+              {!isCustomDateRange ? (
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {[7, 14, 30, 60].map((d) => (
+                    <button
+                      key={d}
+                      onClick={() => setBacktestDays(d)}
+                      style={{
+                        padding: '6px 12px',
+                        borderRadius: borderRadius.sm,
+                        backgroundColor: backtestDays === d ? colors.cyan : colors.surface,
+                        color: backtestDays === d ? '#082F49' : colors.textPrimary,
+                        fontWeight: backtestDays === d ? typography.fontWeight.bold : typography.fontWeight.normal,
+                        border: `1px solid ${backtestDays === d ? colors.cyan : colors.border}`,
+                        cursor: 'pointer',
+                        fontSize: typography.fontSize.xs,
+                      }}
+                    >
+                      {d} Days
+                    </button>
+                  ))}
+                </div>
               ) : (
-                <>
-                  <span>▶</span>
-                  <span>Run Historical Backtest</span>
-                </>
+                <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center' }}>
+                  <div>
+                    <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>From:</span>
+                    <input
+                      type="date"
+                      value={backtestFromDate}
+                      onChange={(e) => setBacktestFromDate(e.target.value)}
+                      style={{
+                        backgroundColor: colors.surface,
+                        border: `1px solid ${colors.border}`,
+                        color: colors.textPrimary,
+                        borderRadius: borderRadius.sm,
+                        padding: '4px 8px',
+                        fontSize: typography.fontSize.xs,
+                      }}
+                    />
+                  </div>
+                  <div>
+                    <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>To:</span>
+                    <input
+                      type="date"
+                      value={backtestToDate}
+                      onChange={(e) => setBacktestToDate(e.target.value)}
+                      style={{
+                        backgroundColor: colors.surface,
+                        border: `1px solid ${colors.border}`,
+                        color: colors.textPrimary,
+                        borderRadius: borderRadius.sm,
+                        padding: '4px 8px',
+                        fontSize: typography.fontSize.xs,
+                      }}
+                    />
+                  </div>
+                </div>
               )}
-            </button>
+            </div>
+
+            {/* Trailing Stop Loss Toggle & Inputs */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, marginLeft: 'auto', flexWrap: 'wrap' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: typography.fontSize.xs, color: colors.textPrimary }}>
+                <input
+                  type="checkbox"
+                  checked={useTrailingStop}
+                  onChange={(e) => setUseTrailingStop(e.target.checked)}
+                  style={{ cursor: 'pointer' }}
+                />
+                <span style={{ fontWeight: typography.fontWeight.semibold }}>📈 Trailing Stop Loss</span>
+              </label>
+
+              {useTrailingStop && (
+                <div style={{ display: 'flex', gap: spacing.xs, alignItems: 'center' }}>
+                  <div title="Unrealized profit in INR required to activate trailing stop">
+                    <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>Activate ₹:</span>
+                    <input
+                      type="number"
+                      min={50}
+                      step={50}
+                      value={trailingActivationProfit}
+                      onChange={(e) => setTrailingActivationProfit(Number(e.target.value))}
+                      style={{
+                        backgroundColor: colors.surface,
+                        border: `1px solid ${colors.border}`,
+                        color: colors.textPrimary,
+                        borderRadius: borderRadius.sm,
+                        padding: '4px 6px',
+                        fontSize: typography.fontSize.xs,
+                        width: 70,
+                      }}
+                    />
+                  </div>
+                  <div title="Step to trail stop loss upward as profit advances">
+                    <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>Step ₹:</span>
+                    <input
+                      type="number"
+                      min={10}
+                      step={10}
+                      value={trailingStep}
+                      onChange={(e) => setTrailingStep(Number(e.target.value))}
+                      style={{
+                        backgroundColor: colors.surface,
+                        border: `1px solid ${colors.border}`,
+                        color: colors.textPrimary,
+                        borderRadius: borderRadius.sm,
+                        padding: '4px 6px',
+                        fontSize: typography.fontSize.xs,
+                        width: 60,
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Run Button */}
+              <button
+                onClick={() => handleRunBacktest()}
+                disabled={backtestLoading}
+                style={{
+                  padding: '8px 18px',
+                  backgroundColor: colors.cyan,
+                  border: 'none',
+                  color: '#082F49',
+                  borderRadius: borderRadius.md,
+                  fontWeight: typography.fontWeight.bold,
+                  fontSize: typography.fontSize.sm,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                {backtestLoading ? (
+                  <>
+                    <span>⏳</span>
+                    <span>Simulating Real Data...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>▶</span>
+                    <span>Run Backtest (Real Data)</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
 
         {/* Backtest Results Display */}
         {backtestResult && (
           <div>
+            {/* Real Market Data Badge & Meta Header */}
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                backgroundColor: 'rgba(16, 185, 129, 0.08)',
+                border: '1px solid rgba(16, 185, 129, 0.25)',
+                borderRadius: borderRadius.md,
+                padding: `${spacing.sm}px ${spacing.md}px`,
+                marginBottom: spacing.md,
+                flexWrap: 'wrap',
+                gap: spacing.xs,
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
+                <Badge
+                  label={backtestResult.dataSource === 'REAL_NSE_EXCHANGE_FEED' ? '🟢 100% Real Exchange Feed (NSE India)' : '🟢 Real Market Candles'}
+                  variant="success"
+                  size="sm"
+                />
+                <span style={{ fontSize: typography.fontSize.xs, color: colors.textPrimary, fontWeight: typography.fontWeight.semibold }}>
+                  {backtestResult.strategyName} (v{backtestResult.version})
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: spacing.sm, fontSize: typography.fontSize.xs, color: colors.textSecondary, flexWrap: 'wrap' }}>
+                <span>From: <strong style={{ color: colors.textPrimary }}>{backtestResult.fromDate ? new Date(backtestResult.fromDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', year: 'numeric' }) : '—'}</strong></span>
+                <span>To: <strong style={{ color: colors.textPrimary }}>{backtestResult.toDate ? new Date(backtestResult.toDate).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', year: 'numeric' }) : '—'}</strong></span>
+                <span>Timeframe: <strong style={{ color: colors.cyan }}>{backtestResult.timeframe || backtestTimeframe}</strong></span>
+                {useTrailingStop && (
+                  <span style={{ color: colors.purple, fontWeight: typography.fontWeight.semibold }}>
+                    ✨ Trailing SL Active (Act: ₹{trailingActivationProfit}, Step: ₹{trailingStep})
+                  </span>
+                )}
+              </div>
+            </div>
+
             {/* KPI Cards Row */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: spacing.md, marginBottom: spacing.lg }}>
               {/* Net P&L */}
@@ -895,18 +1081,18 @@ export default function StrategiesScreen() {
 
             {/* Trade Log */}
             <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.sm, flexWrap: 'wrap', gap: spacing.xs }}>
                 <h3 style={{ fontSize: typography.fontSize.md, fontWeight: typography.fontWeight.bold, margin: 0 }}>
                   Simulated Trade History ({backtestResult.trades.length} Trades)
                 </h3>
                 <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
-                  Candle timeframe: 5 minutes · Indian Market Hours (09:15-15:30 IST)
+                  Candle timeframe: {backtestResult.timeframe || backtestTimeframe} · Indian Market Hours (09:15-15:30 IST)
                 </span>
               </div>
 
               {backtestResult.trades.length === 0 ? (
                 <div style={{ padding: spacing.md, backgroundColor: colors.surfaceElevated, borderRadius: borderRadius.md, textAlign: 'center', color: colors.textMuted }}>
-                  No setup signals triggered during the {backtestDays}-day historical window under current indicator thresholds.
+                  No setup signals triggered during the {backtestDays}-day window under current indicator thresholds.
                 </div>
               ) : (
                 <div style={{ overflowX: 'auto' }}>
@@ -914,6 +1100,8 @@ export default function StrategiesScreen() {
                     <thead>
                       <tr style={{ borderBottom: `1px solid ${colors.border}`, color: colors.textMuted }}>
                         <th style={{ padding: '8px 10px' }}>Entry Time (IST)</th>
+                        <th style={{ padding: '8px 10px' }}>Exit Time (IST)</th>
+                        <th style={{ padding: '8px 10px' }}>Duration</th>
                         <th style={{ padding: '8px 10px' }}>Symbol</th>
                         <th style={{ padding: '8px 10px' }}>Qty</th>
                         <th style={{ padding: '8px 10px' }}>Entry ₹</th>
@@ -926,7 +1114,23 @@ export default function StrategiesScreen() {
                     </thead>
                     <tbody>
                       {backtestResult.trades.map((t, idx) => {
-                        const entryDate = new Date(t.entryTime).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+                        const entryDate = new Date(t.entryTime).toLocaleString('en-IN', {
+                          timeZone: 'Asia/Kolkata',
+                          month: 'short',
+                          day: '2-digit',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        });
+                        const exitDate = t.exitTime
+                          ? new Date(t.exitTime).toLocaleString('en-IN', {
+                              timeZone: 'Asia/Kolkata',
+                              month: 'short',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })
+                          : '—';
+                        const durationStr = t.durationMinutes ? `${t.durationMinutes}m` : '—';
                         return (
                           <tr
                             key={t.id || idx}
@@ -936,6 +1140,8 @@ export default function StrategiesScreen() {
                             }}
                           >
                             <td style={{ padding: '8px 10px', color: colors.textSecondary }}>{entryDate}</td>
+                            <td style={{ padding: '8px 10px', color: colors.textSecondary }}>{exitDate}</td>
+                            <td style={{ padding: '8px 10px', color: colors.cyan, fontWeight: typography.fontWeight.semibold }}>{durationStr}</td>
                             <td style={{ padding: '8px 10px', fontWeight: typography.fontWeight.semibold }}>{t.symbol}</td>
                             <td style={{ padding: '8px 10px' }}>{t.quantity}</td>
                             <td style={{ padding: '8px 10px' }}>₹{t.entryPrice.toFixed(2)}</td>
@@ -955,20 +1161,28 @@ export default function StrategiesScreen() {
                                   fontSize: 10,
                                   fontWeight: typography.fontWeight.bold,
                                   backgroundColor:
-                                    t.exitReason === 'TARGET_PROFIT'
+                                    t.exitReason === 'TRAILING_STOP_LOSS'
+                                      ? 'rgba(168, 85, 247, 0.15)'
+                                      : t.exitReason === 'TARGET_PROFIT'
                                       ? colors.profitMuted
                                       : t.exitReason === 'STOP_LOSS'
                                       ? colors.lossMuted
                                       : 'rgba(245, 158, 11, 0.15)',
                                   color:
-                                    t.exitReason === 'TARGET_PROFIT'
+                                    t.exitReason === 'TRAILING_STOP_LOSS'
+                                      ? colors.purple
+                                      : t.exitReason === 'TARGET_PROFIT'
                                       ? colors.profit
                                       : t.exitReason === 'STOP_LOSS'
                                       ? colors.loss
                                       : colors.warning,
                                 }}
                               >
-                                {t.exitReason.replace(/_/g, ' ')}
+                                {t.exitReason === 'TRAILING_STOP_LOSS'
+                                  ? '✨ TRAILING SL'
+                                  : t.exitReason === 'TARGET_PROFIT'
+                                  ? '🎯 TARGET'
+                                  : t.exitReason.replace(/_/g, ' ')}
                               </span>
                             </td>
                           </tr>
