@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { EnvService } from '../config/env.service.ts';
 import { HealthController } from '../health/health.controller.ts';
 import { RiskService } from '../risk/risk.service.ts';
+import { RiskReservationManager } from '../risk/risk-reservation.manager.ts';
 import { RiskState, TradeMode } from '@trading-bot/contracts';
 
 describe('API Health and Risk Service', () => {
@@ -17,7 +18,9 @@ describe('API Health and Risk Service', () => {
 
   it('RiskService initializes DISARMED and handles emergency stop', () => {
     const envService = new EnvService();
-    const riskService = new RiskService(envService);
+    const gateway = { broadcast: () => {} } as any;
+    const reservationManager = new RiskReservationManager(envService, gateway);
+    const riskService = new RiskService(envService, reservationManager);
 
     const initial = riskService.getStatus();
     expect(initial.state).toBe(RiskState.DISARMED);

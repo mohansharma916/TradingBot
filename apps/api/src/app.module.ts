@@ -24,6 +24,8 @@ import { InstrumentCatalogService } from './instruments/instrument-catalog.servi
 import { PaperBrokerAdapter } from './broker/paper-broker.adapter';
 import { UpstoxBrokerAdapter } from './broker/upstox-broker.adapter';
 import { UpstoxMarketFeedService } from './market-data/upstox-market-feed.service';
+import { RiskReservationManager } from './risk/risk-reservation.manager';
+import { OrdersService } from './orders/orders.service';
 
 @Module({
   imports: [],
@@ -55,6 +57,8 @@ import { UpstoxMarketFeedService } from './market-data/upstox-market-feed.servic
     StrategyAnalystAgent,
     AgentCoordinatorService,
     StrategiesService,
+    RiskReservationManager,
+    OrdersService,
   ],
   exports: [
     EnvService,
@@ -71,6 +75,8 @@ import { UpstoxMarketFeedService } from './market-data/upstox-market-feed.servic
     StrategyAnalystAgent,
     AgentCoordinatorService,
     StrategiesService,
+    RiskReservationManager,
+    OrdersService,
   ],
 })
 export class AppModule {}

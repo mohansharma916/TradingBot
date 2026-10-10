@@ -6,3 +6,4 @@ export * from './market-calendar';
 export * from './candle-manager';
 export * from './strategy-evaluator';
 export * from './strategy-version';
+export * from './order-state-machine';

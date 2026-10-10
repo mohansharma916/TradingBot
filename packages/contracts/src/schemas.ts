@@ -491,3 +491,32 @@ export const DailyReportSchema = z.object({
 });
 
 export type DailyReport = z.infer<typeof DailyReportSchema>;
+
+// Charge Breakdown Schema
+export const ChargeBreakdownSchema = z.object({
+  brokerage: z.number(),
+  stt: z.number(),
+  exchangeCharges: z.number(),
+  sebiCharges: z.number(),
+  stampDuty: z.number(),
+  gst: z.number(),
+  totalRoundTripCharges: z.number(),
+});
+
+export type ChargeBreakdown = z.infer<typeof ChargeBreakdownSchema>;
+
+// Order Fill Event Schema
+export const OrderFillEventSchema = z.object({
+  id: z.string().uuid(),
+  orderId: z.string().uuid(),
+  instrumentKey: z.string(),
+  side: z.nativeEnum(OrderSide),
+  fillQty: z.number().int().positive(),
+  fillPrice: z.number().positive(),
+  charges: ChargeBreakdownSchema,
+  timestamp: z.string().datetime(),
+  estimatedCharges: z.number().nonnegative(),
+  actualCharges: z.number().nonnegative(),
+});
+
+export type OrderFillEvent = z.infer<typeof OrderFillEventSchema>;

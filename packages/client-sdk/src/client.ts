@@ -10,6 +10,8 @@ import {
   MarketCalendar,
   StrategyConfig,
   AgentTask,
+  BrokerOrder,
+  OrderFillEvent,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -150,9 +152,33 @@ export class TradingPlatformClient {
     return this.request(`/instruments/${encodeURIComponent(key)}`);
   }
 
-  // Positions
+  // Orders & Positions
+  public async getOrders(): Promise<BrokerOrder[]> {
+    return this.request('/orders');
+  }
+
   public async getPositions(): Promise<Position[]> {
     return this.request('/positions');
+  }
+
+  public async getOrderFills(): Promise<OrderFillEvent[]> {
+    return this.request('/orders/fills');
+  }
+
+  public async executeProposal(
+    proposalId: string,
+    simulatedPartialFill?: boolean,
+  ): Promise<{ orderId: string; status: string; message: string }> {
+    return this.request('/orders/execute-proposal', {
+      method: 'POST',
+      body: JSON.stringify({ proposalId, simulatedPartialFill }),
+    });
+  }
+
+  public async closePosition(key: string): Promise<{ success: boolean; message: string }> {
+    return this.request(`/positions/${encodeURIComponent(key)}/close`, {
+      method: 'POST',
+    });
   }
 
   // Trade Proposals

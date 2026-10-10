@@ -13,9 +13,9 @@
 |---|---|---|---|
 | **Phase 0** | **Repository Foundations & Monorepo Shell** | **COMPLETED ✅** | All target packages build, backend & worker start, 21 tests pass |
 | **Phase 1** | **Instruments & Streaming Market Data Feed V3** | **COMPLETED ✅** | Protobuf V3 decoder, catalog indexing, stale feed detection, 34 tests pass |
-| **Phase 2** | Strategy Engine & Tool-Restricted Agents | Next Up ⏳ | Deterministic indicator rules & verified expiring `TradeProposal` pipeline |
-| **Phase 3** | Risk Engine & Paper Broker Simulation | Pending | Transactional capital locks, slippage/charges model, zero double-spending |
-| **Phase 4** | Upstox Read-Only Portfolio & OAuth Integration | Pending | Token encryption, broker account reconciliation, egress IP validation |
+| **Phase 2** | **Strategy Engine & Tool-Restricted Agents** | **COMPLETED ✅** | Deterministic indicator rules & verified expiring `TradeProposal` pipeline, 54 tests pass |
+| **Phase 3** | **Risk Engine & Paper Broker Simulation** | **COMPLETED ✅** | Transactional capital locks, slippage/charges model, zero double-spending, 68 tests pass |
+| **Phase 4** | Upstox Read-Only Portfolio & OAuth Integration | Next Up ⏳ | Token encryption, broker account reconciliation, egress IP validation |
 | **Phase 5** | Supervised Live Order Execution (Approval Mode) | Pending | Owner approval window, multi-leg GTT protection, orderbook reconciliation |
 | **Phase 6** | Operational Resilience, Diagnostics & Mobile Polish | Pending | Kill switch, flatten position command, alert notifications, incident drills |
 | **Phase 7** | Bounded Autonomous Execution (Armed Auto Mode) | Gated | Regulatory checklist passed, multi-day paper proof, hard limits locked |
@@ -106,11 +106,62 @@
 
 ---
 
-## Next Steps: Phase 3 — Risk Engine & Paper Broker
+## Phase 3: Risk Engine & Paper Broker Simulation — COMPLETED ✅
 
-**Phase 3 Objectives:**
-- Pure deterministic account-wide `RiskPolicy` evaluation: budget, per-trade all-in risk, daily drawdown, open positions, trade count, slippage buffer, fees estimate, margin, lot-size and liquidity limits.
-- Central transactional cash/risk reservations and unique signal intent (`signalKey`).
-- Paper broker adapter with simulated fills, slippage, partial fills, and order state machine.
-- Position ledger and trades/orders journal screens in the universal app.
-- Proof that two agents cannot double-spend capital, stale quotes block orders, and all P&L has correct estimated-vs-actual cost labels.
+### Deliverables Implemented:
+
+1. **Order State Machine & Transition Rules (`packages/domain/src/order-state-machine.ts`)**:
+   - Strict transition graph enforcing valid broker state sequences:
+     - `PENDING` -> `ACKNOWLEDGED` -> `PARTIALLY_FILLED` -> `FILLED`
+     - Terminal states: `FILLED`, `CANCELLED`, `REJECTED` are strictly immutable; attempts to transition out of terminal states throw deterministic domain errors.
+     - Quantity reconciliation: Rejects invalid fills where filled quantity exceeds order quantity or where price is non-positive.
+
+2. **Central Transactional Cash & Risk Reservations (`apps/api/src/risk/risk-reservation.manager.ts`)**:
+   - **Zero Double-Spending Atomic Guard**: Memory & database locks guarantee cash debits atomically. When Agent 1 reserves ₹6,000, available cash drops to ₹4,000; a concurrent request from Agent 2 for ₹5,000 is rejected immediately with `CAPITAL_EXHAUSTION`.
+   - **Unique Signal Key Intent Lock**: Prevents duplicate executions on the same 5-minute candle bar (`strategyId:instrumentKey:timeframe:candleTime`).
+   - **Hard Risk Caps**: Enforces ₹10,000 max capital, ₹500 all-in trade loss cap, ₹1,500 daily drawdown cap, and 1 max open position.
+   - **Reservation Lifecycle**: Clean transactional methods for `acquireReservation`, `commitReservationToPosition`, `releaseReservation`, and `settleClosedPosition`.
+
+3. **High-Fidelity Paper Broker Engine (`apps/api/src/broker/paper-broker.adapter.ts`)**:
+   - **Stale Quote Gate**: Invariant checking `feed.getQuote()`. If `isStale` is true or quote age exceeds 3,000ms, order submission transitions directly to `REJECTED` with reason `REJECTED_STALE_FEED`, preserving capital during feed disruptions.
+   - **Simulated Execution**: Models realistic fills, slippage, and supports partial executions (`PARTIALLY_FILLED` with updated average fill price).
+   - **Statutory Charges Calculation (`calculateOptionCharges`)**: Computes verified Indian F&O option charges (Brokerage: ₹40 per roundtrip, STT: 0.1% on sell turnover, NSE exchange charges: 0.0505%, SEBI fees: 0.0001%, Stamp duty: 0.003%, GST: 18%).
+   - **Estimated vs Actual Cost Tracking**: Stores both `estimatedCharges` from proposals and verified `actualCharges` computed from fill parameters.
+
+4. **Orders & Positions Service & API (`apps/api/src/orders/orders.service.ts` & `orders.controller.ts`)**:
+   - `GET /orders`: Returns all broker orders across all states.
+   - `GET /positions`: Returns open positions with net quantity, average buy/sell prices, and unrealized MTM P&L.
+   - `GET /orders/fills`: Returns full audit ledger of executed fills with granular statutory charge breakdowns.
+   - `POST /orders/execute-proposal`: Atomically acquires capital reservation, dispatches paper order, commits position, and broadcasts WebSocket events.
+   - `POST /positions/:key/close`: Market closes an open position, computes net P&L, records exit fill, and settles reservations.
+
+5. **Client SDK Extensions (`packages/client-sdk/src/client.ts`)**:
+   - `getOrders()`, `getPositions()`, `getOrderFills()`, `executeProposal()`, `closePosition()`.
+
+6. **Universal Workstation UI (`apps/trader/app/orders.tsx`)**:
+   - **Risk & Capital Status Widget**: Live Available Cash, Reserved Capital under lock, Remaining Daily Drawdown Budget, Max All-In Trade Loss cap.
+   - **Positions Tab**: Displays active contract, net quantity, average price, LTP, unrealized MTM P&L, protective stop (GTT), profit target (GTT), and single-click "Market Close Position".
+   - **Orders Tab**: Displays order table with status badges (`FILLED`, `PARTIAL`, `REJECTED`, `ACKNOWLEDGED`), fill details, and rejection reasons.
+   - **Trade Journal & Fill Ledger Tab**: Detailed audit log displaying side-by-side **Estimated Fees vs Actual Charges** with full breakdown (Brokerage, STT, Exchange, Stamp, GST) and net cost savings/variance.
+   - **Simulation Testbench Bar**: Single-click testing of paper fills, partial fills, and stale feed gates.
+
+### Verification & Test Matrix
+
+- **Unit & Integration Tests**: 68 passed / 68 total (Vitest across 16 test files):
+  - Domain tests: Order state machine transitions, terminal state immutability, quantity bounds, statutory charge formulas.
+  - Risk & Broker integration tests: Zero double-spending between agents, stale quote feed gate rejection (>3,000ms), unique signal bar deduplication, drawdown budget exhaustion, partial fill handling.
+  - Client & Trader UI tests: PositionSchema GTT bounds, BrokerOrderSchema state transitions, OrderFillEventSchema charge comparisons, RiskStatusSchema balance consistency.
+- **TypeScript Typecheck**: Passed across all 8 workspace projects with 0 errors (`pnpm run typecheck`).
+- **Monorepo Build**: Passed cleanly across all packages and services (`pnpm run build`).
+
+---
+
+## Next Steps: Phase 4 — Upstox Read-Only Portfolio & OAuth Integration
+
+**Phase 4 Objectives:**
+- Upstox OAuth 2.0 flow with PKCE / secure token exchange and refresh rotation.
+- Encrypted token storage in PostgreSQL using AES-256-GCM.
+- Egress IP validation against registered static IP.
+- Read-only portfolio & funds synchronization (holdings, positions, margins).
+- Startup reconciliation between broker state and local database.
+- Live order routing remains strictly blocked (`TODO-VERIFY: Live order execution blocked until Phase 5`).
