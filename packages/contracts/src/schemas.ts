@@ -262,6 +262,7 @@ export const BacktestRequestSchema = z.object({
   useTrailingStop: z.boolean().default(true),
   trailingActivationProfitInr: z.number().nonnegative().default(150),
   trailingStepInr: z.number().nonnegative().default(50),
+  strategy: StrategyConfigSchema.optional(),
 });
 export type BacktestRequest = z.infer<typeof BacktestRequestSchema>;
 

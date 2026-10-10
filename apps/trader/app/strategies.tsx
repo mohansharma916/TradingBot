@@ -87,16 +87,37 @@ export default function StrategiesScreen() {
     }
   }, []);
 
-  // Fetch strategies from backend API
+  // Fetch strategies from backend API with localStorage self-healing sync
   const loadStrategies = async () => {
     setIsLoading(true);
     try {
       const data = await apiClient.getStrategies();
-      if (data && data.length > 0) {
-        setStrategies(data);
-        if (!selectedStrategyId || !data.some((s) => s.id === selectedStrategyId)) {
-          setSelectedStrategyId(data[0]!.id);
-          setBacktestUnderlying((data[0]!.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
+      let combined = data || [];
+
+      // Check localStorage for custom strategies in case server was restarted
+      if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+          const localStr = window.localStorage.getItem('trading_bot_custom_strategies');
+          if (localStr) {
+            const localList: StrategyConfig[] = JSON.parse(localStr);
+            for (const localStrat of localList) {
+              if (!combined.some((s) => s.id === localStrat.id)) {
+                combined.push(localStrat);
+                // Resync to backend so server persists it to disk
+                apiClient.createStrategy(localStrat).catch(() => {});
+              }
+            }
+          }
+        } catch {
+          // ignore cache parsing error
+        }
+      }
+
+      if (combined && combined.length > 0) {
+        setStrategies(combined);
+        if (!selectedStrategyId || !combined.some((s) => s.id === selectedStrategyId)) {
+          setSelectedStrategyId(combined[0]!.id);
+          setBacktestUnderlying((combined[0]!.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
         }
       }
     } catch (err: any) {
@@ -151,21 +172,36 @@ export default function StrategiesScreen() {
     setBacktestLoading(true);
     setBacktestResult(null);
 
+    const backtestPayload = {
+      days: backtestDays,
+      initialCapital: backtestCapital,
+      underlying: backtestUnderlying,
+      timeframe: backtestTimeframe,
+      fromDate: isCustomDateRange && backtestFromDate ? backtestFromDate : undefined,
+      toDate: isCustomDateRange && backtestToDate ? backtestToDate : undefined,
+      useTrailingStop,
+      trailingActivationProfitInr: trailingActivationProfit,
+      trailingStepInr: trailingStep,
+      strategy: strat,
+    };
+
     try {
-      const result = await apiClient.runBacktest(strat.id, {
-        days: backtestDays,
-        initialCapital: backtestCapital,
-        underlying: backtestUnderlying,
-        timeframe: backtestTimeframe,
-        fromDate: isCustomDateRange && backtestFromDate ? backtestFromDate : undefined,
-        toDate: isCustomDateRange && backtestToDate ? backtestToDate : undefined,
-        useTrailingStop,
-        trailingActivationProfitInr: trailingActivationProfit,
-        trailingStepInr: trailingStep,
-      });
+      const result = await apiClient.runBacktest(strat.id, backtestPayload as any);
       setBacktestResult(result);
       showFeedback(`Backtest completed for ${strat.name}: ${result.totalTrades} trades simulated on real exchange candles.`, 'success');
     } catch (err: any) {
+      if ((err?.message?.includes('404') || err?.message?.includes('not found')) && strat) {
+        // Self-healing: if strategy is missing from backend, automatically upload and re-run
+        try {
+          await apiClient.createStrategy(strat);
+          const retry = await apiClient.runBacktest(strat.id, backtestPayload as any);
+          setBacktestResult(retry);
+          showFeedback(`Strategy resynced to server & backtest completed: ${retry.totalTrades} trades!`, 'success');
+          return;
+        } catch {
+          // fall through
+        }
+      }
       showFeedback(`Backtest failed: ${err.message}`, 'error');
     } finally {
       setBacktestLoading(false);
@@ -211,7 +247,15 @@ export default function StrategiesScreen() {
         targetNetProfitInr: Number(editForm.targetNetProfitInr),
       });
 
-      setStrategies((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+      setStrategies((prev) => {
+        const next = prev.map((s) => (s.id === updated.id ? updated : s));
+        if (typeof window !== 'undefined' && window.localStorage) {
+          try {
+            window.localStorage.setItem('trading_bot_custom_strategies', JSON.stringify(next));
+          } catch {}
+        }
+        return next;
+      });
       setIsEditModalOpen(false);
       showFeedback(`Updated strategy "${updated.name}" to Revision v${updated.version}!`, 'success');
     } catch (err: any) {
@@ -272,7 +316,15 @@ export default function StrategiesScreen() {
       };
 
       const created = await apiClient.createStrategy(newStrategyPayload);
-      setStrategies((prev) => [...prev, created]);
+      setStrategies((prev) => {
+        const next = [...prev, created];
+        if (typeof window !== 'undefined' && window.localStorage) {
+          try {
+            window.localStorage.setItem('trading_bot_custom_strategies', JSON.stringify(next));
+          } catch {}
+        }
+        return next;
+      });
       setSelectedStrategyId(created.id);
       setBacktestUnderlying(created.underlying as 'NIFTY' | 'BANKNIFTY');
       setIsCreateModalOpen(false);

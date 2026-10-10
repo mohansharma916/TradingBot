@@ -1,5 +1,7 @@
-import { Injectable, NotFoundException, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, Inject, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import {
   AllowedOptionType,
   BacktestRequest,
@@ -24,12 +26,86 @@ import { ProposalsService } from '../proposals/proposals.service';
 export class StrategiesService {
   private strategies: Map<string, StrategyConfig> = new Map();
   private strategyVersionHistory: Map<string, StrategyConfig[]> = new Map();
+  private readonly storagePath: string;
 
   constructor(
     @Inject(AgentCoordinatorService) private readonly coordinator: AgentCoordinatorService,
     @Inject(ProposalsService) private readonly proposalsService: ProposalsService,
+    @Optional() @Inject('STRATEGIES_STORAGE_PATH') storagePath?: string,
   ) {
+    const isTest = process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
+    this.storagePath = storagePath || process.env.STRATEGIES_STORAGE_PATH || (isTest ? '' : path.resolve(process.cwd(), '.data/strategies.json'));
+    if (this.storagePath) {
+      this.loadFromDisk();
+    } else {
+      this.seedDefaultStrategies();
+    }
+  }
+
+  private loadFromDisk(): void {
     this.seedDefaultStrategies();
+    if (!this.storagePath) return;
+    try {
+      if (fs.existsSync(this.storagePath)) {
+        const raw = fs.readFileSync(this.storagePath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed?.strategies)) {
+          for (const strat of parsed.strategies) {
+            try {
+              const validated = StrategyConfigSchema.parse(strat);
+              this.strategies.set(validated.id, validated);
+            } catch {
+              // skip invalid entries
+            }
+          }
+        }
+        if (parsed?.versionHistory && typeof parsed.versionHistory === 'object') {
+          for (const [id, hist] of Object.entries(parsed.versionHistory)) {
+            if (Array.isArray(hist)) {
+              this.strategyVersionHistory.set(id, hist as StrategyConfig[]);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn('[StrategiesService] Could not load persisted strategies from disk:', err);
+    }
+  }
+
+  private saveToDisk(): void {
+    if (!this.storagePath) return;
+    try {
+      const dir = path.dirname(this.storagePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const data = {
+        strategies: Array.from(this.strategies.values()),
+        versionHistory: Object.fromEntries(this.strategyVersionHistory.entries()),
+      };
+      fs.writeFileSync(this.storagePath, JSON.stringify(data, null, 2), 'utf8');
+    } catch (err) {
+      console.warn('[StrategiesService] Could not persist strategies to disk:', err);
+    }
+  }
+
+  private findStrategyInDailyBotStorage(id: string): StrategyConfig | undefined {
+    try {
+      const dailyBotPath = path.resolve(path.dirname(this.storagePath), 'daily-bot.json');
+      if (fs.existsSync(dailyBotPath)) {
+        const raw = JSON.parse(fs.readFileSync(dailyBotPath, 'utf8'));
+        const foundSetup = raw?.setups?.find((s: any) => s.strategySnapshot?.id === id);
+        if (foundSetup?.strategySnapshot) {
+          const validated = StrategyConfigSchema.parse(foundSetup.strategySnapshot);
+          this.strategies.set(validated.id, validated);
+          this.saveToDisk();
+          return validated;
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return undefined;
   }
 
   public getAllStrategies(): StrategyConfig[] {
@@ -37,7 +113,16 @@ export class StrategiesService {
   }
 
   public getStrategy(id: string): StrategyConfig {
-    const strategy = this.strategies.get(id);
+    let strategy = this.strategies.get(id);
+    if (!strategy) {
+      // Reload in case another thread wrote to disk
+      this.loadFromDisk();
+      strategy = this.strategies.get(id);
+    }
+    if (!strategy) {
+      // Check Daily Bot setup storage for matching snapshot
+      strategy = this.findStrategyInDailyBotStorage(id);
+    }
     if (!strategy) {
       throw new NotFoundException(`Strategy '${id}' not found.`);
     }
@@ -49,7 +134,8 @@ export class StrategiesService {
   }
 
   public createStrategy(dto: any): StrategyConfig {
-    const id = dto.id || randomUUID();
+    const isUuid = typeof dto.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(dto.id);
+    const id = isUuid ? dto.id : randomUUID();
     const parsed = StrategyConfigSchema.parse({
       ...dto,
       id,
@@ -59,6 +145,7 @@ export class StrategiesService {
     parsed.versionHash = calculateStrategyVersionHash(parsed);
     this.strategies.set(id, parsed);
     this.strategyVersionHistory.set(id, [parsed]);
+    this.saveToDisk();
 
     return parsed;
   }
@@ -91,6 +178,7 @@ export class StrategiesService {
 
     validated.versionHash = calculateStrategyVersionHash(validated);
     this.strategies.set(id, validated);
+    this.saveToDisk();
 
     return validated;
   }
@@ -107,8 +195,17 @@ export class StrategiesService {
   }
 
   public async runBacktest(id: string, reqDto: Partial<BacktestRequest>): Promise<BacktestResult> {
-    const strategy = this.getStrategy(id);
     const parsedReq = BacktestRequestSchema.parse(reqDto || {});
+    let strategy: StrategyConfig;
+    try {
+      strategy = this.getStrategy(id);
+    } catch (err) {
+      if (parsedReq.strategy) {
+        strategy = this.createStrategy({ ...parsedReq.strategy, id });
+      } else {
+        throw err;
+      }
+    }
 
     const underlying = parsedReq.underlying || strategy.underlying || 'NIFTY';
     const interval = parsedReq.timeframe || strategy.timeframe || '5m';
