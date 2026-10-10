@@ -121,10 +121,14 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
   } | null = null;
 
   let dailyTradesCount = 0;
+  let dailyCumulativeNetPnl = 0;
+  let dailyHaltedDueToMaxLoss = false;
   let lastDayString = '';
 
-  const maxTradesPerDay = strategy.risk?.maxTradesPerDay ?? 3;
-  const maxTradeLossInr = strategy.risk?.maxAllInTradeLossInr ?? 200;
+  const maxTradesPerDay = request?.maxTradesPerDay ?? strategy.risk?.maxTradesPerDay ?? 10;
+  const singleTradeKillLossInr = request?.maxTradeLossInr ?? 500;
+  const maxDailyLossInr = request?.maxDailyLossInr ?? strategy.risk?.maxAllInDailyLossInr ?? 500;
+  const perTradeStopLossInr = strategy.risk?.maxAllInTradeLossInr ?? 200;
   const targetProfitInr = strategy.risk?.targetNetProfitInr ?? 300;
   const sessionStart = strategy.session?.start ?? '09:25';
   const sessionLastEntry = strategy.session?.lastEntry ?? '14:45';
@@ -145,6 +149,8 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
     // New trading day rollover
     if (candleDateStr !== lastDayString) {
       dailyTradesCount = 0;
+      dailyCumulativeNetPnl = 0;
+      dailyHaltedDueToMaxLoss = false;
       lastDayString = candleDateStr;
     }
 
@@ -227,14 +233,28 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
         const currentDrawdown = peakCapital - runningCapital;
         if (currentDrawdown > maxDrawdown) maxDrawdown = currentDrawdown;
 
+        dailyCumulativeNetPnl += netPnl;
+
+        // Risk Invariant: If a single trade incurred max kill loss (e.g. >= ₹500), halt further trades today!
+        if (netPnl <= -singleTradeKillLossInr) {
+          dailyHaltedDueToMaxLoss = true;
+        }
+
+        // Risk Invariant: If cumulative daily loss hits max allowed loss (e.g. >= ₹500), halt further trades today!
+        if (dailyCumulativeNetPnl <= -maxDailyLossInr) {
+          dailyHaltedDueToMaxLoss = true;
+        }
+
         const entryMs = new Date(activeTrade.entryTime).getTime();
-        const exitMs = new Date(candleIso).getTime();
+        const exitOffsetSeconds = exitReason === 'STOP_LOSS' || exitReason === 'TRAILING_STOP_LOSS' ? 24 : 48;
+        const exitIso = new Date(new Date(curr.timestamp).getTime() + exitOffsetSeconds * 1000).toISOString();
+        const exitMs = new Date(exitIso).getTime();
         const durationMinutes = Math.max(1, Math.round((exitMs - entryMs) / 60000));
 
         trades.push({
           id: `bt_${trades.length + 1}`,
           entryTime: activeTrade.entryTime,
-          exitTime: candleIso,
+          exitTime: exitIso,
           durationMinutes,
           symbol: activeTrade.symbol,
           side: 'BUY',
@@ -245,6 +265,8 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
           charges,
           netPnl,
           exitReason,
+          initialStopPrice: activeTrade.initialStopPrice,
+          trailingStopPrice: activeTrade.trailingActive ? activeTrade.stopPrice : undefined,
         });
 
         activeTrade = null;
@@ -253,7 +275,12 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
 
     // 2. Evaluate Entry Signal (Only if flat and within daily session hours)
     if (activeTrade === null) {
+      if (dailyHaltedDueToMaxLoss) continue;
       if (dailyTradesCount >= maxTradesPerDay) continue;
+      if (dailyCumulativeNetPnl <= -maxDailyLossInr) {
+        dailyHaltedDueToMaxLoss = true;
+        continue;
+      }
       if (currentTimeIst < sessionStart || currentTimeIst > sessionLastEntry) continue;
 
       // Strictly evaluate confirmed closed candles up to bar i - 1 (no look-ahead)
@@ -273,15 +300,16 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
         const allowedLots = Math.max(1, Math.floor(maxTradeCapital / costPerLot));
         const totalUnits = allowedLots * lotSize;
 
-        const pointsStop = Math.max(3, maxTradeLossInr / totalUnits);
+        const pointsStop = Math.max(3, perTradeStopLossInr / totalUnits);
         const pointsTarget = Math.max(5, targetProfitInr / totalUnits);
 
         const stopPrice = Math.max(1, Number((estimatedPremium - pointsStop).toFixed(2)));
         const targetPrice = Number((estimatedPremium + pointsTarget).toFixed(2));
+        const entryIso = new Date(new Date(curr.timestamp).getTime() + 5000).toISOString();
 
         activeTrade = {
           id: `trade_${Date.now()}_${i}`,
-          entryTime: candleIso,
+          entryTime: entryIso,
           entryPrice: estimatedPremium,
           spotAtEntry: curr.open,
           quantity: totalUnits,

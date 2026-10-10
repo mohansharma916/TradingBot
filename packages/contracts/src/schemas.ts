@@ -477,6 +477,8 @@ export const BacktestTradeRecordSchema = z.object({
   charges: z.number(),
   netPnl: z.number(),
   exitReason: z.string(),
+  initialStopPrice: z.number().optional(),
+  trailingStopPrice: z.number().optional(),
 });
 export type BacktestTradeRecord = z.infer<typeof BacktestTradeRecordSchema>;
 
@@ -490,6 +492,9 @@ export const BacktestRequestSchema = z.object({
   useTrailingStop: z.boolean().default(true),
   trailingActivationProfitInr: z.number().nonnegative().default(150),
   trailingStepInr: z.number().nonnegative().default(50),
+  maxTradesPerDay: z.number().int().min(1).max(50).default(10),
+  maxTradeLossInr: z.number().positive().default(500),
+  maxDailyLossInr: z.number().positive().default(500),
   strategy: StrategyConfigSchema.optional(),
 });
 export type BacktestRequest = z.infer<typeof BacktestRequestSchema>;

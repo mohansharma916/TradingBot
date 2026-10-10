@@ -62,6 +62,9 @@ export default function StrategiesScreen() {
   const [useTrailingStop, setUseTrailingStop] = useState<boolean>(true);
   const [trailingActivationProfit, setTrailingActivationProfit] = useState<number>(150);
   const [trailingStep, setTrailingStep] = useState<number>(50);
+  const [backtestMaxTradesPerDay, setBacktestMaxTradesPerDay] = useState<number>(10);
+  const [backtestMaxTradeLoss, setBacktestMaxTradeLoss] = useState<number>(500);
+  const [backtestMaxDailyLoss, setBacktestMaxDailyLoss] = useState<number>(500);
   const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
 
@@ -206,6 +209,9 @@ export default function StrategiesScreen() {
       useTrailingStop,
       trailingActivationProfitInr: trailingActivationProfit,
       trailingStepInr: trailingStep,
+      maxTradesPerDay: backtestMaxTradesPerDay,
+      maxTradeLossInr: backtestMaxTradeLoss,
+      maxDailyLossInr: backtestMaxDailyLoss,
       strategy: strat,
     };
 
@@ -1265,6 +1271,67 @@ export default function StrategiesScreen() {
               )}
             </div>
 
+            {/* Risk Rules: Max Trades/Day & Loss Invariants */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: spacing.xs, flexWrap: 'wrap' }}>
+              <div title="Max trades per day (trading halts early if single trade loss hits max or cumulative loss hits daily limit)">
+                <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>Trades/Day:</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={backtestMaxTradesPerDay}
+                  onChange={(e) => setBacktestMaxTradesPerDay(Number(e.target.value))}
+                  style={{
+                    backgroundColor: colors.surface,
+                    border: `1px solid ${colors.border}`,
+                    color: colors.textPrimary,
+                    borderRadius: borderRadius.sm,
+                    padding: '4px 6px',
+                    fontSize: typography.fontSize.xs,
+                    width: 50,
+                  }}
+                />
+              </div>
+              <div title="If a single trade loses this amount, trading halts for the rest of the day">
+                <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>Trade Max Loss ₹:</span>
+                <input
+                  type="number"
+                  min={100}
+                  step={50}
+                  value={backtestMaxTradeLoss}
+                  onChange={(e) => setBacktestMaxTradeLoss(Number(e.target.value))}
+                  style={{
+                    backgroundColor: colors.surface,
+                    border: `1px solid ${colors.border}`,
+                    color: colors.textPrimary,
+                    borderRadius: borderRadius.sm,
+                    padding: '4px 6px',
+                    fontSize: typography.fontSize.xs,
+                    width: 65,
+                  }}
+                />
+              </div>
+              <div title="If cumulative daily loss reaches this amount, trading halts for the rest of the day">
+                <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>Daily Loss Limit ₹:</span>
+                <input
+                  type="number"
+                  min={100}
+                  step={50}
+                  value={backtestMaxDailyLoss}
+                  onChange={(e) => setBacktestMaxDailyLoss(Number(e.target.value))}
+                  style={{
+                    backgroundColor: colors.surface,
+                    border: `1px solid ${colors.border}`,
+                    color: colors.textPrimary,
+                    borderRadius: borderRadius.sm,
+                    padding: '4px 6px',
+                    fontSize: typography.fontSize.xs,
+                    width: 65,
+                  }}
+                />
+              </div>
+            </div>
+
             {/* Trailing Stop Loss Toggle & Inputs */}
             <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, marginLeft: 'auto', flexWrap: 'wrap' }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: typography.fontSize.xs, color: colors.textPrimary }}>
@@ -1274,12 +1341,12 @@ export default function StrategiesScreen() {
                   onChange={(e) => setUseTrailingStop(e.target.checked)}
                   style={{ cursor: 'pointer' }}
                 />
-                <span style={{ fontWeight: typography.fontWeight.semibold }}>📈 Trailing Stop Loss</span>
+                <span style={{ fontWeight: typography.fontWeight.semibold }}>📈 Trailing SL</span>
               </label>
 
               {useTrailingStop && (
                 <div style={{ display: 'flex', gap: spacing.xs, alignItems: 'center' }}>
-                  <div title="Unrealized profit in INR required to activate trailing stop">
+                  <div title="Profit required before stop loss starts trailing">
                     <span style={{ fontSize: 10, color: colors.textMuted, marginRight: 4 }}>Activate ₹:</span>
                     <input
                       type="number"
@@ -1294,7 +1361,7 @@ export default function StrategiesScreen() {
                         borderRadius: borderRadius.sm,
                         padding: '4px 6px',
                         fontSize: typography.fontSize.xs,
-                        width: 70,
+                        width: 65,
                       }}
                     />
                   </div>
@@ -1313,7 +1380,7 @@ export default function StrategiesScreen() {
                         borderRadius: borderRadius.sm,
                         padding: '4px 6px',
                         fontSize: typography.fontSize.xs,
-                        width: 60,
+                        width: 55,
                       }}
                     />
                   </div>
@@ -1483,12 +1550,13 @@ export default function StrategiesScreen() {
                   <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: typography.fontSize.xs, textAlign: 'left' }}>
                     <thead>
                       <tr style={{ borderBottom: `1px solid ${colors.border}`, color: colors.textMuted }}>
-                        <th style={{ padding: '8px 10px' }}>Entry Time (IST)</th>
-                        <th style={{ padding: '8px 10px' }}>Exit Time (IST)</th>
+                        <th style={{ padding: '8px 10px' }}>Entry Time (IST, Sec)</th>
+                        <th style={{ padding: '8px 10px' }}>Exit Time (IST, Sec)</th>
                         <th style={{ padding: '8px 10px' }}>Duration</th>
                         <th style={{ padding: '8px 10px' }}>Symbol</th>
                         <th style={{ padding: '8px 10px' }}>Qty</th>
                         <th style={{ padding: '8px 10px' }}>Entry ₹</th>
+                        <th style={{ padding: '8px 10px' }}>Initial SL ₹</th>
                         <th style={{ padding: '8px 10px' }}>Exit ₹</th>
                         <th style={{ padding: '8px 10px' }}>Gross ₹</th>
                         <th style={{ padding: '8px 10px' }}>Levies ₹</th>
@@ -1504,6 +1572,7 @@ export default function StrategiesScreen() {
                           day: '2-digit',
                           hour: '2-digit',
                           minute: '2-digit',
+                          second: '2-digit',
                         });
                         const exitDate = t.exitTime
                           ? new Date(t.exitTime).toLocaleString('en-IN', {
@@ -1512,6 +1581,7 @@ export default function StrategiesScreen() {
                               day: '2-digit',
                               hour: '2-digit',
                               minute: '2-digit',
+                              second: '2-digit',
                             })
                           : '—';
                         const durationStr = t.durationMinutes ? `${t.durationMinutes}m` : '—';
@@ -1523,12 +1593,15 @@ export default function StrategiesScreen() {
                               backgroundColor: idx % 2 === 0 ? 'transparent' : 'rgba(255, 255, 255, 0.02)',
                             }}
                           >
-                            <td style={{ padding: '8px 10px', color: colors.textSecondary }}>{entryDate}</td>
-                            <td style={{ padding: '8px 10px', color: colors.textSecondary }}>{exitDate}</td>
+                            <td style={{ padding: '8px 10px', color: colors.textSecondary, fontFamily: 'monospace' }}>{entryDate}</td>
+                            <td style={{ padding: '8px 10px', color: colors.textSecondary, fontFamily: 'monospace' }}>{exitDate}</td>
                             <td style={{ padding: '8px 10px', color: colors.cyan, fontWeight: typography.fontWeight.semibold }}>{durationStr}</td>
                             <td style={{ padding: '8px 10px', fontWeight: typography.fontWeight.semibold }}>{t.symbol}</td>
                             <td style={{ padding: '8px 10px' }}>{t.quantity}</td>
                             <td style={{ padding: '8px 10px' }}>₹{t.entryPrice.toFixed(2)}</td>
+                            <td style={{ padding: '8px 10px', color: colors.loss }}>
+                              {t.initialStopPrice ? `₹${t.initialStopPrice.toFixed(2)}` : '—'}
+                            </td>
                             <td style={{ padding: '8px 10px' }}>₹{t.exitPrice.toFixed(2)}</td>
                             <td style={{ padding: '8px 10px', color: t.grossPnl >= 0 ? colors.profit : colors.loss }}>
                               {t.grossPnl >= 0 ? '+' : ''}₹{t.grossPnl.toFixed(2)}
