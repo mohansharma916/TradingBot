@@ -1,0 +1,25 @@
+# Multi-stage Dockerfile for Trading Worker Runtime
+FROM node:24-alpine AS builder
+
+WORKDIR /app
+
+RUN npm install -g pnpm@10.13.1
+
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* tsconfig.base.json ./
+COPY packages/ ./packages/
+COPY apps/worker/ ./apps/worker/
+
+RUN pnpm install --frozen-lockfile=false
+RUN pnpm --filter @trading-bot/contracts build
+RUN pnpm --filter @trading-bot/domain build
+RUN pnpm --filter @trading-bot/worker build
+
+FROM node:24-alpine AS runner
+WORKDIR /app
+
+ENV NODE_ENV=production
+RUN npm install -g pnpm@10.13.1
+
+COPY --from=builder /app ./
+
+CMD ["pnpm", "--filter", "@trading-bot/worker", "start"]

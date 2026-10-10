@@ -1,0 +1,27 @@
+{
+  "name": "trading-platform-root",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @trading-bot/api --filter @trading-bot/worker --filter @trading-bot/trader dev",
+    "dev:api": "pnpm --filter @trading-bot/api dev",
+    "dev:worker": "pnpm --filter @trading-bot/worker dev",
+    "dev:trader": "pnpm --filter @trading-bot/trader dev:web",
+    "build": "pnpm --filter @trading-bot/contracts build && pnpm --filter @trading-bot/domain build && pnpm --filter @trading-bot/ui build && pnpm --filter @trading-bot/client-sdk build && pnpm --filter @trading-bot/api build && pnpm --filter @trading-bot/worker build",
+    "test": "vitest run",
+    "typecheck": "pnpm -r --parallel run typecheck",
+    "db:migrate": "tsx infrastructure/scripts/migrate.ts"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.0.1",
+    "@types/node": "^22.8.7",
+    "@types/pg": "^8.23.1",
+    "dotenv": "^16.6.1",
+    "jsdom": "^25.0.1",
+    "pg": "^8.23.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.3"
+  }
+}

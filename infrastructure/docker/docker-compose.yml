@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-trading_bot}
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../scripts/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.api
+    container_name: trading_api
+    restart: unless-stopped
+    ports:
+      - '4000:4000'
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/trading_bot
+      SYSTEM_MODE: ${SYSTEM_MODE:-PAPER}
+      DEFAULT_RISK_STATE: ${DEFAULT_RISK_STATE:-DISARMED}
+      UPSTOX_API_KEY: ${UPSTOX_API_KEY:-mock_key}
+      UPSTOX_API_SECRET: ${UPSTOX_API_SECRET:-mock_secret}
+      UPSTOX_EGRESS_IP: ${UPSTOX_EGRESS_IP:-127.0.0.1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.worker
+    container_name: trading_worker
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/trading_bot
+      SYSTEM_MODE: ${SYSTEM_MODE:-PAPER}
+      DEFAULT_RISK_STATE: ${DEFAULT_RISK_STATE:-DISARMED}
+      UPSTOX_API_KEY: ${UPSTOX_API_KEY:-mock_key}
+      UPSTOX_API_SECRET: ${UPSTOX_API_SECRET:-mock_secret}
+      UPSTOX_EGRESS_IP: ${UPSTOX_EGRESS_IP:-127.0.0.1}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
