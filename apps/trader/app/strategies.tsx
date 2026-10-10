@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useRouter } from 'expo-router';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
 import {
   StrategyConfig,
@@ -14,6 +15,22 @@ import { calculateStrategyVersionHash } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
 
 export default function StrategiesScreen() {
+  const router = useRouter();
+  const [dailyDraftDate, setDailyDraftDate] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const raw = window.localStorage.getItem('TRADING_BOT_DAILY_DRAFT');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.draft?.tradingDate) {
+            setDailyDraftDate(parsed.draft.tradingDate);
+          }
+        }
+      } catch {}
+    }
+  }, []);
   const [strategies, setStrategies] = useState<StrategyConfig[]>([
     {
       id: '550e8400-e29b-41d4-a716-446655440002',
@@ -487,8 +504,83 @@ export default function StrategiesScreen() {
 
   const historyList: StrategyConfig[] = versionHistory[selectedStrategy.id] ?? [selectedStrategy];
 
+  const handleApplyToDailyBot = () => {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        const raw = window.localStorage.getItem('TRADING_BOT_DAILY_DRAFT');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed?.draft) {
+            parsed.draft.strategyId = selectedStrategy.id;
+            parsed.step = 4;
+            window.localStorage.setItem('TRADING_BOT_DAILY_DRAFT', JSON.stringify(parsed));
+          }
+        }
+      } catch {}
+    }
+    router.push('/');
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.lg, maxWidth: 1200, margin: '0 auto', width: '100%', paddingBottom: spacing.xxl }}>
+      {/* Daily Bot Setup In-Progress Banner */}
+      {dailyDraftDate && (
+        <div
+          style={{
+            backgroundColor: 'rgba(6, 182, 212, 0.12)',
+            border: `1px solid ${colors.cyan}`,
+            borderRadius: borderRadius.md,
+            padding: `${spacing.md}px`,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: spacing.sm,
+          }}
+        >
+          <div>
+            <div style={{ color: colors.cyan, fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.sm, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span>🤖</span> Daily Trading Bot Setup In Progress ({dailyDraftDate})
+            </div>
+            <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
+              Your setup draft is safely saved. You can choose a strategy below or return to complete your daily configuration.
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center' }}>
+            <button
+              onClick={handleApplyToDailyBot}
+              style={{
+                padding: `${spacing.sm}px ${spacing.md}px`,
+                borderRadius: borderRadius.md,
+                backgroundColor: colors.cyan,
+                color: '#05151B',
+                fontWeight: typography.fontWeight.bold,
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: typography.fontSize.xs,
+              }}
+            >
+              ✓ Use &apos;{selectedStrategy.name}&apos; for Today&apos;s Bot
+            </button>
+            <button
+              onClick={() => router.push('/')}
+              style={{
+                padding: `${spacing.sm}px ${spacing.md}px`,
+                borderRadius: borderRadius.md,
+                backgroundColor: colors.surfaceElevated,
+                color: colors.textPrimary,
+                fontWeight: typography.fontWeight.semibold,
+                border: `1px solid ${colors.borderHover}`,
+                cursor: 'pointer',
+                fontSize: typography.fontSize.xs,
+              }}
+            >
+              ← Return to Setup Wizard
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md }}>
         <div>
@@ -804,6 +896,23 @@ export default function StrategiesScreen() {
           </div>
 
           <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center' }}>
+            {dailyDraftDate && (
+              <button
+                onClick={handleApplyToDailyBot}
+                style={{
+                  padding: `${spacing.sm}px ${spacing.md}px`,
+                  borderRadius: borderRadius.md,
+                  backgroundColor: colors.cyan,
+                  color: '#05151B',
+                  fontWeight: typography.fontWeight.bold,
+                  border: 'none',
+                  cursor: 'pointer',
+                  fontSize: typography.fontSize.xs,
+                }}
+              >
+                ✓ Use for Today&apos;s Bot
+              </button>
+            )}
             <button
               onClick={() => handleRunScan(selectedStrategy)}
               disabled={isScanning}

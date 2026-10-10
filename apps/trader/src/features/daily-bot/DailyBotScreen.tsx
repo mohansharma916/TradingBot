@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View,
   useWindowDimensions,
@@ -7,7 +7,10 @@ import { useRouter } from 'expo-router';
 import { DailyBotConfig, DailyBotSession, DailyBotSetup, TradeMode } from '@trading-bot/contracts';
 import { colors, spacing } from '@trading-bot/ui';
 import { useDailyBot } from '../../hooks/useDailyBot';
-import { configToDraft, createDailyBotDraft, DailyBotDraft, validateDailyBotDraft } from './config';
+import {
+  configToDraft, createDailyBotDraft, DailyBotDraft, validateDailyBotDraft,
+  estimateSebiOptionCharges, loadSavedDraft, saveDraftToStorage,
+} from './config';
 
 const money = (value: number) => `₹${value.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 const stepNames = ['Capital', 'Risk Limits', 'Profit Protection', 'Trading Window', 'Strategy', 'Review & Start'];
@@ -118,22 +121,66 @@ export default function DailyBotScreen() {
   const [consent, setConsent] = useState(false);
   const today = bot.today;
   const session = today?.activeSession ?? today?.session;
+
+  // Restore draft from storage if returning to this screen
+  useEffect(() => {
+    if (!today || draft !== null) return;
+    const stored = loadSavedDraft(today.tradingDate);
+    if (stored) {
+      setDraft(stored.draft);
+      setStep(stored.step);
+      if (stored.savedSetupId) {
+        const found = today.setups.find((s) => s.id === stored.savedSetupId) ?? (today.todaySetup?.id === stored.savedSetupId ? today.todaySetup : null);
+        if (found) setSavedSetup(found);
+      }
+    }
+  }, [today, draft]);
+
   const update = (field: keyof DailyBotConfig, value: string) => {
-    setDraft((current) => current ? { ...current, [field]: value } : current);
+    setDraft((current) => {
+      if (!current) return current;
+      const next = { ...current, [field]: value };
+      if (field === 'maxCapitalPerTrade') {
+        const capitalNum = Number(value);
+        if (capitalNum > 0) {
+          next.maxRoundTripCharges = String(estimateSebiOptionCharges(capitalNum).totalEstimated);
+        }
+      }
+      saveDraftToStorage(today?.tradingDate ?? current.tradingDate, next, step, savedSetup?.id);
+      return next;
+    });
     setSavedSetup(null); setConsent(false); setValidationError(null); bot.clearPreflight();
   };
+
+  const goToStep = (index: number) => {
+    setStep(index);
+    if (draft && today) {
+      saveDraftToStorage(today.tradingDate, draft, index, savedSetup?.id);
+    }
+  };
+
   const begin = (setup?: DailyBotSetup) => {
     if (!today) return;
-    setDraft(setup ? configToDraft({ ...setup.config, tradingDate: today.tradingDate }) :
-      createDailyBotDraft(today.tradingDate, today.strategies[0]));
+    const initialDraft = setup ? configToDraft({ ...setup.config, tradingDate: today.tradingDate }) :
+      createDailyBotDraft(today.tradingDate, today.strategies[0]);
+    setDraft(initialDraft);
     setSavedSetup(setup?.config.tradingDate === today.tradingDate ? setup : null);
     setStep(0); setConsent(false); setValidationError(null); bot.clearPreflight(); setTab('today');
+    saveDraftToStorage(today.tradingDate, initialDraft, 0, setup?.id);
   };
+
+  const closeSetup = () => {
+    setDraft(null);
+    setSavedSetup(null);
+    if (today) saveDraftToStorage(today.tradingDate, null, 0);
+  };
+
   const reuse = async (setup: DailyBotSetup) => {
     if (!today) return;
     const cloned = await bot.clone(setup.id, today.tradingDate);
     if (cloned) { begin(cloned); setStep(5); }
   };
+
   const saveAndCheck = async () => {
     if (!draft) return;
     const parsed = validateDailyBotDraft(draft);
@@ -142,12 +189,20 @@ export default function DailyBotScreen() {
       return;
     }
     const setup = savedSetup ?? await bot.save(parsed.data);
-    if (setup) { setSavedSetup(setup); await bot.check(setup.id); }
+    if (setup) {
+      setSavedSetup(setup);
+      if (today) saveDraftToStorage(today.tradingDate, draft, step, setup.id);
+      await bot.check(setup.id);
+    }
   };
+
   const start = async () => {
     if (!savedSetup || !consent || !bot.preflight?.passed) return;
     const result = await bot.start(savedSetup.id, consent);
-    if (result) { setDraft(null); setSavedSetup(null); setConsent(false); }
+    if (result) {
+      setDraft(null); setSavedSetup(null); setConsent(false);
+      if (today) saveDraftToStorage(today.tradingDate, null, 0);
+    }
   };
   const field = (key: keyof DailyBotConfig, label: string, hint?: string, numeric = true) =>
     <Field key={key} label={label} hint={hint} value={draft?.[key] ?? ''}
@@ -201,10 +256,10 @@ export default function DailyBotScreen() {
         </View>}
         {draft && <View style={styles.card}>
           <View style={styles.rowBetween}><Text style={styles.heading}>Daily Setup · {draft.tradingDate}</Text>
-            <Button label="Close Setup" secondary disabled={bot.busy} onPress={() => setDraft(null)} /></View>
+            <Button label="Close Setup" secondary disabled={bot.busy} onPress={() => closeSetup()} /></View>
           <View style={styles.steps}>{stepNames.map((name, index) => <Pressable key={name}
             accessibilityRole="button" accessibilityLabel={`Step ${index + 1}: ${name}`} disabled={bot.busy}
-            onPress={() => setStep(index)} style={[styles.step, step === index && styles.selectedTab]}>
+            onPress={() => goToStep(index)} style={[styles.step, step === index && styles.selectedTab]}>
             <Text style={[styles.hint, step === index && { color: colors.cyan }]}>{index + 1}. {name}</Text>
           </Pressable>)}</View>
           <Text style={styles.heading}>{stepNames[step]}</Text>
@@ -223,7 +278,41 @@ export default function DailyBotScreen() {
             {field('dailyMaxLossAllIn', 'Maximum Daily Loss (₹)', 'Includes trading costs and outstanding risk. Account cap: ₹1,500.')}
             {field('perTradeMaxLossAllIn', 'Maximum Risk Per Trade (₹)', 'Stop-loss risk plus charges and slippage. Account cap: ₹500.')}
             {field('maximumTradesPerDay', 'Maximum Trades Per Day')}
-            {field('maxRoundTripCharges', 'Maximum Estimated Round-trip Charges (₹)')}
+            {field('maxRoundTripCharges', 'Maximum Estimated Round-trip Charges (₹)', 'Statutory fees per round trip. Automatically estimated as per SEBI rules.')}
+
+            {(() => {
+              const currentCap = Number(draft.maxCapitalPerTrade) || 5000;
+              const sebi = estimateSebiOptionCharges(currentCap);
+              const isDiff = Number(draft.maxRoundTripCharges) !== sebi.totalEstimated;
+              return (
+                <View style={styles.sebiCard}>
+                  <View style={styles.rowBetween}>
+                    <Text style={styles.eyebrow}>SEBI & EXCHANGE STATUTORY CHARGES</Text>
+                    <Text style={[styles.hint, { color: colors.profit, fontWeight: '700' }]}>
+                      ≈ ₹{sebi.totalEstimated} / trade
+                    </Text>
+                  </View>
+                  <Text style={styles.hint}>
+                    Calculated live per SEBI & NSE F&O statutory rules for ₹{currentCap.toLocaleString('en-IN')} trade capital:
+                  </Text>
+                  <View style={styles.sebiGrid}>
+                    <Text style={styles.hint}>• Brokerage: ₹{sebi.breakdown.brokerage.toFixed(2)} (Flat ₹20 buy + ₹20 sell)</Text>
+                    <Text style={styles.hint}>• STT (0.1% sell-side): ₹{sebi.breakdown.stt.toFixed(2)}</Text>
+                    <Text style={styles.hint}>• Exchange charges (0.0505%): ₹{sebi.breakdown.exchangeCharges.toFixed(2)}</Text>
+                    <Text style={styles.hint}>• GST (18% on fees): ₹{sebi.breakdown.gst.toFixed(2)}</Text>
+                    <Text style={styles.hint}>• Stamp Duty & SEBI charges: ₹{(sebi.breakdown.stampDuty + sebi.breakdown.sebiCharges).toFixed(2)}</Text>
+                  </View>
+                  {isDiff && (
+                    <Button
+                      label={`Sync with SEBI Estimate (₹${sebi.totalEstimated})`}
+                      secondary
+                      onPress={() => update('maxRoundTripCharges', String(sebi.totalEstimated))}
+                    />
+                  )}
+                </View>
+              );
+            })()}
+
             <Text style={styles.description}>Maximum concurrent positions: 1. All strategies share the same account risk limits.</Text>
             <Text style={styles.hint}>The selected strategy may set lower risk limits. The strictest strategy, daily setup and account limits apply to every trade.</Text>
           </View>}
@@ -247,15 +336,68 @@ export default function DailyBotScreen() {
             <Text style={styles.description}>Trade only during market hours. Contract expiry, tick size, whole lots, funds, spread and quote freshness are checked by the backend.</Text>
           </View>}
           {step === 4 && <>
-            <Text style={styles.description}>Select one versioned strategy for this session. Its rules are saved as an immutable snapshot.</Text>
-            {today.strategies.map((strategy) => <Pressable key={strategy.id} accessibilityRole="radio"
-              accessibilityState={{ checked: draft.strategyId === strategy.id }} onPress={() => update('strategyId', strategy.id)}
-              style={[styles.innerCard, draft.strategyId === strategy.id && { borderColor: colors.cyan }]}>
-              <View style={styles.rowBetween}><Text style={styles.heading}>{strategy.name}</Text><Text style={styles.status}>{strategy.status}</Text></View>
-              <Text style={styles.description}>{strategy.underlying} · {strategy.timeframe} candles · Version {strategy.version} · {strategy.allowedInstruments.join(', ')}</Text>
-              <Text style={styles.hint}>EMA {strategy.entry.emaPeriod} · RSI {strategy.entry.rsiPeriod} ≥ {strategy.entry.rsiThreshold} · Spread ≤ {strategy.entry.maxBidAskSpreadPct}%</Text>
-            </Pressable>)}
-            <Button label="Manage Custom Strategies" secondary onPress={() => router.push('/strategies')} />
+            <Text style={styles.heading}>Step 5 · Strategy Selection</Text>
+            <Text style={styles.description}>
+              Select the strategy for today's session. Its rules, indicators, and strike criteria will be captured as an immutable snapshot. Click on any strategy card to select it.
+            </Text>
+            {today.strategies.map((strategy) => {
+              const isSelected = draft.strategyId === strategy.id;
+              return (
+                <Pressable
+                  key={strategy.id}
+                  accessibilityRole="radio"
+                  accessibilityLabel={`${strategy.name} ${isSelected ? 'selected' : ''}`}
+                  accessibilityState={{ checked: isSelected }}
+                  onPress={() => update('strategyId', strategy.id)}
+                  style={[
+                    styles.innerCard,
+                    isSelected && { borderColor: colors.cyan, backgroundColor: 'rgba(6, 182, 212, 0.08)' },
+                  ]}
+                >
+                  <View style={styles.rowBetween}>
+                    <Text style={[styles.heading, isSelected && { color: colors.cyan }]}>{strategy.name}</Text>
+                    <Text style={[styles.status, isSelected && { color: colors.cyan, borderColor: colors.cyan }]}>
+                      {isSelected ? '✓ SELECTED FOR TODAY' : strategy.status}
+                    </Text>
+                  </View>
+                  <Text style={styles.description}>
+                    {strategy.underlying} · {strategy.timeframe} candles · Version {strategy.version} · {strategy.allowedInstruments.join(', ')}
+                  </Text>
+                  <Text style={styles.hint}>
+                    EMA {strategy.entry.emaPeriod} · RSI {strategy.entry.rsiPeriod} ≥ {strategy.entry.rsiThreshold} · Spread ≤ {strategy.entry.maxBidAskSpreadPct}%
+                  </Text>
+                  <View style={[styles.rowBetween, { marginTop: spacing.xs }]}>
+                    <Text style={[styles.hint, { color: colors.textSecondary }]}>
+                      Square-off cutoff: {strategy.exit?.marketCutoff ?? '15:10'} IST · ATM Option Strikes
+                    </Text>
+                    {!isSelected && (
+                      <Button
+                        label="Select This Strategy"
+                        secondary
+                        onPress={() => update('strategyId', strategy.id)}
+                      />
+                    )}
+                  </View>
+                </Pressable>
+              );
+            })}
+            <View style={styles.strategyFooterNote}>
+              <Text style={styles.label}>Need Custom Strategy Rules or Backtesting?</Text>
+              <Text style={styles.hint}>
+                The strategy selected above is pre-configured and ready to run today. If you need to view historical logs, edit code, or test indicators in the Strategy Studio, you can open it without losing your setup progress.
+              </Text>
+              <Button
+                label="Open Strategy Studio (Draft Safely Saved)"
+                secondary
+                onPress={() => {
+                  if (typeof window !== 'undefined' && window.open) {
+                    window.open('/strategies', '_blank');
+                  } else {
+                    router.push('/strategies');
+                  }
+                }}
+              />
+            </View>
           </>}
           {step === 5 && <>
             <Text style={styles.description}>Review your configuration, save today's snapshot, then check account and market readiness.</Text>
@@ -361,4 +503,27 @@ const styles = StyleSheet.create({
   error: { backgroundColor: colors.lossMuted, borderWidth: 1, borderColor: colors.lossBorder, padding: 16, borderRadius: 8, gap: 8 },
   errorText: { color: colors.loss, fontSize: 14, lineHeight: 22 },
   event: { borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 4 },
+  sebiCard: {
+    backgroundColor: 'rgba(6, 182, 212, 0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(6, 182, 212, 0.3)',
+    borderRadius: 8,
+    padding: 14,
+    gap: 8,
+    maxWidth: 600,
+    width: '100%',
+  },
+  sebiGrid: {
+    gap: 4,
+    paddingVertical: 4,
+  },
+  strategyFooterNote: {
+    backgroundColor: colors.surfaceSubtle,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    padding: 16,
+    gap: 10,
+    marginTop: 8,
+  },
 });
