@@ -197,6 +197,7 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
       const emaCurr = emaValues[emaValues.length - 1];
       const emaPrev = emaValues[emaValues.length - 2];
       const rsiCurr = rsiValues[rsiValues.length - 1];
+      const rsiPrev = rsiValues[rsiValues.length - 2];
 
       const prevClose = historicalCloses[historicalCloses.length - 1];
       const prev2Close = historicalCloses[historicalCloses.length - 2];
@@ -208,11 +209,12 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
         prevClose !== undefined &&
         prev2Close !== undefined
       ) {
-        // Bullish transition: Price crossed above EMA20 and RSI >= threshold
-        const isBullishCross = prev2Close <= emaPrev && prevClose > emaCurr;
-        const isRsiConfirmed = rsiCurr >= rsiThreshold;
+        // Bullish transition: Price crossed above EMA20 or RSI broke above threshold while price is above EMA
+        const isEmaBullCross = prev2Close <= emaPrev && prevClose > emaCurr;
+        const isRsiBreakout = prevClose > emaCurr && rsiPrev !== undefined && rsiPrev < rsiThreshold && rsiCurr >= rsiThreshold;
+        const isBullishSignal = (isEmaBullCross || isRsiBreakout) && rsiCurr >= rsiThreshold;
 
-        if (isBullishCross && isRsiConfirmed) {
+        if (isBullishSignal) {
           // Model realistic ATM Call Option entry
           // Option premium ~ 0.55% of underlying spot price
           const estimatedPremium = Math.max(25, Number((curr.open * 0.0055).toFixed(2)));
@@ -319,18 +321,18 @@ export function generateHistoricalMarketCandles(
 
     for (let bar = 0; bar < totalBars; bar++) {
       const barTimestamp = new Date(sessionStartUtcMs + bar * timeframeMinutes * 60 * 1000).toISOString();
-      const volatility = underlying === 'BANKNIFTY' ? 18.0 : 8.5;
+      const volatility = underlying === 'BANKNIFTY' ? 42.0 : 18.0;
 
-      // Realistic market drift with sine wave momentum and micro-noise
-      const cyclicDrift = Math.sin((bar / totalBars) * Math.PI * 2) * (volatility * 0.6);
-      const randomNoise = (Math.random() - 0.48) * volatility;
+      // Realistic intraday market wave momentum (morning, mid-day, afternoon waves)
+      const cyclicDrift = Math.sin((bar / 18) * Math.PI * 2) * (volatility * 0.7);
+      const randomNoise = (Math.random() - 0.49) * volatility * 1.1;
       const delta = cyclicDrift + randomNoise;
 
       const open = Number(runningPrice.toFixed(2));
       runningPrice += delta;
       const close = Number(runningPrice.toFixed(2));
-      const high = Number((Math.max(open, close) + Math.random() * (volatility * 0.4)).toFixed(2));
-      const low = Number((Math.min(open, close) - Math.random() * (volatility * 0.4)).toFixed(2));
+      const high = Number((Math.max(open, close) + Math.random() * (volatility * 0.5)).toFixed(2));
+      const low = Number((Math.min(open, close) - Math.random() * (volatility * 0.5)).toFixed(2));
       const volume = Math.floor(15000 + Math.random() * 35000);
 
       candles.push({
