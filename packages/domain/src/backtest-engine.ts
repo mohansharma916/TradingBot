@@ -211,21 +211,25 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
       let exitPrice: number | null = null;
       let exitReason: string | null = null;
 
-      // Check exits in priority:
-      // 1. Trailing Stop Hit
+      // Exit priority (conservative intrabar ordering):
+      // Stop-loss is checked BEFORE target. If both stop and target could have been hit
+      // in the same candle, we assume the worst case (stop hit first). This avoids the
+      // optimistic bias of assuming best-case intrabar price chronology.
+      //
+      // 1. Trailing Stop Hit (highest priority when active)
       if (activeTrade.trailingActive && approxLowOption <= activeTrade.stopPrice) {
         exitPrice = activeTrade.stopPrice;
         exitReason = 'TRAILING_STOP_LOSS';
       }
-      // 2. Fixed Target Profit (if trailing not active or target reached)
+      // 2. Initial Stop Loss (check stop BEFORE target — conservative assumption)
+      else if (!activeTrade.trailingActive && approxLowOption <= activeTrade.stopPrice) {
+        exitPrice = activeTrade.stopPrice;
+        exitReason = 'STOP_LOSS';
+      }
+      // 3. Fixed Target Profit (only reached if stop was NOT hit first)
       else if (approxHighOption >= activeTrade.targetPrice) {
         exitPrice = activeTrade.targetPrice;
         exitReason = 'TARGET_PROFIT';
-      }
-      // 3. Initial Stop Loss Check
-      else if (approxLowOption <= activeTrade.stopPrice) {
-        exitPrice = activeTrade.stopPrice;
-        exitReason = 'STOP_LOSS';
       }
       // 4. Session Cutoff Check (15:10 IST)
       else if (currentTimeIst >= marketCutoff) {
@@ -308,7 +312,7 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
         // Model realistic ATM Option entry
         // Option premium ~ 0.55% of underlying spot price
         const estimatedPremium = Math.max(25, Number((curr.open * 0.0055).toFixed(2)));
-        const maxTradeCapital = Math.min(strategy.risk?.maxCapitalInr ?? 10000, runningCapital);
+        const maxTradeCapital = Math.min(strategy.risk?.maxCapitalInr ?? runningCapital, runningCapital);
 
         // Standard lot sizing (e.g. 25 units for NIFTY, 15 for BANKNIFTY)
         const costPerLot = estimatedPremium * lotSize;
@@ -344,7 +348,49 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
     }
   }
 
-  // Calculate final performance metrics
+  // ── Value any position still open at the end of the dataset ──────────────────────
+  // The old code silently discarded open trades, understating risk and overstating win rate.
+  // Now we close them at the last candle's close price with reason 'DATASET_END'.
+  if (activeTrade !== null) {
+    const lastCandle = sortedCandles[sortedCandles.length - 1]!;
+    const lastIso = toIso(lastCandle.timestamp);
+    const isCE = activeTrade.optionType === 'CE';
+    const spotDelta = isCE
+      ? lastCandle.close - activeTrade.spotAtEntry
+      : activeTrade.spotAtEntry - lastCandle.close;
+    const closeOptionPrice = Math.max(1, Number((activeTrade.entryPrice + spotDelta * 0.5).toFixed(2)));
+
+    const grossPnl = Number(((closeOptionPrice - activeTrade.entryPrice) * activeTrade.quantity).toFixed(2));
+    const chargesBreakdown = calculateOptionCharges({
+      buyPrice: activeTrade.entryPrice,
+      sellPrice: closeOptionPrice,
+      quantity: activeTrade.quantity,
+    });
+    const charges = Number(chargesBreakdown.totalRoundTripCharges.toFixed(2));
+    const netPnl = Number((grossPnl - charges).toFixed(2));
+    const durationMinutes = Math.max(1, Math.round((new Date(lastIso).getTime() - new Date(activeTrade.entryTime).getTime()) / 60000));
+
+    trades.push({
+      id: `bt_${trades.length + 1}`,
+      entryTime: activeTrade.entryTime,
+      exitTime: lastIso,
+      durationMinutes,
+      symbol: activeTrade.symbol,
+      side: 'BUY',
+      entryPrice: Number(activeTrade.entryPrice.toFixed(2)),
+      exitPrice: closeOptionPrice,
+      quantity: activeTrade.quantity,
+      grossPnl,
+      charges,
+      netPnl,
+      exitReason: 'DATASET_END',
+      initialStopPrice: activeTrade.initialStopPrice,
+      trailingStopPrice: activeTrade.trailingActive ? activeTrade.stopPrice : undefined,
+    });
+
+    runningCapital += netPnl;
+  }
+
   const totalTrades = trades.length;
   const winningTrades = trades.filter((t) => t.netPnl > 0).length;
   const losingTrades = trades.filter((t) => t.netPnl <= 0).length;

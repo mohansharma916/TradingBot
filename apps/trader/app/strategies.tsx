@@ -1651,6 +1651,8 @@ export default function StrategiesScreen() {
                                       ? colors.profitMuted
                                       : t.exitReason === 'STOP_LOSS'
                                       ? colors.lossMuted
+                                      : t.exitReason === 'DATASET_END'
+                                      ? 'rgba(99, 102, 241, 0.15)'
                                       : 'rgba(245, 158, 11, 0.15)',
                                   color:
                                     t.exitReason === 'TRAILING_STOP_LOSS'
@@ -1659,6 +1661,8 @@ export default function StrategiesScreen() {
                                       ? colors.profit
                                       : t.exitReason === 'STOP_LOSS'
                                       ? colors.loss
+                                      : t.exitReason === 'DATASET_END'
+                                      ? '#818cf8'
                                       : colors.warning,
                                 }}
                               >
@@ -1666,6 +1670,8 @@ export default function StrategiesScreen() {
                                   ? '✨ TRAILING SL'
                                   : t.exitReason === 'TARGET_PROFIT'
                                   ? '🎯 TARGET'
+                                  : t.exitReason === 'DATASET_END'
+                                  ? '📊 DATA END'
                                   : t.exitReason.replace(/_/g, ' ')}
                               </span>
                             </td>

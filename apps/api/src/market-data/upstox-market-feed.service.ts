@@ -85,6 +85,9 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
   }
 
   private seedInitialQuotes() {
+    // ⚠️  These are PLACEHOLDER values used before a live broker token is available.
+    // They are marked isStale: true so the UI and any downstream logic treats them as
+    // unavailable data — NOT as live market prices.
     const now = new Date().toISOString();
     const defaults = [
       {
@@ -99,7 +102,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
         netChange: 288.65,
         netChangePct: 1.3,
         timestamp: now,
-        isStale: false,
+        isStale: true,  // PLACEHOLDER — not real market data
       },
       {
         instrumentKey: 'NSE_INDEX|Nifty Bank',
@@ -113,7 +116,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
         netChange: 741.6,
         netChangePct: 1.36,
         timestamp: now,
-        isStale: false,
+        isStale: true,  // PLACEHOLDER — not real market data
       },
       {
         instrumentKey: 'NSE_INDEX|Nifty Fin Service',
@@ -127,7 +130,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
         netChange: 62.1,
         netChangePct: 0.26,
         timestamp: now,
-        isStale: false,
+        isStale: true,  // PLACEHOLDER — not real market data
       },
       {
         instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
@@ -141,7 +144,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
         netChange: 14.5,
         netChangePct: 13.4,
         timestamp: now,
-        isStale: false,
+        isStale: true,  // PLACEHOLDER — not real market data
       },
       {
         instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_PE',
@@ -155,7 +158,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
         netChange: -12.4,
         netChangePct: -11.2,
         timestamp: now,
-        isStale: false,
+        isStale: true,  // PLACEHOLDER — not real market data
       },
     ];
 
@@ -165,6 +168,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+
   public async initiateConnection(): Promise<void> {
     const tokenRecord = this.tokenStorage?.getToken();
     const token =
@@ -172,9 +176,10 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
       (this.envService.config.UPSTOX_API_KEY !== 'mock_key' ? this.envService.config.UPSTOX_API_KEY : null);
 
     if (!token) {
-      // In simulation mode without live credentials, stay connected virtually
-      this.status = FeedStatus.CONNECTED;
-      console.log('[MarketFeedService] Simulation mode active. Virtual real-time quotes active.');
+      // No broker token — feed is disconnected. Do NOT claim CONNECTED status;
+      // doing so would mislead the UI and downstream checks into thinking live data is available.
+      this.status = FeedStatus.DISCONNECTED;
+      console.warn('[MarketFeedService] No broker token. Feed is DISCONNECTED. Seeded placeholder quotes are marked stale.');
       return;
     }
 

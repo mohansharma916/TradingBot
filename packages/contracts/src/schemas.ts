@@ -33,7 +33,12 @@ export const EnvSchema = z.object({
   WORKER_PORT: z.coerce.number().default(4001),
   CORS_ORIGIN: z.string().default('http://localhost:8081,http://localhost:3000'),
   JWT_SECRET: z.string().min(16).default('super_secret_dev_key_change_in_production_min_32_chars'),
-  MFA_ENABLED: z.coerce.boolean().default(false),
+  // Safe boolean parser: only 'true'/'1'/true → true. Prevents the Zod z.coerce.boolean() trap
+  // where the STRING "false" evaluates to truthy and inadvertently enables live execution/MFA.
+  MFA_ENABLED: z.preprocess(
+    (v) => v === 'true' || v === '1' || v === true,
+    z.boolean()
+  ).default(false),
   DATABASE_URL: z.string().url().default('postgresql://postgres:postgres@localhost:5432/trading_bot'),
   SYSTEM_MODE: z.nativeEnum(TradeMode).default(TradeMode.PAPER),
   DEFAULT_RISK_STATE: z.nativeEnum(RiskState).default(RiskState.DISARMED),
@@ -48,7 +53,13 @@ export const EnvSchema = z.object({
   UPSTOX_BASE_URL: z.string().url().default('https://api.upstox.com/v3'),
   UPSTOX_HFT_URL: z.string().url().default('https://api-hft.upstox.com/v3'),
   TOKEN_ENCRYPTION_KEY: z.string().min(16).default('32_byte_aes_gcm_token_encryption_key_default'),
-  LIVE_EXECUTION_ENABLED: z.coerce.boolean().default(false),
+  // Safe boolean parser: only 'true'/'1'/true → true. CRITICAL: prevents "false" string from
+  // enabling live execution. A misconfigured .env with LIVE_EXECUTION_ENABLED=false (string)
+  // previously resolved to true and could open the live-trading gate unintentionally.
+  LIVE_EXECUTION_ENABLED: z.preprocess(
+    (v) => v === 'true' || v === '1' || v === true,
+    z.boolean()
+  ).default(false),
   DAILY_BOT_STORAGE_PATH: z.string().min(1).optional(),
 });
 

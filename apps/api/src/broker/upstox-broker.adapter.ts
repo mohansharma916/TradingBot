@@ -91,13 +91,15 @@ export class UpstoxBrokerAdapter implements BrokerPort {
   async getFunds(): Promise<FundsSnapshot> {
     await this.waitForRateLimitToken();
 
-    // If in sandbox mode or no live token, return calibrated test funds
+    // No live token — return explicit zero balance (not a fabricated ₹10,000 sandbox value).
+    // Callers must treat UNAVAILABLE as "cannot trade" not "has funds".
     if (!this.tokenStorage.hasValidToken()) {
+      this.logger.warn('[UpstoxBrokerAdapter] getFunds: no valid broker token — returning zero balance (UNAVAILABLE).');
       return {
         currency: 'INR',
-        availableCash: 10000.0,
+        availableCash: 0.0,
         usedMargin: 0.0,
-        totalCollateral: 10000.0,
+        totalCollateral: 0.0,
         payinAmount: 0.0,
         spanMargin: 0.0,
         exposureMargin: 0.0,
@@ -115,26 +117,22 @@ export class UpstoxBrokerAdapter implements BrokerPort {
 
       return {
         currency: 'INR',
-        availableCash: equity.available_margin || 10000.0,
-        usedMargin: equity.used_margin || 0.0,
-        totalCollateral: equity.payin_amount || 10000.0,
-        payinAmount: equity.payin_amount || 0.0,
-        spanMargin: equity.span_margin || 0.0,
-        exposureMargin: equity.exposure_margin || 0.0,
+        // Use ?? (not ||) so a genuine zero balance is preserved, not replaced with ₹10,000
+        availableCash: equity.available_margin ?? 0.0,
+        usedMargin: equity.used_margin ?? 0.0,
+        totalCollateral: equity.payin_amount ?? 0.0,
+        payinAmount: equity.payin_amount ?? 0.0,
+        spanMargin: equity.span_margin ?? 0.0,
+        exposureMargin: equity.exposure_margin ?? 0.0,
       };
     } catch (err: any) {
-      this.logger.warn(`[UpstoxBrokerAdapter] Fallback to cached funds: ${err.message}`);
-      return {
-        currency: 'INR',
-        availableCash: 10000.0,
-        usedMargin: 0.0,
-        totalCollateral: 10000.0,
-        payinAmount: 0.0,
-        spanMargin: 0.0,
-        exposureMargin: 0.0,
-      };
+      // Do NOT fabricate a balance. Re-throw so callers know funds are unknown.
+      // Risk manager and UI must block trading when funds are unknown/unavailable.
+      this.logger.error(`[UpstoxBrokerAdapter] getFunds failed — cannot confirm live balance: ${err.message}`);
+      throw new Error(`Broker funds unavailable: ${err.message}`);
     }
   }
+
 
   async getMargin(_instrumentKey: string, quantity: number, price = 100): Promise<MarginEstimate> {
     const required = quantity * price;

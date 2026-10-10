@@ -22,23 +22,40 @@ export function generateStrikesForSpot(
   return strikes;
 }
 
-export function getUpcomingThursdays(baseDate = new Date(), count = 5): string[] {
+/**
+ * Returns the next N upcoming expiry dates for a given weekday.
+ * NSE expiry schedule (current as of 2026):
+ *   - NIFTY weekly:    Tuesday  (day=2)
+ *   - FINNIFTY weekly: Tuesday  (day=2)
+ *   - BANKNIFTY weekly: Wednesday (day=3)
+ *   - Monthly expiries: last Tuesday/Wednesday of the month
+ * Source: https://www.nseindia.com/static/products-services/equity-derivatives-nifty50
+ */
+export function getUpcomingExpiries(baseDate = new Date(), count = 5, weekday = 2): string[] {
   const expiries: string[] = [];
   const current = new Date(baseDate);
   current.setHours(0, 0, 0, 0);
 
   const day = current.getDay();
-  const daysUntilThursday = (4 - day + 7) % 7;
-  const firstThursday = new Date(current);
-  firstThursday.setDate(current.getDate() + (daysUntilThursday === 0 ? 0 : daysUntilThursday));
+  // Weekday: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
+  const daysUntilTarget = (weekday - day + 7) % 7;
+  const firstExpiry = new Date(current);
+  // If today is already the target weekday, include it; otherwise advance to the next one
+  firstExpiry.setDate(current.getDate() + (daysUntilTarget === 0 ? 0 : daysUntilTarget));
 
   for (let i = 0; i < count; i++) {
-    const d = new Date(firstThursday);
-    d.setDate(firstThursday.getDate() + i * 7);
+    const d = new Date(firstExpiry);
+    d.setDate(firstExpiry.getDate() + i * 7);
     expiries.push(d.toISOString().split('T')[0]!);
   }
   return expiries;
 }
+
+/** @deprecated Use getUpcomingExpiries(date, count, 2) for NIFTY/FINNIFTY or (date, count, 3) for BANKNIFTY */
+export function getUpcomingThursdays(baseDate = new Date(), count = 5): string[] {
+  return getUpcomingExpiries(baseDate, count, 4); // kept for backward compat with old tests
+}
+
 
 @Injectable()
 export class InstrumentCatalogService implements OnModuleInit {
@@ -50,10 +67,11 @@ export class InstrumentCatalogService implements OnModuleInit {
   }
 
   public bootstrapCatalog(): void {
-    // Dynamically calculate upcoming Thursday expiries for NSE derivatives
-    const dynamicExpiries = getUpcomingThursdays(new Date(), 4);
-    // Include 2026-10-15 if not already present for backwards-compatibility with existing tests
-    const expiries = Array.from(new Set(['2026-10-15', ...dynamicExpiries])).sort();
+    // NSE expiry schedule (current 2026):
+    //   NIFTY / FINNIFTY → Tuesday weekly expiry (weekday=2)
+    //   BANKNIFTY         → Wednesday weekly expiry (weekday=3)
+    const niftyExpiries = Array.from(new Set(['2026-10-15', ...getUpcomingExpiries(new Date(), 4, 2)])).sort(); // Tuesdays + test fixture
+    const bankniftyExpiries = getUpcomingExpiries(new Date(), 4, 3);   // Wednesdays
 
     // 1. Index Spot Instruments
     this.addInstrument({
@@ -86,15 +104,15 @@ export class InstrumentCatalogService implements OnModuleInit {
       tickSize: 0.05,
     });
 
-    // 2. Algorithmically generate F&O Option Contracts based on exchange step rules (Step 50 for NIFTY, Step 100 for BANKNIFTY)
+    // 2. Algorithmically generate F&O Option Contracts based on exchange step rules (Step 50 for NIFTY/FINNIFTY, Step 100 for BANKNIFTY)
     // No hardcoded strike numbers: dynamically spans +/- 20 steps around current market spot
-    this.registerStrikesForUnderlying('NIFTY', 22520.45, expiries, 20);
-    this.registerStrikesForUnderlying('NIFTY', 25100.00, expiries, 15);
-    this.registerStrikesForUnderlying('BANKNIFTY', 55256.65, expiries, 20);
-    this.registerStrikesForUnderlying('BANKNIFTY', 52400.00, expiries, 15);
-    this.registerStrikesForUnderlying('FINNIFTY', 23900.00, expiries, 15);
+    this.registerStrikesForUnderlying('NIFTY',     22520.45, niftyExpiries,     20);
+    this.registerStrikesForUnderlying('NIFTY',     25100.00, niftyExpiries,     15);
+    this.registerStrikesForUnderlying('BANKNIFTY', 55256.65, bankniftyExpiries, 20);
+    this.registerStrikesForUnderlying('BANKNIFTY', 52400.00, bankniftyExpiries, 15);
+    this.registerStrikesForUnderlying('FINNIFTY',  23900.00, niftyExpiries,     15);
 
-    console.log(`[InstrumentCatalog] Dynamically indexed ${this.instruments.size} F&O instruments and spot indexes.`);
+    console.log(`[InstrumentCatalog] Dynamically indexed ${this.instruments.size} F&O instruments and spot indexes (NIFTY: Tue expiry, BANKNIFTY: Wed expiry).`);
   }
 
   /**

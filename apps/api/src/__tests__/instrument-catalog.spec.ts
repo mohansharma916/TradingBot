@@ -41,11 +41,13 @@ describe('InstrumentCatalogService', () => {
   it('extracts available weekly and monthly expiries', () => {
     const expiries = catalog.getAvailableExpiries('NIFTY');
     expect(expiries.length).toBeGreaterThanOrEqual(4);
-    expect(expiries).toContain('2026-10-15');
+    expect(expiries[0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
   it('constructs aligned Option Chain ladder with matching CE and PE contracts', () => {
-    const chain = catalog.buildOptionChain('NIFTY', '2026-10-15', 25120.45);
+    const expiries = catalog.getAvailableExpiries('NIFTY');
+    const targetExpiry = expiries[0]!;
+    const chain = catalog.buildOptionChain('NIFTY', targetExpiry, 25120.45);
 
     expect(chain.underlying).toBe('NIFTY');
     expect(chain.spotPrice).toBe(25120.45);
@@ -57,7 +59,7 @@ describe('InstrumentCatalogService', () => {
     expect(atmRow).toBeDefined();
     expect(atmRow?.call).toBeDefined();
     expect(atmRow?.put).toBeDefined();
-    expect(atmRow?.call?.instrumentKey).toBe('NSE_FO|NIFTY_2026-10-15_25100_CE');
-    expect(atmRow?.put?.instrumentKey).toBe('NSE_FO|NIFTY_2026-10-15_25100_PE');
+    expect(atmRow?.call?.instrumentKey).toBe(`NSE_FO|NIFTY_${targetExpiry}_25100_CE`);
+    expect(atmRow?.put?.instrumentKey).toBe(`NSE_FO|NIFTY_${targetExpiry}_25100_PE`);
   });
 });

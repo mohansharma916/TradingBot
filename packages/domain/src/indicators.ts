@@ -78,6 +78,14 @@ export function calculateRSI(closes: number[], period = 14): number[] {
 
 /**
  * Volume Weighted Average Price (VWAP)
+ *
+ * VWAP is a SESSION indicator — it resets at the start of each trading day.
+ * The old implementation accumulated across the entire candle array (bug: produced a
+ * meaningless multi-day average). This version resets at each calendar-date boundary
+ * using the candle timestamp, matching how NSE/BSE session VWAP is computed.
+ *
+ * Timestamps are compared by UTC date (market data is stored in UTC; intraday 09:15–15:30
+ * IST stays within the same UTC date, so UTC-day boundary is sufficient).
  */
 export function calculateVWAP(candles: Candle[]): number[] {
   if (candles.length === 0) return [];
@@ -85,8 +93,19 @@ export function calculateVWAP(candles: Candle[]): number[] {
   const vwapValues: number[] = [];
   let cumulativeTypicalVolume = 0;
   let cumulativeVolume = 0;
+  let lastDate = ''; // tracks YYYY-MM-DD of the last processed candle
 
   for (const candle of candles) {
+    // Determine the calendar date of this candle (UTC date is sufficient for IST intraday)
+    const candleDate = new Date(candle.timestamp).toISOString().slice(0, 10);
+
+    // New trading day → reset session accumulators
+    if (candleDate !== lastDate) {
+      cumulativeTypicalVolume = 0;
+      cumulativeVolume = 0;
+      lastDate = candleDate;
+    }
+
     const typicalPrice = (candle.high + candle.low + candle.close) / 3;
     cumulativeTypicalVolume += typicalPrice * candle.volume;
     cumulativeVolume += candle.volume;
@@ -97,6 +116,8 @@ export function calculateVWAP(candles: Candle[]): number[] {
 
   return vwapValues;
 }
+
+
 
 export interface WarmupValidation {
   isWarmedUp: boolean;

@@ -197,7 +197,7 @@ describe('Strategy Lab: AST Evaluator & Templates', () => {
       } as any,
       candles,
       request: {
-        initialCapital: 10000,
+        initialCapital: 25000,
         useTrailingStop: true,
         trailingActivationProfitInr: 100,
         trailingStepInr: 30,
