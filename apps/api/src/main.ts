@@ -7,6 +7,7 @@ import { EnvService } from './config/env.service';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const envService = app.get(EnvService);
+  app.enableShutdownHooks();
 
   app.setGlobalPrefix('api/v1');
   app.useWebSocketAdapter(new WsAdapter(app));
@@ -18,7 +19,7 @@ async function bootstrap() {
   });
 
   const port = envService.config.PORT;
-  await app.listen(port);
+  await app.listen(port, envService.config.API_HOST);
   console.log(`[Trading Platform API] listening on http://localhost:${port}/api/v1`);
   console.log(`[Trading Platform WebSocket] listening on ws://localhost:${port}/ws`);
   console.log(`[Safety Invariant] Operating Mode: ${envService.config.SYSTEM_MODE}`);

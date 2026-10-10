@@ -14,7 +14,7 @@ describe('Historical Backtest Engine', () => {
     tradeMode: TradeMode.PAPER,
     market: 'NSE_FO',
     underlying: 'NIFTY',
-    allowedInstruments: [],
+    allowedInstruments: ['LONG_CALL'] as any,
     timeframe: '5m',
     session: {
       start: '09:25',
@@ -97,7 +97,7 @@ describe('Historical Backtest Engine', () => {
     for (const trade of result.trades) {
       expect(trade.charges).toBeGreaterThan(0); // Statutory fees must be deducted
       expect(trade.quantity).toBeGreaterThan(0);
-      expect(['TARGET_PROFIT', 'STOP_LOSS', 'TIME_CUTOFF', 'TRAILING_STOP_LOSS']).toContain(trade.exitReason);
+      expect(['TARGET_PROFIT', 'STOP_LOSS', 'TIME_CUTOFF', 'TRAILING_STOP_LOSS', 'DATASET_END', 'SESSION_DATA_END']).toContain(trade.exitReason);
     }
   });
 

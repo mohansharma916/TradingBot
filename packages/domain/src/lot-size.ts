@@ -3,21 +3,18 @@
  *
  * ⚠️  IMPORTANT: Lot sizes are revised by NSE periodically. These must be kept current.
  *
- * Current values (effective Nov 2024 revision):
- *   - NIFTY:       25  → 75   (changed Nov 2024)
- *   - BANKNIFTY:   15  → 30   (changed Nov 2024)
- *   - FINNIFTY:    25  → 65   (changed Nov 2024)
- *   - MIDCPNIFTY:  50  → 120  (changed Nov 2024)
+ * Index reference sizes as of October 2026. Actual contract metadata is authoritative,
+ * including contracts from earlier revision periods.
  *
  * Source: https://support.zerodha.com/category/trading-and-markets/trading-faqs/f-otrading/articles/lot-size-for-index-derivatives
  * Verify against broker instrument master before trading.
  */
 
 export const STANDARD_LOT_SIZES: Record<string, number> = {
-  NIFTY: 25,
-  BANKNIFTY: 15,
-  FINNIFTY: 25,
-  MIDCPNIFTY: 50,
+  NIFTY: 65,
+  BANKNIFTY: 30,
+  FINNIFTY: 60,
+  MIDCPNIFTY: 120,
 };
 
 export function getStandardLotSize(symbolOrUnderlying: string): number {
@@ -29,10 +26,10 @@ export function getStandardLotSize(symbolOrUnderlying: string): number {
       return lot;
     }
   }
-  return 25; // Safe default for Indian indices
+  return 0; // Unknown contract: callers must obtain authoritative instrument metadata.
 }
 
 export function isValidLotQuantity(quantity: number, lotSize: number): boolean {
-  if (quantity <= 0 || lotSize <= 0) return false;
+  if (!Number.isInteger(quantity) || !Number.isInteger(lotSize) || quantity <= 0 || lotSize <= 0) return false;
   return quantity % lotSize === 0;
 }

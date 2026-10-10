@@ -4,17 +4,19 @@ import { StatCard, Badge } from '@trading-bot/ui';
 import { RiskStatus, DailyReport, Position, DiagnosticsReport } from '@trading-bot/contracts';
 import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
+import { useWorkstation } from '../src/hooks/useWorkstation';
 import { tradingDateInIst } from '../src/features/daily-bot/config';
 
 export default function DashboardScreen() {
+  const { state: workstation } = useWorkstation();
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
   const [lastSyncTime, setLastSyncTime] = useState<string>('');
 
   const [risk, setRisk] = useState<RiskStatus>({
     mode: 'PAPER' as any,
     state: 'DISARMED' as any,
-    totalCapital: 10000,
-    availableCash: 10000,
+    totalCapital: 0,
+    availableCash: 0,
     reservedCapital: 0,
     maxAllInTradeLoss: 500,
     dailyLossCap: 1500,
@@ -26,7 +28,7 @@ export default function DashboardScreen() {
     dailyTargetProfit: 4000,
     armedUntil: null,
     killSwitchActive: false,
-    egressIpVerified: true,
+    egressIpVerified: false,
   });
 
   const [report, setReport] = useState<DailyReport>({
@@ -50,10 +52,10 @@ export default function DashboardScreen() {
   const fetchLiveDashboard = useCallback(async () => {
     try {
       const [riskData, reportData, posData, diagData] = await Promise.all([
-        apiClient.getRiskStatus().catch(() => null),
-        apiClient.getDailyReport().catch(() => null),
-        apiClient.getPositions().catch(() => []),
-        apiClient.getDiagnostics().catch(() => null),
+        apiClient.getRiskStatus(),
+        apiClient.getDailyReport(),
+        apiClient.getPositions(),
+        apiClient.getDiagnostics(),
       ]);
 
       if (riskData) {
@@ -70,17 +72,20 @@ export default function DashboardScreen() {
   }, []);
 
   useEffect(() => {
-    fetchLiveDashboard();
+    setIsLiveConnected(false);
+    void fetchLiveDashboard();
     if (!isMarketOpenForTrading()) {
       return;
     }
     const interval = setInterval(fetchLiveDashboard, 4000);
     return () => clearInterval(interval);
-  }, [fetchLiveDashboard]);
+  }, [fetchLiveDashboard, workstation.mode]);
 
   const netPnl = report?.realizedNetPnl ?? risk?.realizedNetDailyPnl ?? 0;
-  const targetProfit = risk?.dailyTargetProfit ?? 4000;
-  const progressPct = Math.max(0, Math.min(100, (netPnl / targetProfit) * 100));
+  const targetProfit = risk?.dailyTargetProfit ?? 0;
+  const progressPct = targetProfit > 0 ? Math.max(0, Math.min(100, (netPnl / targetProfit) * 100)) : 0;
+
+  if (!isLiveConnected) return <div role="alert" style={{ color: colors.textSecondary }}>Dashboard data unavailable. Waiting for confirmed account and report responses.</div>;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xl, maxWidth: 1200, margin: '0 auto', width: '100%' }}>
@@ -91,18 +96,18 @@ export default function DashboardScreen() {
             Workstation Dashboard
           </h1>
           <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
-            Real-time Indian F&O Portfolio, Risk Limits, and Agent Intelligence.
+            Confirmed {workstation.mode === 'PAPER' ? 'virtual testing' : 'live account'} portfolio and risk limits.
             {lastSyncTime && <span style={{ marginLeft: 8, color: colors.cyan }}>• Synced {lastSyncTime}</span>}
           </p>
         </div>
 
         <div style={{ display: 'flex', gap: spacing.sm, alignItems: 'center', flexWrap: 'wrap' }}>
           <Badge
-            label={isLiveConnected ? '🟢 LIVE API SYNCED' : '⚠️ OFFLINE / PAPER SIMULATION'}
+            label={isLiveConnected ? 'API CONNECTED' : 'ACCOUNT DATA UNAVAILABLE'}
             variant={isLiveConnected ? 'success' : 'purple'}
           />
           <Badge
-            label={diagnostics?.brokerConnection?.authenticated ? 'UPSTOX CONNECTED' : 'UPSTOX READY (V3)'}
+            label={diagnostics?.brokerConnection?.authenticated ? 'UPSTOX AUTHENTICATED' : 'UPSTOX NOT AUTHENTICATED'}
             variant={diagnostics?.brokerConnection?.authenticated ? 'success' : 'primary'}
           />
           <Badge
@@ -116,13 +121,13 @@ export default function DashboardScreen() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: spacing.md }}>
         <StatCard
           label="Total Capital"
-          value={`₹${(risk?.totalCapital ?? 10000).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-          subValue="Account-wide hard cap"
+          value={`₹${(risk?.totalCapital ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          subValue={workstation.mode === 'PAPER' ? 'Virtual testing capital' : 'Verified broker capital'}
         />
         <StatCard
           label="Available Cash"
-          value={`₹${(risk?.availableCash ?? 10000).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-          subValue={`₹${((risk?.totalCapital ?? 10000) - (risk?.availableCash ?? 10000)).toFixed(2)} in margin & buffer`}
+          value={`₹${(risk?.availableCash ?? 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+          subValue={`₹${(risk?.reservedCapital ?? 0).toFixed(2)} reserved for trading`}
         />
         <StatCard
           label="Realized Net P&L"
@@ -152,7 +157,7 @@ export default function DashboardScreen() {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.semibold, color: colors.cyan }}>
-            🎯 Informational Daily Goal: ₹{targetProfit.toLocaleString('en-IN', { minimumFractionDigits: 2 })} (40% Milestone)
+            🎯 Informational Daily Goal: ₹{targetProfit.toLocaleString('en-IN', { minimumFractionDigits: 2 })}
           </div>
           <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
             Progress: ₹{netPnl.toFixed(2)} / ₹{targetProfit.toFixed(2)} ({progressPct.toFixed(1)}%)
@@ -189,7 +194,7 @@ export default function DashboardScreen() {
 
           {positions.length === 0 ? (
             <div style={{ padding: spacing.md, textAlign: 'center', color: colors.textMuted, fontSize: typography.fontSize.sm }}>
-              Zero open positions. Capital fully preserved in cash (₹{(risk?.availableCash ?? 10000).toFixed(2)}).
+              No recorded open positions. Available cash: ₹{(risk?.availableCash ?? 0).toFixed(2)}.
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.md }}>
@@ -239,9 +244,9 @@ export default function DashboardScreen() {
           }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
-            <h3 style={{ margin: 0, fontSize: typography.fontSize.md }}>Specialized AI Agents</h3>
+            <h3 style={{ margin: 0, fontSize: typography.fontSize.md }}>Recorded System State</h3>
             <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
-              Shared ₹{(risk?.totalCapital ?? 10000).toLocaleString('en-IN')} Budget
+              Account capital: ₹{(risk?.totalCapital ?? 0).toLocaleString('en-IN')}
             </span>
           </div>
 
@@ -249,19 +254,19 @@ export default function DashboardScreen() {
             {[
               {
                 name: 'Market Scanner',
-                status: diagnostics?.marketFeed?.connected ? `Feed active (${diagnostics.marketFeed.latencyMs}ms latency)` : 'Scanning liquid NIFTY strikes',
-                state: diagnostics?.marketFeed?.connected ? 'STREAMING' : 'ACTIVE',
+                status: diagnostics?.marketFeed?.connected ? `Feed connected (${diagnostics.marketFeed.latencyMs}ms latency)` : 'Market feed unavailable',
+                state: diagnostics?.marketFeed?.connected ? 'CONNECTED' : 'UNAVAILABLE',
               },
-              { name: 'Strategy Analyst', status: '5m EMA & RSI confirmation filter', state: 'ACTIVE' },
+              { name: 'Strategy Rules', status: 'Defined in the registered strategy configuration', state: 'CONFIGURATION' },
               {
                 name: 'Risk Reviewer',
                 status: risk?.killSwitchActive ? 'Kill Switch Tripped - Engine Frozen' : `Validating all-in max ₹${risk?.maxAllInTradeLoss ?? 500} loss`,
-                state: risk?.state || 'ARMED',
+                state: risk?.state || 'UNAVAILABLE',
               },
               {
                 name: 'Position Monitor',
-                status: positions.length > 0 ? `Monitoring ${positions.length} position with GTT exits` : 'Awaiting entry fills',
-                state: positions.length > 0 ? 'MONITORING' : 'IDLE',
+                status: positions.length > 0 ? `${positions.length} recorded positions; check Orders for protection status` : 'No recorded positions',
+                state: positions.length > 0 ? 'EXPOSURE' : 'NO EXPOSURE',
               },
             ].map((agent) => (
               <div

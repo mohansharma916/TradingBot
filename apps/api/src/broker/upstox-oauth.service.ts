@@ -174,15 +174,16 @@ export class UpstoxOAuthService {
     const cfg = this.envService.config;
 
     // Validate egress IP against registered IP
-    const currentEgressIp = cfg.UPSTOX_EGRESS_IP; // In production this would query http://ifconfig.me/ip
-    const ipMatches = currentEgressIp === cfg.UPSTOX_EGRESS_IP;
+    const currentEgressIp = 'UNVERIFIED';
+    const token = this.tokenStorage.hasValidToken() ? this.tokenStorage.getToken()?.accessToken : undefined;
+    const genuine = typeof token === 'string' && !!token && !/^(mock_|test_|upstox_sand_|upstox_ref_)/i.test(token);
 
     return {
-      isConnected: meta.exists && !meta.isExpired,
+      isConnected: meta.exists && !meta.isExpired && genuine,
       isExpired: meta.isExpired,
       tokenExpiresAt: meta.expiresAt,
       secondsRemaining: meta.secondsRemaining,
-      egressIpVerified: ipMatches,
+      egressIpVerified: false,
       registeredEgressIp: cfg.UPSTOX_EGRESS_IP,
       currentEgressIp,
       rateLimitRemaining: 25,

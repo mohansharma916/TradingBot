@@ -16,6 +16,7 @@ interface OptionStrikeRow {
     openInterest: number;
     netChangePct: number;
     isStale: boolean;
+    provenance?: string;
   };
   put?: {
     instrumentKey: string;
@@ -27,21 +28,25 @@ interface OptionStrikeRow {
     openInterest: number;
     netChangePct: number;
     isStale: boolean;
+    provenance?: string;
   };
 }
 
 export default function MarketsScreen() {
   const [selectedUnderlying, setSelectedUnderlying] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
-  const [selectedExpiry, setSelectedExpiry] = useState<string>('2026-10-15');
+  const [selectedExpiry, setSelectedExpiry] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [feedLatencyMs, setFeedLatencyMs] = useState(16);
-  const [isFeedStale, setIsFeedStale] = useState(false);
+  const [feedLatencyMs, setFeedLatencyMs] = useState<number | null>(null);
+  const [isFeedStale, setIsFeedStale] = useState(true);
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
   const [isMarketOpen, setIsMarketOpen] = useState<boolean>(() => isMarketOpenForTrading());
   const [snapshotTrigger, setSnapshotTrigger] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
+  const [dataSource, setDataSource] = useState('UNAVAILABLE');
+  const [liveLotSize, setLiveLotSize] = useState(0);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [liveOptionRows, setLiveOptionRows] = useState<OptionStrikeRow[] | null>(null);
   const [liveSpotPrice, setLiveSpotPrice] = useState<number | null>(null);
   const [liveExpiries, setLiveExpiries] = useState<string[] | null>(null);
@@ -58,18 +63,19 @@ export default function MarketsScreen() {
       try {
         setIsRefreshing(true);
         const [chain, diag, watchlist] = await Promise.all([
-          apiClient.getOptionChain(selectedUnderlying, selectedExpiry).catch(() => null),
-          apiClient.getDiagnostics().catch(() => null),
-          apiClient.getWatchlist().catch(() => []),
+          apiClient.getOptionChain(selectedUnderlying, selectedExpiry),
+          apiClient.getFeedHealth(),
+          apiClient.getWatchlist(),
         ]);
         if (isMounted) {
-          if (chain && chain.strikes?.length > 0) {
+          if (chain) {
             setLiveOptionRows(chain.strikes as any);
             setLiveSpotPrice(chain.spotPrice);
-            if (chain.availableExpiries?.length > 0) {
-              setLiveExpiries(chain.availableExpiries);
-            }
+            setLiveExpiries(chain.availableExpiries || []);
             setIsLiveConnected(true);
+            setLiveLotSize(chain.lotSize);
+            setConnectionError(null);
+            if (!selectedExpiry && chain.expiryDate) setSelectedExpiry(chain.expiryDate);
           }
           if (watchlist && Array.isArray(watchlist)) {
             const map: Record<string, any> = {};
@@ -78,13 +84,11 @@ export default function MarketsScreen() {
             }
             setWatchlistQuotes(map);
           }
-          if (diag?.marketFeed?.latencyMs) {
-            setFeedLatencyMs(diag.marketFeed.latencyMs);
-          }
+          setDataSource(diag.provenance || 'UNAVAILABLE');
+          setFeedLatencyMs(diag.lastTickReceivedAt ? diag.feedLatencyMs : null);
+          setIsFeedStale(diag.provenance !== 'LIVE' || diag.staleCount > 0);
         }
-      } catch {
-        // offline fallback
-      } finally {
+      } catch (failure) { if (isMounted) { setIsLiveConnected(false); setDataSource('UNAVAILABLE'); setConnectionError(failure instanceof Error ? failure.message : 'Market data unavailable.'); } } finally {
         if (isMounted) setIsRefreshing(false);
       }
     };
@@ -120,7 +124,7 @@ export default function MarketsScreen() {
           setSearchResults(res);
         }
       })
-      .catch(() => {});
+      .catch((failure) => { if (isMounted) { setSearchResults([]); setConnectionError(failure instanceof Error ? failure.message : 'Instrument search unavailable.'); } });
     return () => {
       isMounted = false;
     };
@@ -129,9 +133,9 @@ export default function MarketsScreen() {
   const niftyQuote = watchlistQuotes['NSE_INDEX|Nifty 50'];
   const bankNiftyQuote = watchlistQuotes['NSE_INDEX|Nifty Bank'];
 
-  const expiries = liveExpiries || ['2026-10-15', '2026-10-22', '2026-10-29', '2026-11-05'];
+  const expiries = liveExpiries || [];
   const spotPrice = liveSpotPrice ?? (selectedUnderlying === 'NIFTY' ? niftyQuote?.lastPrice : bankNiftyQuote?.lastPrice) ?? 0;
-  const lotSize = selectedUnderlying === 'NIFTY' ? 25 : 15;
+  const lotSize = liveLotSize;
   const atmStrike = spotPrice > 0 ? Math.round(spotPrice / (selectedUnderlying === 'NIFTY' ? 50 : 100)) * (selectedUnderlying === 'NIFTY' ? 50 : 100) : 0;
 
   const effectiveOptionRows: OptionStrikeRow[] = liveOptionRows || [];
@@ -146,7 +150,7 @@ export default function MarketsScreen() {
               Markets, Catalog & Option Chain
             </h1>
             <Badge
-              label={isLiveConnected ? '🟢 LIVE API' : '⚠️ OFFLINE / PAPER'}
+              label={isLiveConnected ? `DATA: ${dataSource}` : 'DATA UNAVAILABLE'}
               variant={isLiveConnected ? 'success' : 'purple'}
               size="sm"
             />
@@ -200,24 +204,10 @@ export default function MarketsScreen() {
           >
             <span>🔍 Search F&O Contracts</span>
           </button>
-
-          <button
-            onClick={() => setIsFeedStale((prev) => !prev)}
-            style={{
-              padding: `${spacing.xs}px ${spacing.sm}px`,
-              borderRadius: borderRadius.md,
-              backgroundColor: isFeedStale ? colors.warningMuted : colors.surfaceSubtle,
-              color: isFeedStale ? colors.warning : colors.textMuted,
-              border: `1px solid ${isFeedStale ? colors.warningBorder : colors.border}`,
-              fontSize: typography.fontSize.xs,
-              cursor: 'pointer',
-            }}
-          >
-            {isFeedStale ? '⚠️ Test: Stale Feed Active' : 'Test Stale Feed'}
-          </button>
         </div>
       </div>
 
+      {connectionError && <div role="alert" style={{ color: colors.loss }}>{connectionError}</div>}
       {/* Market Closed Session Status Notice */}
       {!isMarketOpen && (
         <div
@@ -236,7 +226,7 @@ export default function MarketsScreen() {
           }}
         >
           <span>
-            🌙 <strong>Market Closed</strong>: NSE trading hours are Mon–Fri 09:15–15:30 IST. API market data polling is paused to eliminate redundant bandwidth usage. Showing official exchange closing quotes.
+            🌙 <strong>Market Closed</strong>: NSE trading hours are Mon–Fri 09:15–15:30 IST. API market data polling is paused to eliminate redundant bandwidth usage. Available snapshots retain their source and timestamp.
           </span>
           <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
             Click <strong>Refresh Quotes</strong> anytime to sync
@@ -261,23 +251,8 @@ export default function MarketsScreen() {
           }}
         >
           <span>
-            ⚠️ STALE FEED DETECTOR: Market feed tick gap exceeded 3,000ms threshold. Strategy execution is automatically PAUSED.
+            Market data is stale or unavailable. Live entries require fresh broker quotes and executable depth.
           </span>
-          <button
-            onClick={() => setIsFeedStale(false)}
-            style={{
-              backgroundColor: colors.warning,
-              color: '#000',
-              border: 'none',
-              borderRadius: borderRadius.sm,
-              padding: '2px 8px',
-              fontSize: typography.fontSize.xs,
-              cursor: 'pointer',
-              fontWeight: typography.fontWeight.bold,
-            }}
-          >
-            Acknowledge & Resume
-          </button>
         </div>
       )}
 
@@ -308,7 +283,7 @@ export default function MarketsScreen() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 2 }}>
             <span style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, fontFamily: typography.fontFamily.mono }}>
-              {niftyQuote ? `₹${niftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'NIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Loading...')}
+              {niftyQuote ? `₹${niftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'NIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Unavailable')}
             </span>
             {niftyQuote && (
               <span style={{ fontSize: typography.fontSize.xs, color: niftyQuote.netChange >= 0 ? colors.profit : colors.loss, fontWeight: typography.fontWeight.bold }}>
@@ -343,7 +318,7 @@ export default function MarketsScreen() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 2 }}>
             <span style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, fontFamily: typography.fontFamily.mono }}>
-              {bankNiftyQuote ? `₹${bankNiftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'BANKNIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Loading...')}
+              {bankNiftyQuote ? `₹${bankNiftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'BANKNIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Unavailable')}
             </span>
             {bankNiftyQuote && (
               <span style={{ fontSize: typography.fontSize.xs, color: bankNiftyQuote.netChange >= 0 ? colors.profit : colors.loss, fontWeight: typography.fontWeight.bold }}>
@@ -368,13 +343,13 @@ export default function MarketsScreen() {
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>EXCHANGE STATUS</span>
-            <Badge label="REGULAR SESSION" variant="success" size="sm" />
+            <Badge label={isMarketOpen ? "MARKET OPEN" : "MARKET CLOSED"} variant="success" size="sm" />
           </div>
           <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.semibold }}>
             Trading Hours: 09:15 - 15:30 IST
           </div>
           <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
-            WebSocket Latency: <span style={{ color: colors.profit }}>{feedLatencyMs}ms</span> | Protobuf V3 Active
+            WebSocket Latency: <span style={{ color: colors.profit }}>{feedLatencyMs === null ? 'Unavailable' : `${feedLatencyMs}ms`}</span> | {dataSource}
           </div>
         </div>
       </div>
@@ -472,7 +447,7 @@ export default function MarketsScreen() {
             {effectiveOptionRows.length === 0 ? (
               <tr>
                 <td colSpan={11} style={{ padding: spacing.xl, color: colors.textMuted, textAlign: 'center', fontSize: typography.fontSize.sm }}>
-                  Connecting to Upstox Market Data Feed & fetching live strikes for {selectedUnderlying} ({selectedExpiry})...
+                  No verified option contracts are available for {selectedUnderlying} ({selectedExpiry || 'expiry unavailable'}). Check the instrument catalogue and market feed.
                 </td>
               </tr>
             ) : (
@@ -480,6 +455,8 @@ export default function MarketsScreen() {
                 const isAtm = row.strikePrice === atmStrike;
                 const isCallItm = spotPrice > 0 && row.strikePrice < spotPrice;
                 const isPutItm = spotPrice > 0 && row.strikePrice > spotPrice;
+                const callKnown = !!row.call && row.call.provenance !== 'UNAVAILABLE' && row.call.lastPrice > 0;
+                const putKnown = !!row.put && row.put.provenance !== 'UNAVAILABLE' && row.put.lastPrice > 0;
 
                 return (
                   <tr
@@ -491,16 +468,16 @@ export default function MarketsScreen() {
                   >
                     {/* Call Data */}
                     <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
-                      {(row.call?.openInterest ? row.call.openInterest / 1000 : 0).toFixed(0)}k
+                      {callKnown ? `${((row.call?.openInterest || 0) / 1000).toFixed(0)}k` : '--'}
                     </td>
                     <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                      {(row.call?.volume ? row.call.volume / 1000 : 0).toFixed(0)}k
+                      {callKnown ? `${((row.call?.volume || 0) / 1000).toFixed(0)}k` : '--'}
                     </td>
                     <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                      {row.call?.bidPrice ?? '--'} / {row.call?.askPrice ?? '--'}
+                      {row.call?.bidPrice || '--'} / {row.call?.askPrice || '--'}
                     </td>
                     <td style={{ padding: spacing.sm, color: (row.call?.netChangePct || 0) >= 0 ? colors.profit : colors.loss }}>
-                      {(row.call?.netChangePct || 0) > 0 ? '+' : ''}{row.call?.netChangePct ?? 0}%
+                      {callKnown ? `${(row.call?.netChangePct || 0) > 0 ? '+' : ''}${row.call?.netChangePct || 0}%` : '--'}
                     </td>
                     <td
                       style={{
@@ -513,6 +490,7 @@ export default function MarketsScreen() {
                       }}
                     >
                       {row.call?.lastPrice ? `₹${row.call.lastPrice.toFixed(2)}` : '--'}
+                      <div style={{ fontSize: 9, color: colors.textMuted }}>{row.call?.provenance || 'UNAVAILABLE'}{row.call?.isStale && row.call.provenance !== 'UNAVAILABLE' ? ' · STALE' : ''}</div>
                     </td>
 
                     {/* Center Strike */}
@@ -532,18 +510,19 @@ export default function MarketsScreen() {
                       }}
                     >
                       {row.put?.lastPrice ? `₹${row.put.lastPrice.toFixed(2)}` : '--'}
+                      <div style={{ fontSize: 9, color: colors.textMuted }}>{row.put?.provenance || 'UNAVAILABLE'}{row.put?.isStale && row.put.provenance !== 'UNAVAILABLE' ? ' · STALE' : ''}</div>
                     </td>
                     <td style={{ padding: spacing.sm, color: (row.put?.netChangePct || 0) >= 0 ? colors.profit : colors.loss }}>
-                      {(row.put?.netChangePct || 0) > 0 ? '+' : ''}{row.put?.netChangePct ?? 0}%
+                      {putKnown ? `${(row.put?.netChangePct || 0) > 0 ? '+' : ''}${row.put?.netChangePct || 0}%` : '--'}
                     </td>
                     <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                      {row.put?.bidPrice ?? '--'} / {row.put?.askPrice ?? '--'}
+                      {row.put?.bidPrice || '--'} / {row.put?.askPrice || '--'}
                     </td>
                     <td style={{ padding: spacing.sm, color: colors.textMuted }}>
-                      {(row.put?.volume ? row.put.volume / 1000 : 0).toFixed(0)}k
+                      {putKnown ? `${((row.put?.volume || 0) / 1000).toFixed(0)}k` : '--'}
                     </td>
                     <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
-                      {(row.put?.openInterest ? row.put.openInterest / 1000 : 0).toFixed(0)}k
+                      {putKnown ? `${((row.put?.openInterest || 0) / 1000).toFixed(0)}k` : '--'}
                     </td>
                   </tr>
                 );

@@ -5,8 +5,6 @@ import {
   Position,
   OrderStatus,
   OrderSide,
-  OrderType,
-  ProductType,
   OrderFillEvent,
   ExitProtectionStatus,
   GoLiveChecklistItem,
@@ -21,12 +19,13 @@ export default function OrdersScreen() {
   const [activeTab, setActiveTab] = useState<TabType>('POSITIONS');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [activeAlert, setActiveAlert] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState(false);
   const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
 
   // Central Risk & Capital Reservation State
   const [reservedCapital, setReservedCapital] = useState<number>(0);
-  const [availableCash, setAvailableCash] = useState<number>(10000);
-  const [remainingDailyRiskBudget, setRemainingDailyRiskBudget] = useState<number>(1500);
+  const [availableCash, setAvailableCash] = useState<number>(0);
+  const [remainingDailyRiskBudget, setRemainingDailyRiskBudget] = useState<number>(0);
 
   // Active Positions & Protection States
   const [positions, setPositions] = useState<(Position & { protectionStatus?: ExitProtectionStatus })[]>([]);
@@ -44,412 +43,32 @@ export default function OrdersScreen() {
 
   const handleExportCsv = async () => {
     try {
-      const serverCsv = await apiClient.exportDailyReportCsv();
-      if (serverCsv && typeof window !== 'undefined' && typeof document !== 'undefined') {
-        const blob = new Blob([serverCsv], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        const dateStr = new Date().toISOString().split('T')[0];
-        link.href = url;
-        link.setAttribute('download', `daily_trading_report_${dateStr}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-        showNotification('RFC-4180 Daily Audit CSV downloaded from backend API.');
-        return;
-      }
-    } catch {
-      // fallback to local generation
-    }
-
-    const headers = [
-      'Fill ID',
-      'Timestamp',
-      'Instrument Key',
-      'Side',
-      'Quantity',
-      'Fill Price (INR)',
-      'Estimated Fees (INR)',
-      'Actual Fees (INR)',
-      'Brokerage (INR)',
-      'STT (INR)',
-      'Exchange Turnover (INR)',
-      'SEBI Fees (INR)',
-      'Stamp Duty (INR)',
-      'GST (INR)',
-      'Fee Variance Savings (INR)',
-    ];
-
-    const rows = fills.map((f) => {
-      const variance = (f.estimatedCharges - f.actualCharges).toFixed(2);
-      return [
-        `"${f.id}"`,
-        `"${f.timestamp}"`,
-        `"${f.instrumentKey}"`,
-        `"${f.side}"`,
-        f.fillQty,
-        f.fillPrice.toFixed(2),
-        f.estimatedCharges.toFixed(2),
-        f.actualCharges.toFixed(2),
-        f.charges.brokerage.toFixed(2),
-        f.charges.stt.toFixed(2),
-        f.charges.exchangeCharges.toFixed(2),
-        f.charges.sebiCharges.toFixed(2),
-        f.charges.stampDuty.toFixed(2),
-        f.charges.gst.toFixed(2),
-        variance,
-      ].join(',');
-    });
-
-    const csvContent = [headers.join(','), ...rows].join('\r\n');
-    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      const dateStr = new Date().toISOString().split('T')[0];
-      link.href = url;
-      link.setAttribute('download', `daily_trading_report_${dateStr}.csv`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-    }
-    showNotification('RFC-4180 Daily Audit CSV generated & downloaded successfully.');
+      const csv = await apiClient.exportDailyReportCsv();
+      if (typeof document === 'undefined') throw new Error('CSV downloads are available in the web workstation.');
+      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
+      const link = document.createElement('a'); link.href = url;
+      link.download = 'daily_trading_report.csv'; link.click(); URL.revokeObjectURL(url);
+      showNotification('Confirmed trade report downloaded.');
+    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Report export failed.'); }
   };
 
-  // Close open position simulation
-  const handleClosePosition = (instrumentKey: string) => {
-    apiClient.closePosition(instrumentKey).catch(() => {});
-    const pos = positions.find((p) => p.instrumentKey === instrumentKey);
-    if (!pos || pos.netQuantity <= 0) return;
-
-    const exitPrice = pos.lastPrice;
-    const exitQty = pos.netQuantity;
-    const grossPnl = (exitPrice - pos.buyAvgPrice) * exitQty;
-    const actualCharges = 52.35;
-    const netPnl = grossPnl - actualCharges;
-
-    setReservedCapital(0);
-    setAvailableCash((prev) => prev + pos.buyAvgPrice * exitQty + netPnl);
-    setRemainingDailyRiskBudget((prev) => prev + (netPnl < 0 ? netPnl : 0));
-
-    setPositions((prev) =>
-      prev.map((p) =>
-        p.instrumentKey === instrumentKey
-          ? {
-              ...p,
-              netQuantity: 0,
-              sellQuantity: exitQty,
-              sellAvgPrice: exitPrice,
-              unrealizedPnl: 0,
-              realizedPnl: netPnl,
-              protectionStatus: ExitProtectionStatus.UNPROTECTED,
-              lastVerifiedAt: new Date().toISOString(),
-            }
-          : p,
-      ),
-    );
-
-    const exitOrderId = '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000);
-    const exitOrder: BrokerOrder = {
-      id: exitOrderId,
-      intentId: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      brokerOrderId: `UPSTOX_SIM_${Math.floor(10000 + Math.random() * 90000)}`,
-      tag: 'EXIT_MANUAL',
-      instrumentKey,
-      side: OrderSide.SELL,
-      orderType: OrderType.MARKET,
-      product: ProductType.I,
-      quantity: exitQty,
-      price: exitPrice,
-      status: OrderStatus.CLOSED,
-      filledQuantity: exitQty,
-      averageFillPrice: exitPrice,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    setOrders((prev) => [exitOrder, ...prev]);
-
-    showNotification(
-      `Position ${pos.symbol} closed at ₹${exitPrice.toFixed(2)}. Net P&L: ₹${netPnl.toFixed(2)}. GTT cancelled.`,
-    );
-  };
-
-  // Phase 5: Supervised Execution with GTT Multi-Leg Protective Exits
-  const handleSupervisedExecute = () => {
-    if (availableCash < 3062.5) {
-      showNotification('Risk Gate Block: Insufficient available capital (Max ₹10,000 constraint).');
-      return;
-    }
-
-    const newOrderId = '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000);
-    const orderQty = 25;
-    const fillPrice = 124.0;
-    const stopPrice = 115.0;
-    const targetPrice = 138.0;
-
-    setReservedCapital((prev) => prev + 3062.5);
-    setAvailableCash((prev) => prev - 3062.5);
-
-    const newOrder: BrokerOrder = {
-      id: newOrderId,
-      intentId: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      brokerOrderId: `UPSTOX_SIM_${Math.floor(10000 + Math.random() * 90000)}`,
-      tag: 'SUP_GTT_1',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25200_CE',
-      side: OrderSide.BUY,
-      orderType: OrderType.LIMIT,
-      product: ProductType.I,
-      quantity: orderQty,
-      price: fillPrice,
-      status: OrderStatus.PROTECTED,
-      filledQuantity: orderQty,
-      averageFillPrice: fillPrice,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    setOrders((prev) => [newOrder, ...prev]);
-
-    setPositions((prev) => [
-      {
-        id: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-        instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25200_CE',
-        symbol: 'NIFTY26OCT25200CE',
-        netQuantity: orderQty,
-        buyQuantity: orderQty,
-        sellQuantity: 0,
-        buyAvgPrice: fillPrice,
-        sellAvgPrice: 0,
-        lastPrice: fillPrice,
-        unrealizedPnl: 0,
-        realizedPnl: 0,
-        stopLossPrice: stopPrice,
-        targetPrice,
-        protectionStatus: ExitProtectionStatus.PROTECTED_GTT,
-        lastVerifiedAt: new Date().toISOString(),
-      },
-      ...prev,
-    ]);
-
-    const newFill: OrderFillEvent = {
-      id: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      orderId: newOrderId,
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25200_CE',
-      side: OrderSide.BUY,
-      fillQty: orderQty,
-      fillPrice,
-      estimatedCharges: 58.2,
-      actualCharges: 52.35,
-      charges: {
-        brokerage: 40.0,
-        stt: 3.10,
-        exchangeCharges: 1.58,
-        sebiCharges: 0.0,
-        stampDuty: 0.09,
-        gst: 7.58,
-        totalRoundTripCharges: 52.35,
-      },
-      timestamp: new Date().toISOString(),
-    };
-    setFills((prev) => [newFill, ...prev]);
-
-    showNotification(
-      `Supervised Order Executed: Filled ${orderQty} Qty at ₹${fillPrice}. GTT Exit Attached: Stop ₹${stopPrice}, Target ₹${targetPrice}.`,
-    );
-  };
-
-  // Phase 5 Anomaly Injection: Timeout -> UNKNOWN STATE
-  const handleSimulateTimeout = () => {
-    const unknownOrder: BrokerOrder = {
-      id: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      intentId: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      brokerOrderId: null,
-      tag: 'SIM_TIMEOUT',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      side: OrderSide.BUY,
-      orderType: OrderType.LIMIT,
-      product: ProductType.I,
-      quantity: 25,
-      price: 122.5,
-      status: OrderStatus.UNKNOWN_BROKER_STATE,
-      filledQuantity: 0,
-      averageFillPrice: 0,
-      rejectionReason: 'Request timed out waiting for broker response. Outcome UNKNOWN.',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    setOrders((prev) => [unknownOrder, ...prev]);
-    setActiveAlert('ANOMALY INJECTED: Request timeout resulted in UNKNOWN broker state. Orderbook query and reconciliation scheduled.');
-  };
-
-  // Phase 5 Anomaly Injection: Protection Failure -> Kill Switch Freeze
-  const handleSimulateProtectionFailure = () => {
-    const failedOrder: BrokerOrder = {
-      id: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      intentId: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      brokerOrderId: `UPSTOX_SIM_${Math.floor(10000 + Math.random() * 90000)}`,
-      tag: 'SIM_PROT_FAIL',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_PE',
-      side: OrderSide.BUY,
-      orderType: OrderType.LIMIT,
-      product: ProductType.I,
-      quantity: 25,
-      price: 112.0,
-      status: OrderStatus.PROTECTION_FAILED,
-      filledQuantity: 25,
-      averageFillPrice: 112.0,
-      rejectionReason: 'CRITICAL: GTT multi-leg protective trigger rejected by broker. Uncovered risk detected.',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    setOrders((prev) => [failedOrder, ...prev]);
-    setActiveAlert('CRITICAL ANOMALY: GTT protection failed after entry filled! Trading engine FROZEN via Kill Switch.');
-  };
-
-  // Phase 5 Anomaly Injection: Exit Limit Unfilled -> MANUAL INTERVENTION REQUIRED
-  const handleSimulateExitLimitUnfilled = () => {
-    const unfilledOrder: BrokerOrder = {
-      id: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      intentId: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      brokerOrderId: `UPSTOX_SIM_${Math.floor(10000 + Math.random() * 90000)}`,
-      tag: 'SIM_UNFILLED_EXIT',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      side: OrderSide.SELL,
-      orderType: OrderType.LIMIT,
-      product: ProductType.I,
-      quantity: 25,
-      price: 114.0,
-      status: OrderStatus.MANUAL_INTERVENTION_REQUIRED,
-      filledQuantity: 0,
-      averageFillPrice: 0,
-      rejectionReason: 'GTT stop limit trigger slipped unfilled. Price breached. Manual intervention required.',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    setOrders((prev) => [unfilledOrder, ...prev]);
-    setActiveAlert('CRITICAL ANOMALY: Protective exit limit order remained UNFILLED. Kill switch engaged; manual close required.');
-  };
-
-  // Phase 5 Anomaly Injection: Uncovered Position -> FREEZE
-  const handleSimulateUncoveredPosition = () => {
-    const uncoveredOrder: BrokerOrder = {
-      id: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      intentId: '550e8400-e29b-41d4-a716-' + Math.floor(100000000000 + Math.random() * 900000000000),
-      brokerOrderId: `UPSTOX_SIM_${Math.floor(10000 + Math.random() * 90000)}`,
-      tag: 'SIM_UNCOVERED',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25300_CE',
-      side: OrderSide.BUY,
-      orderType: OrderType.LIMIT,
-      product: ProductType.I,
-      quantity: 25,
-      price: 130.0,
-      status: OrderStatus.FILLED,
-      filledQuantity: 25,
-      averageFillPrice: 130.0,
-      rejectionReason: 'Uncovered position detected without protective stops. Risk engine frozen.',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    setOrders((prev) => [uncoveredOrder, ...prev]);
-    setActiveAlert('SAFETY VIOLATION: Uncovered position detected! Entry filled without GTT protection. Engine frozen via Kill Switch.');
+  const handleClosePosition = async (instrumentKey: string) => {
+    if (pendingAction) return;
+    setPendingAction(true); setActiveAlert(null);
+    try {
+      const result = await apiClient.closePosition(instrumentKey);
+      if (!result.success) throw new Error(result.message);
+      const [positionList, orderList, fillList] = await Promise.all([apiClient.getPositions(), apiClient.getOrders(), apiClient.getOrderFills()]);
+      setPositions(positionList); setOrders(orderList); setFills(fillList);
+      showNotification(result.message);
+    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Close request was not confirmed.'); }
+    finally { setPendingAction(false); }
   };
 
   // Phase 5: 10-Item Go-Live Safety Checklist State
-  const [checklistItems, setChecklistItems] = useState<GoLiveChecklistItem[]>([
-    {
-      id: 'chk_01_reg',
-      category: 'REGULATORY',
-      title: 'SEBI & Exchange Algorithmic Framework Compliance',
-      description: 'System operates strictly under personal supervised execution with human authorization.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'Owner single-tenant architecture verified; no unauthorized public pooling.',
-    },
-    {
-      id: 'chk_02_ip',
-      category: 'INFRASTRUCTURE',
-      title: 'Static Egress IP Binding Verified',
-      description: 'Server outbound IP matches registered Upstox static IP whitelist (127.0.0.1 / EC2 EIP).',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'Egress IP binding 127.0.0.1 matched against Upstox developer portal registration.',
-    },
-    {
-      id: 'chk_03_caps',
-      category: 'RISK_CAPS',
-      title: 'Deterministic Hard Risk Caps Enforced',
-      description: 'Hard limits locked: Max ₹10,000 capital, ₹500 all-in trade loss cap, ₹1,500 daily drawdown cap.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'RiskReservationManager and StrategyConfigSchema hard constraints active.',
-    },
-    {
-      id: 'chk_04_auth',
-      category: 'BROKER_OAUTH',
-      title: 'Upstox OAuth 2.0 Encrypted at Rest',
-      description: 'Active bearer token secured using AES-256-GCM with SHA-256 derived key.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'TokenStorageService AES-256-GCM authenticated cipher verified.',
-    },
-    {
-      id: 'chk_05_feed',
-      category: 'MARKET_DATA',
-      title: 'Streaming Market Data Feed V3 & Stale Detector',
-      description: 'Protobuf V3 WebSocket latency < 50ms, monotonic tick sequencing, and > 3,000ms stale quote block active.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'UpstoxMarketFeedService stale tick gate verified in Vitest suite.',
-    },
-    {
-      id: 'chk_06_reconcile',
-      category: 'INFRASTRUCTURE',
-      title: 'Startup Broker Reconciliation Clean',
-      description: '0 discrepancies between broker positions and platform ledger.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'BrokerReconciliationService startup audit passed clean.',
-    },
-    {
-      id: 'chk_07_gtt',
-      category: 'PROTECTION_MECHANISM',
-      title: 'Multi-Leg GTT Exit Protection Ready',
-      description: 'Stop-loss and profit target limit triggers tested; never advertised as guaranteed stop.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'GTT limit trigger rules, quantity synchronization, and disclaimers active.',
-    },
-    {
-      id: 'chk_08_kill',
-      category: 'PROTECTION_MECHANISM',
-      title: 'Kill Switch & Emergency Stop Tested',
-      description: 'Emergency stop halts new entries and freezes orchestrator pipelines instantaneously.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'Emergency stop unit and integration tests passed.',
-    },
-    {
-      id: 'chk_09_supervision',
-      category: 'CONSENT',
-      title: 'Supervised Owner Approval Mode Active',
-      description: 'Trades require explicit owner sign-off with 180s countdown window and pre-trade revalidation.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'Owner approval requirement and 180s TTL verified.',
-    },
-    {
-      id: 'chk_10_consent',
-      category: 'CONSENT',
-      title: 'Owner Risk Disclosure & Execution Consent',
-      description: 'Owner acknowledges options market risks, lack of fill guarantees on GTT limits, and capital limits.',
-      passed: true,
-      verifiedAt: new Date().toISOString(),
-      evidence: 'Manual acknowledgement signed off by platform owner.',
-    },
-  ]);
-  const [checklistSignedOffBy, setChecklistSignedOffBy] = useState<string | null>('Platform Owner');
-  const [checklistSignedOffAt, setChecklistSignedOffAt] = useState<string | null>(new Date().toISOString());
+  const [checklistItems, setChecklistItems] = useState<GoLiveChecklistItem[]>([]);
+  const [checklistSignedOffBy, setChecklistSignedOffBy] = useState<string | null>(null);
+  const [checklistSignedOffAt, setChecklistSignedOffAt] = useState<string | null>(null);
 
   // Periodic sync with live backend API
   useEffect(() => {
@@ -457,11 +76,11 @@ export default function OrdersScreen() {
     const syncOrdersData = async () => {
       try {
         const [orderList, posList, fillsList, riskData, checklistData] = await Promise.all([
-          apiClient.getOrders().catch(() => null),
-          apiClient.getPositions().catch(() => null),
-          apiClient.getOrderFills().catch(() => null),
-          apiClient.getRiskStatus().catch(() => null),
-          apiClient.getGoLiveChecklist().catch(() => null),
+          apiClient.getOrders(),
+          apiClient.getPositions(),
+          apiClient.getOrderFills(),
+          apiClient.getRiskStatus(),
+          apiClient.getGoLiveChecklist(),
         ]);
         if (isMounted) {
           if (orderList) setOrders(orderList);
@@ -473,14 +92,14 @@ export default function OrdersScreen() {
             setRemainingDailyRiskBudget(riskData.remainingDailyRiskBudget);
             setIsLiveConnected(true);
           }
-          if (checklistData && checklistData.items?.length > 0) {
+          if (checklistData) {
             setChecklistItems(checklistData.items);
-            if (checklistData.signedOffBy) setChecklistSignedOffBy(checklistData.signedOffBy);
-            if (checklistData.signedOffAt) setChecklistSignedOffAt(checklistData.signedOffAt);
+            setChecklistSignedOffBy(checklistData.signedOffBy || null);
+            setChecklistSignedOffAt(checklistData.signedOffAt || null);
           }
         }
-      } catch {
-        // offline fallback
+      } catch (failure) {
+        if (isMounted) { setIsLiveConnected(false); setActiveAlert(failure instanceof Error ? failure.message : 'Account data unavailable.'); }
       }
     };
     syncOrdersData();
@@ -489,25 +108,25 @@ export default function OrdersScreen() {
       isMounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [workstationState.mode]);
 
-  const handleSignOffItem = (id: string) => {
-    setChecklistItems((prev) =>
-      prev.map((item) =>
-        item.id === id
-          ? { ...item, passed: true, verifiedAt: new Date().toISOString() }
-          : item,
-      ),
-    );
-    apiClient.signOffChecklistItem(id, 'Verified by operator in workstation').catch(() => {});
-    showNotification(`Checklist item '${id}' verified and passed.`);
+  const handleSignOffItem = async (id: string) => {
+    if (pendingAction) return; setPendingAction(true);
+    try {
+      const result = await apiClient.signOffChecklistItem(id, 'Verified by operator in workstation');
+      setChecklistItems((items) => items.map((item) => item.id === id ? result : item));
+      showNotification('Checklist verification recorded by the API.');
+    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Checklist verification failed.'); }
+    finally { setPendingAction(false); }
   };
-
-  const handleCompleteChecklist = () => {
-    setChecklistSignedOffBy('Platform Owner');
-    setChecklistSignedOffAt(new Date().toISOString());
-    apiClient.signOffGoLiveChecklist('Platform Owner').catch(() => {});
-    showNotification('10-Point Go-Live Safety Checklist signed off by Platform Owner. Live execution authorized.');
+  const handleCompleteChecklist = async () => {
+    if (pendingAction) return; setPendingAction(true);
+    try {
+      const result = await apiClient.signOffGoLiveChecklist('Platform Owner');
+      setChecklistItems(result.items); setChecklistSignedOffBy(result.signedOffBy || null); setChecklistSignedOffAt(result.signedOffAt || null);
+      showNotification('Checklist sign-off recorded. Trading remains subject to account and execution gates.');
+    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Checklist sign-off failed.'); }
+    finally { setPendingAction(false); }
   };
 
   return (
@@ -592,7 +211,7 @@ export default function OrdersScreen() {
               variant={workstationState.riskState === 'ARMED' ? 'success' : 'neutral'}
             />
             <Badge
-              label={isLiveConnected ? '🟢 LIVE API' : '⚠️ OFFLINE / PAPER'}
+              label={isLiveConnected ? 'API CONNECTED' : 'ACCOUNT DATA UNAVAILABLE'}
               variant={isLiveConnected ? 'success' : 'purple'}
             />
           </div>
@@ -727,107 +346,8 @@ export default function OrdersScreen() {
         </div>
       </div>
 
-      {/* Phase 5 Supervised Execution & Anomaly Simulation Testbench */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: spacing.sm,
-          backgroundColor: colors.surfaceElevated,
-          borderRadius: borderRadius.md,
-          border: `1px solid ${colors.border}`,
-          padding: `${spacing.sm}px ${spacing.md}px`,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-          <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.semibold }}>
-            Supervised Execution & Failure Injections:
-          </span>
-          <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
-            Verify GTT attachments, timeouts & protection failure safety freeze
-          </span>
-        </div>
-
-        <div style={{ display: 'flex', gap: spacing.xs, flexWrap: 'wrap' }}>
-          <button
-            onClick={handleSupervisedExecute}
-            style={{
-              padding: `${spacing.xs}px ${spacing.sm}px`,
-              backgroundColor: colors.surface,
-              border: `1px solid ${colors.profit}`,
-              color: colors.profit,
-              borderRadius: borderRadius.sm,
-              fontSize: typography.fontSize.xs,
-              fontWeight: typography.fontWeight.semibold,
-              cursor: 'pointer',
-            }}
-          >
-            + Supervised GTT Order
-          </button>
-          <button
-            onClick={handleSimulateTimeout}
-            style={{
-              padding: `${spacing.xs}px ${spacing.sm}px`,
-              backgroundColor: colors.surface,
-              border: `1px solid ${colors.warning}`,
-              color: colors.warning,
-              borderRadius: borderRadius.sm,
-              fontSize: typography.fontSize.xs,
-              fontWeight: typography.fontWeight.semibold,
-              cursor: 'pointer',
-            }}
-          >
-            + Test Timeout (UNKNOWN)
-          </button>
-          <button
-            onClick={handleSimulateProtectionFailure}
-            style={{
-              padding: `${spacing.xs}px ${spacing.sm}px`,
-              backgroundColor: colors.surface,
-              border: `1px solid ${colors.loss}`,
-              color: colors.loss,
-              borderRadius: borderRadius.sm,
-              fontSize: typography.fontSize.xs,
-              fontWeight: typography.fontWeight.semibold,
-              cursor: 'pointer',
-            }}
-          >
-            + Test Protection Failure (FREEZE)
-          </button>
-          <button
-            onClick={handleSimulateExitLimitUnfilled}
-            style={{
-              padding: `${spacing.xs}px ${spacing.sm}px`,
-              backgroundColor: colors.surface,
-              border: `1px solid ${colors.loss}`,
-              color: colors.loss,
-              borderRadius: borderRadius.sm,
-              fontSize: typography.fontSize.xs,
-              fontWeight: typography.fontWeight.semibold,
-              cursor: 'pointer',
-            }}
-          >
-            + Test Unfilled Exit (ALERT)
-          </button>
-          <button
-            onClick={handleSimulateUncoveredPosition}
-            style={{
-              padding: `${spacing.xs}px ${spacing.sm}px`,
-              backgroundColor: colors.surface,
-              border: `1px solid ${colors.warning}`,
-              color: colors.warning,
-              borderRadius: borderRadius.sm,
-              fontSize: typography.fontSize.xs,
-              fontWeight: typography.fontWeight.semibold,
-              cursor: 'pointer',
-            }}
-          >
-            + Test Uncovered (FREEZE)
-          </button>
-        </div>
-      </div>
+      <div style={{ color: colors.textSecondary }}>Entries are created from approved strategy proposals. Orders and protection states below reflect API responses.</div>
+      {pendingAction && <div role="status">Waiting for API confirmation…</div>}
 
       {/* Main Tab Content */}
       {activeTab === 'POSITIONS' && (
@@ -1062,7 +582,7 @@ export default function OrdersScreen() {
                   Statutory Charge Accounting & Performance Audit
                 </h3>
                 <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-                  Every proposal estimates round-trip friction. Executed fills calculate exact statutory levies (Brokerage, STT, Exchange Turnover, SEBI, Stamp Duty, GST).
+                  Proposals and simulated fills estimate charges using configured rates. Actual live charges require verified broker accounting.
                 </p>
               </div>
 
@@ -1133,7 +653,7 @@ export default function OrdersScreen() {
                 {fills.length === 0 ? (
                   <tr>
                     <td colSpan={8} style={{ padding: spacing.xl, textAlign: 'center', color: colors.textMuted }}>
-                      No trade fills recorded yet. Confirmed fills will calculate exact statutory levies here.
+                      No confirmed trade fills recorded. Charge estimates and verified broker charges appear with the ledger.
                     </td>
                   </tr>
                 ) : (

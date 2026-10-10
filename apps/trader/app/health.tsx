@@ -3,7 +3,6 @@ import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/u
 import {
   UpstoxSessionStatus,
   ReconciliationReport,
-  ReconciliationDiscrepancy,
   SystemAlert,
   AlertSeverity,
   DiagnosticsReport,
@@ -23,10 +22,10 @@ export default function HealthScreen() {
     isExpired: false,
     tokenExpiresAt: null,
     secondsRemaining: 0,
-    egressIpVerified: true,
-    registeredEgressIp: '127.0.0.1',
-    currentEgressIp: '127.0.0.1',
-    rateLimitRemaining: 25,
+    egressIpVerified: false,
+    registeredEgressIp: '',
+    currentEgressIp: '',
+    rateLimitRemaining: 0,
     lastReconciledAt: null,
   });
 
@@ -44,7 +43,7 @@ export default function HealthScreen() {
 
   // Automated Reconciliation Scheduler State
   const [schedulerStatus, setSchedulerStatus] = useState<ReconciliationScheduleStatus>({
-    schedulerActive: true,
+    schedulerActive: false,
     intervalSeconds: 60,
     lastRunAt: null,
     totalRuns: 0,
@@ -64,15 +63,15 @@ export default function HealthScreen() {
     },
     brokerConnection: {
       authenticated: false,
-      rateLimiterTokensRemaining: 25,
-      egressIpMatch: true,
-      registeredIp: '127.0.0.1',
+      rateLimiterTokensRemaining: 0,
+      egressIpMatch: false,
+      registeredIp: '',
       tokenExpiresInSeconds: 0,
     },
     riskStatus: {
       killSwitchActive: false,
       riskState: RiskState.DISARMED,
-      availableCash: 10000.0,
+      availableCash: 0,
       reservedCapital: 0,
       dailyDrawdownBudgetRemaining: 1500.0,
       openPositionsCount: 0,
@@ -115,11 +114,11 @@ export default function HealthScreen() {
     const syncHealth = async () => {
       try {
         const [diag, sess, recon, sched, alertList] = await Promise.all([
-          apiClient.getDiagnostics().catch(() => null),
-          apiClient.getUpstoxSession().catch(() => null),
-          apiClient.getReconciliationReport().catch(() => null),
-          apiClient.getReconciliationSchedule().catch(() => null),
-          apiClient.getAlerts().catch(() => null),
+          apiClient.getDiagnostics(),
+          apiClient.getUpstoxSession(),
+          apiClient.getReconciliationReport(),
+          apiClient.getReconciliationSchedule(),
+          apiClient.getAlerts(),
         ]);
         if (isMounted) {
           if (diag) setDiagnostics(diag);
@@ -129,9 +128,7 @@ export default function HealthScreen() {
           if (alertList) setAlerts(alertList);
           setIsLiveConnected(true);
         }
-      } catch {
-        // offline fallback
-      }
+      } catch (failure) { if (isMounted) { setIsLiveConnected(false); showToast(failure instanceof Error ? failure.message : 'Health data unavailable.'); } }
     };
     syncHealth();
     const interval = setInterval(syncHealth, 4000);
@@ -143,136 +140,38 @@ export default function HealthScreen() {
 
   const handleDisconnect = async () => {
     try {
-      await apiClient.disconnectUpstox();
-    } catch {
-      // offline fallback
-    }
-    setSession((prev) => ({
-      ...prev,
-      isConnected: false,
-      isExpired: true,
-      tokenExpiresAt: null,
-      secondsRemaining: 0,
-    }));
-    showToast('Broker disconnected. Encrypted access tokens purged from memory.');
+      const result = await apiClient.disconnectUpstox();
+      if (!result.success) throw new Error(result.message);
+      setSession(await apiClient.getUpstoxSession()); showToast(result.message);
+    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Disconnect was not confirmed.'); }
   };
-
   const handleRunReconciliation = async () => {
-    try {
-      const res = await apiClient.triggerReconciliation();
-      setReconciliation(res);
-      showToast(`Reconciliation audit completed: ${res.discrepancies.length} discrepancies found.`);
-    } catch {
-      setReconciliation({
-        timestamp: new Date().toISOString(),
-        status: 'CLEAN',
-        brokerPositionsCount: 1,
-        localPositionsCount: 1,
-        brokerOrdersCount: 2,
-        localOrdersCount: 2,
-        discrepancies: [],
-        executionFrozen: false,
-      });
-      setSession((prev) => ({ ...prev, lastReconciledAt: new Date().toISOString() }));
-      setSchedulerStatus((prev) => ({
-        ...prev,
-        lastRunAt: new Date().toISOString(),
-        totalRuns: prev.totalRuns + 1,
-        lastDiscrepanciesFound: 0,
-      }));
-      showToast('Reconciliation audit completed: 0 discrepancies found (offline mode).');
-    }
+    try { const result = await apiClient.triggerReconciliation(); setReconciliation(result); showToast(`Reconciliation returned ${result.discrepancies.length} discrepancies.`); }
+    catch (failure) { showToast(failure instanceof Error ? failure.message : 'Reconciliation was not confirmed.'); }
   };
-
-  const handleSimulateDiscrepancy = () => {
-    const simulatedMismatch: ReconciliationDiscrepancy = {
-      type: 'PHANTOM_BROKER_POSITION',
-      instrumentKey: 'NSE_FO|BANKNIFTY_2026-10-15_52500_PE',
-      brokerValue: { symbol: 'BANKNIFTY 52500 PE', netQuantity: 15, buyAvg: 165.2 },
-      localValue: null,
-      severity: 'CRITICAL',
-      actionTaken: 'Flagged phantom exposure outside bot. Trading engine FROZEN via Kill Switch.',
-    };
-
-    setReconciliation({
-      timestamp: new Date().toISOString(),
-      status: 'MISMATCH_DETECTED',
-      brokerPositionsCount: 2,
-      localPositionsCount: 1,
-      brokerOrdersCount: 2,
-      localOrdersCount: 2,
-      discrepancies: [simulatedMismatch],
-      executionFrozen: true,
-    });
-
-    // Add alert
-    const newAlert: SystemAlert = {
-      id: `alert_disc_${Date.now()}`,
-      severity: AlertSeverity.CRITICAL,
-      category: 'RECONCILIATION',
-      title: 'Reconciliation Discrepancy Detected',
-      message: 'Phantom position detected on broker (BANKNIFTY 52500 PE). Trading engine frozen.',
-      acknowledged: false,
-      timestamp: new Date().toISOString(),
-    };
-    setAlerts((prev) => [newAlert, ...prev]);
-
-    showToast('CRITICAL: Discrepancy simulated. Engine frozen via Kill Switch safety rule.');
-  };
-
   const handleTriggerIncidentDrill = async () => {
     try {
-      const drillAlert = await apiClient.triggerDrillAlert({
-        title: 'Incident Recovery Drill Alert',
-        message: 'Simulated operational drill: verifying multi-channel alert delivery and operator response protocol.',
-      });
-      setAlerts((prev) => [drillAlert, ...prev]);
-      showToast('🚨 Incident Drill Dispatched: Emergency alert broadcast to all channels.');
-    } catch {
-      const drillAlert: SystemAlert = {
-        id: `drill_${Date.now()}`,
-        severity: AlertSeverity.EMERGENCY,
-        category: 'SYSTEM',
-        title: 'Incident Recovery Drill Alert',
-        message: 'Simulated operational drill: verifying multi-channel alert delivery and operator response protocol.',
-        acknowledged: false,
-        timestamp: new Date().toISOString(),
-      };
-      setAlerts((prev) => [drillAlert, ...prev]);
-      showToast('🚨 Incident Drill Dispatched: Emergency alert broadcast to all channels.');
-    }
+      const alert = await apiClient.triggerDrillAlert({ title: 'Incident Recovery Drill Alert', message: 'Operator-requested notification delivery drill.' });
+      setAlerts((items) => [alert, ...items]); showToast('Test alert recorded by the API.');
+    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Test alert delivery was not confirmed.'); }
   };
-
   const handleAcknowledgeAlert = async (id: string) => {
-    setAlerts((prev) =>
-      prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a)),
-    );
-    apiClient.acknowledgeAlert(id).catch(() => {});
-    showToast(`Alert acknowledged.`);
+    try {
+      const result = await apiClient.acknowledgeAlert(id);
+      setAlerts((items) => items.map((item) => item.id === id ? result : item)); showToast('Alert acknowledgement recorded.');
+    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Acknowledgement was not confirmed.'); }
   };
-
   const toggleScheduler = async () => {
     try {
-      if (schedulerStatus.schedulerActive) {
-        const res = await apiClient.stopReconciliationSchedule();
-        setSchedulerStatus(res);
-        showToast('Reconciliation scheduler PAUSED.');
-      } else {
-        const res = await apiClient.startReconciliationSchedule(60);
-        setSchedulerStatus(res);
-        showToast('Automated reconciliation scheduler STARTED (60s cycle).');
-      }
-    } catch {
-      setSchedulerStatus((prev) => {
-        const nextActive = !prev.schedulerActive;
-        showToast(nextActive ? 'Automated reconciliation scheduler STARTED (60s cycle).' : 'Reconciliation scheduler PAUSED.');
-        return { ...prev, schedulerActive: nextActive };
-      });
-    }
+      const result = schedulerStatus.schedulerActive ? await apiClient.stopReconciliationSchedule() : await apiClient.startReconciliationSchedule(60);
+      setSchedulerStatus(result); showToast(result.schedulerActive ? 'Reconciliation scheduler started.' : 'Reconciliation scheduler paused.');
+    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Scheduler change was not confirmed.'); }
   };
 
   const hoursRemaining = Math.floor(session.secondsRemaining / 3600);
   const minutesRemaining = Math.floor((session.secondsRemaining % 3600) / 60);
+
+  if (!isLiveConnected) return <div role="alert" style={{ color: colors.textSecondary }}>Health data unavailable. {toastMessage || "Waiting for the trading API."}</div>;
 
   return (
     <div
@@ -316,7 +215,7 @@ export default function HealthScreen() {
               Broker Health & Diagnostics
             </h1>
             <Badge
-              label={isLiveConnected ? '🟢 LIVE API SYNCED' : '⚠️ OFFLINE / PAPER SIMULATION'}
+              label={isLiveConnected ? 'API CONNECTED' : 'ACCOUNT DATA UNAVAILABLE'}
               variant={isLiveConnected ? 'success' : 'purple'}
               size="sm"
             />
@@ -513,21 +412,6 @@ export default function HealthScreen() {
             >
               {schedulerStatus.schedulerActive ? 'Pause Schedule' : 'Start Schedule'}
             </button>
-            <button
-              onClick={handleSimulateDiscrepancy}
-              style={{
-                padding: `${spacing.sm}px ${spacing.md}px`,
-                backgroundColor: colors.surfaceElevated,
-                color: colors.warning,
-                border: `1px solid ${colors.warning}`,
-                borderRadius: borderRadius.sm,
-                fontSize: typography.fontSize.xs,
-                fontWeight: typography.fontWeight.semibold,
-                cursor: 'pointer',
-              }}
-            >
-              Test Mismatch
-            </button>
           </div>
         </div>
       </div>
@@ -587,7 +471,7 @@ export default function HealthScreen() {
               System Alerts & Multi-Channel Notification Center
             </h2>
             <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-              Real-time ring-buffered dispatch across WebSocket, Log, and Mobile Push.
+              API-confirmed system alerts. External delivery depends on configured integrations.
             </p>
           </div>
 

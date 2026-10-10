@@ -110,31 +110,13 @@ export default function StrategiesScreen() {
     }
   }, []);
 
-  // Fetch strategies from backend API with localStorage self-healing sync
+  // Display strategies that the API has confirmed.
   const loadStrategies = async () => {
     setIsLoading(true);
     try {
       const data = await apiClient.getStrategies();
-      let combined = data || [];
-
-      // Check localStorage for custom strategies in case server was restarted
-      if (typeof window !== 'undefined' && window.localStorage) {
-        try {
-          const localStr = window.localStorage.getItem('trading_bot_custom_strategies');
-          if (localStr) {
-            const localList: StrategyConfig[] = JSON.parse(localStr);
-            for (const localStrat of localList) {
-              if (!combined.some((s) => s.id === localStrat.id)) {
-                combined.push(localStrat);
-                // Resync to backend so server persists it to disk
-                apiClient.createStrategy(localStrat).catch(() => {});
-              }
-            }
-          }
-        } catch {
-          // ignore cache parsing error
-        }
-      }
+      const combined = data || [];
+      setStrategies(combined);
 
       if (combined && combined.length > 0) {
         setStrategies(combined);
@@ -218,20 +200,9 @@ export default function StrategiesScreen() {
     try {
       const result = await apiClient.runBacktest(strat.id, backtestPayload as any);
       setBacktestResult(result);
-      showFeedback(`Backtest completed for ${strat.name}: ${result.totalTrades} trades simulated on real exchange candles.`, 'success');
+      if (result.error) { showFeedback(result.error, 'error'); return; }
+      showFeedback(`Backtest completed for ${strat.name}: ${result.totalTrades} simulated trades. Data source: ${result.dataSource}.`, 'success');
     } catch (err: any) {
-      if ((err?.message?.includes('404') || err?.message?.includes('not found')) && strat) {
-        // Self-healing: if strategy is missing from backend, automatically upload and re-run
-        try {
-          await apiClient.createStrategy(strat);
-          const retry = await apiClient.runBacktest(strat.id, backtestPayload as any);
-          setBacktestResult(retry);
-          showFeedback(`Strategy resynced to server & backtest completed: ${retry.totalTrades} trades!`, 'success');
-          return;
-        } catch {
-          // fall through
-        }
-      }
       showFeedback(`Backtest failed: ${err.message}`, 'error');
     } finally {
       setBacktestLoading(false);
@@ -468,11 +439,10 @@ export default function StrategiesScreen() {
     setSelectedStrategyId(strat.id);
     try {
       const history = await apiClient.getStrategyVersions(strat.id);
-      setHistoryList(history && history.length > 0 ? history : [strat]);
+      setHistoryList(history);
       setIsHistoryModalOpen(true);
-    } catch {
-      setHistoryList([strat]);
-      setIsHistoryModalOpen(true);
+    } catch (error: any) {
+      showFeedback(`Strategy history is unavailable: ${error.message}`, 'error');
     }
   };
 
@@ -661,7 +631,7 @@ export default function StrategiesScreen() {
             { id: 'TEMPLATES' as StrategyLabTab, label: 'Predefined Templates', icon: '📑', count: PREDEFINED_STRATEGY_TEMPLATES.length },
             { id: 'DRAFTS' as StrategyLabTab, label: 'Draft Strategies', icon: '📝', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.DRAFT).length },
             { id: 'BACKTESTED' as StrategyLabTab, label: 'Backtested', icon: '🧪', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.BACKTESTED).length },
-            { id: 'PAPER' as StrategyLabTab, label: 'Paper-Tested', icon: '📄', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.PAPER_ACTIVE).length },
+            { id: 'PAPER' as StrategyLabTab, label: 'Paper Strategies', icon: '📄', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.PAPER_ACTIVE).length },
             { id: 'LIVE_ELIGIBLE' as StrategyLabTab, label: 'Live-Eligible', icon: '🛡️', count: strategies.filter((s) => !s.isArchived && (s.status === StrategyStatus.APPROVAL_READY || s.status === StrategyStatus.AUTO_ELIGIBLE)).length },
             { id: 'ARCHIVED' as StrategyLabTab, label: 'Archived', icon: '🗄️', count: strategies.filter((s) => s.isArchived || s.status === StrategyStatus.ARCHIVED).length },
           ].map((tab) => {
@@ -1038,7 +1008,7 @@ export default function StrategiesScreen() {
               </h2>
             </div>
             <p style={{ margin: 0, color: colors.textSecondary, fontSize: typography.fontSize.sm, marginTop: 4 }}>
-              Simulate entry on confirmed bar closes (zero look-ahead bias), dynamic delta premium tracking, and SEBI statutory levies.
+              Review historical candle signals and the reported data source. Option trade P&L requires historical executable option prices and liquidity; index candles alone cannot establish it.
             </p>
           </div>
 
@@ -1413,7 +1383,7 @@ export default function StrategiesScreen() {
                 ) : (
                   <>
                     <span>▶</span>
-                    <span>Run Backtest (Real Data)</span>
+                    <span>Run Historical Backtest</span>
                   </>
                 )}
               </button>
@@ -1468,7 +1438,7 @@ export default function StrategiesScreen() {
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
                 <Badge
-                  label={backtestResult.dataSource === 'REAL_NSE_EXCHANGE_FEED' ? '🟢 100% Real Exchange Feed (NSE India)' : '🟢 Real Market Candles'}
+                  label={`Candle source: ${backtestResult.dataSource}`}
                   variant="success"
                   size="sm"
                 />
@@ -1730,7 +1700,7 @@ export default function StrategiesScreen() {
             </div>
 
             <p style={{ margin: '0 0 16px 0', color: colors.textSecondary, fontSize: typography.fontSize.sm }}>
-              Define execution rules, indicator filters, and statutory risk limits. Newly created strategies are immediately ready for backtesting and Daily Bot execution.
+              Define execution rules, indicator filters, and statutory risk limits. New strategies require validation and a passing account preflight before Daily Bot execution.
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.md }}>

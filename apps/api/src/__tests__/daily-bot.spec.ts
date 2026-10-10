@@ -62,7 +62,7 @@ describe('Daily Bot durable orchestration', () => {
   const instantiate = (nextStore = store) => new DailyBotService(nextStore, execution as any, {
     getStrategy: () => selectedStrategy,
     getAllStrategies: () => [selectedStrategy],
-  } as any, env as any, { getAvailableCash: () => 10000 } as any);
+  } as any, env as any, { getAvailableCash: () => 10000, arm: vi.fn(), disarm: vi.fn() } as any);
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -93,7 +93,7 @@ describe('Daily Bot durable orchestration', () => {
   });
 
   it('provides first-day state and uses IST on UTC date boundaries', () => {
-    expect(service.getToday()).toMatchObject({ todaySetup: null, previousSetup: null, activeSession: null, setups: [], supportedModes: [TradeMode.PAPER] });
+    expect(service.getToday()).toMatchObject({ todaySetup: null, previousSetup: null, activeSession: null, setups: [], supportedModes: [TradeMode.PAPER, TradeMode.APPROVAL] });
     expect(dailyBotTradingDate(new Date('2026-10-09T18:29:59Z'))).toBe('2026-10-09');
     expect(dailyBotTradingDate(new Date('2026-10-09T18:30:00Z'))).toBe('2026-10-10');
   });
@@ -143,7 +143,7 @@ describe('Daily Bot durable orchestration', () => {
       getStrategy: (id: string) => registry.get(id),
       createStrategy: vi.fn((snapshot: StrategyConfig) => { registry.set(snapshot.id, structuredClone(snapshot)); return snapshot; }),
     };
-    const restarted = new DailyBotService(new DailyBotStore(storagePath), execution as any, registryService as any, env as any, { getAvailableCash: () => 10000 } as any);
+    const restarted = new DailyBotService(new DailyBotStore(storagePath), execution as any, registryService as any, env as any, { getAvailableCash: () => 10000, arm: vi.fn(), disarm: vi.fn() } as any);
     expect(registryService.createStrategy).toHaveBeenCalledOnce();
     expect(restarted.getToday().strategies.find((candidate) => candidate.id === customId)?.version).toBe(3);
     const copied = await restarted.createSetup({ ...older.config, perTradeMaxLossAllIn: 400 });
@@ -158,7 +158,7 @@ describe('Daily Bot durable orchestration', () => {
     store.commit({ version: 1, setups: [setup], sessions: [] });
     const retired = { ...selectedStrategy, status: StrategyStatus.RETIRED, version: 4 };
     const registryService = { getAllStrategies: () => [retired], getStrategy: () => retired, createStrategy: vi.fn() };
-    const restarted = new DailyBotService(new DailyBotStore(storagePath), execution as any, registryService as any, env as any, { getAvailableCash: () => 10000 } as any);
+    const restarted = new DailyBotService(new DailyBotStore(storagePath), execution as any, registryService as any, env as any, { getAvailableCash: () => 10000, arm: vi.fn(), disarm: vi.fn() } as any);
     expect(registryService.createStrategy).not.toHaveBeenCalled();
     expect(restarted.getToday().strategies[0]).toMatchObject({ version: 4, status: StrategyStatus.RETIRED });
     expect(restarted.getSetups()[0]?.strategySnapshot.status).toBe(StrategyStatus.PAPER_ACTIVE);
@@ -170,7 +170,7 @@ describe('Daily Bot durable orchestration', () => {
   it('rejects malformed config and configured account cap violations before saving', async () => {
     await expect(service.createSetup({ ...configuration(), dailyMaxLossAllIn: 100, perTradeMaxLossAllIn: 500 })).rejects.toThrow('Invalid Daily Bot');
     const lowCapService = new DailyBotService(store, execution as any, { getStrategy: strategy, getAllStrategies: () => [selectedStrategy] } as any,
-      { config: { ...env.config, MAX_ACCOUNT_CAPITAL_INR: 6000 } } as any, { getAvailableCash: () => 6000 } as any);
+      { config: { ...env.config, MAX_ACCOUNT_CAPITAL_INR: 6000 } } as any, { getAvailableCash: () => 6000, arm: vi.fn(), disarm: vi.fn() } as any);
     await expect(lowCapService.createSetup(configuration())).rejects.toThrow('account cap');
     expect(store.snapshot().setups).toEqual([]);
   });
@@ -183,7 +183,7 @@ describe('Daily Bot durable orchestration', () => {
     const old = await service.cloneSetup(saved.id, { tradingDate: '2026-10-08' });
     await expect(service.start(old.id, { operatorConsent: true })).rejects.toThrow('preflight failed');
     const live = await service.createSetup({ ...configuration(), tradingMode: TradeMode.AUTO });
-    await expect(service.start(live.id, { operatorConsent: true, confirmationCode: 'ENABLE LIVE TRADING' })).rejects.toThrow('live modes are disabled');
+    await expect(service.start(live.id, { operatorConsent: true, confirmationCode: 'ENABLE LIVE TRADING' })).rejects.toThrow('must match the global');
     expect(store.snapshot().sessions).toEqual([]);
   });
 

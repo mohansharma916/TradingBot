@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { TradeMode } from './enums';
-import { StrategyConfigSchema, TradeProposalSchema } from './schemas';
+import { InstrumentSchema, StrategyConfigSchema, TradeProposalSchema } from './schemas';
 
 export const DailyBotTradingDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Use YYYY-MM-DD').refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -102,6 +102,9 @@ export const DailyBotTradeSchema = z.object({
   openedAt: z.string().datetime().optional(),
   closedAt: z.string().datetime().nullable().optional(),
   exitReason: z.string().nullable().optional(),
+  gttId: z.string().min(1).optional(),
+  instrumentSnapshot: InstrumentSchema.optional(),
+  exitIntentId: z.string().min(1).optional(),
 });
 export type DailyBotTrade = z.infer<typeof DailyBotTradeSchema>;
 

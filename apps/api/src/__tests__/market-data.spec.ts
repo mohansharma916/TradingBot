@@ -1,194 +1,112 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProtobufDecoderService } from '../market-data/protobuf-decoder.service';
 import { UpstoxMarketFeedService } from '../market-data/upstox-market-feed.service';
-import { EnvService } from '../config/env.service';
-import { EventsGateway } from '../websocket/events.gateway';
 import { FeedStatus } from '@trading-bot/contracts';
 
-describe('Market Data Feed V3 & Protobuf Decoder', () => {
+const now = Date.parse('2026-10-10T06:00:00Z');
+const marketPacket = (timestamp = now, ltt = now) => ({
+  type: 1, currentTs: timestamp, feeds: { 'NSE_FO|52175': { fullFeed: { marketFF: {
+    ltpc: { ltp: 124.5, cp: 110, ltt, ltq: 65 }, vtt: 85000, oi: 120000,
+    marketOHLC: { ohlc: [{ interval: '1d', open: 112, high: 126, low: 108.5, close: 124.5, vol: 85000, ts: now }] },
+    marketLevel: { bidAskQuote: [{ bidP: 124.2, bidQ: 130, askP: 124.8, askQ: 195 }] },
+  } } } },
+});
+
+describe('Official Upstox V3 decoding and provenance', () => {
   let decoder: ProtobufDecoderService;
-
+  let feed: UpstoxMarketFeedService;
+  let gateway: { broadcast: ReturnType<typeof vi.fn> };
   beforeEach(async () => {
-    decoder = new ProtobufDecoderService();
-    await decoder.loadProto();
+    decoder = new ProtobufDecoderService(); await decoder.loadProto();
+    vi.useFakeTimers(); vi.setSystemTime(now);
+    gateway = { broadcast: vi.fn() };
+    feed = new UpstoxMarketFeedService({ config: { UPSTOX_API_KEY: 'not-an-access-token' } } as any, decoder, gateway as any);
+  });
+  afterEach(() => { feed.onModuleDestroy(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it('decodes V3 marketFF LTPC, actual depth and OHLC arrays', () => {
+    const decoded = decoder.decodeMarketFeed(decoder.encodeMarketFeed(marketPacket()));
+    const item = decoded.feeds['NSE_FO|52175']!;
+    expect(item).toMatchObject({ lastPrice: 124.5, closePrice: 110, volume: 85000, openInterest: 120000, openPrice: 112, highPrice: 126 });
+    expect(item.depth?.bids[0]).toEqual({ price: 124.2, quantity: 130 });
+    expect(decoder.normalizeToQuoteSnapshot(item)).toMatchObject({ provenance: 'LIVE', depthKnown: true, isStale: false, receivedAt: new Date(now).toISOString() });
   });
 
-  describe('ProtobufDecoderService', () => {
-    it('encodes and decodes Upstox full_feed protobuf binary payload correctly', () => {
-      const now = Date.now();
-      const rawPayload = {
-        type: 1, // live_feed
-        currentTs: now,
-        feeds: {
-          'NSE_FO|52175': {
-            fullFeed: {
-              ltp: 124.5,
-              cp: 110.0,
-              ltt: now,
-              ltq: 25,
-              vtt: 85000,
-              oi: 120000,
-              change: 14.5,
-              marketOHLC: {
-                open: 112.0,
-                high: 126.0,
-                low: 108.5,
-                close: 110.0,
-              },
-              marketLevel: {
-                bidAskQuote: [
-                  { bp: 124.2, bq: 125, b_orders: 4, ap: 124.8, aq: 150, a_orders: 5 },
-                  { bp: 124.0, bq: 250, b_orders: 8, ap: 125.0, aq: 300, a_orders: 9 },
-                ],
-              },
-            },
-          },
-        },
-      };
-
-      const binaryBuffer = decoder.encodeMarketFeed(rawPayload);
-      expect(Buffer.isBuffer(binaryBuffer) || binaryBuffer instanceof Uint8Array).toBe(true);
-      expect(binaryBuffer.length).toBeGreaterThan(0);
-
-      const decoded = decoder.decodeMarketFeed(binaryBuffer);
-      expect(decoded.type).toBe('live_feed');
-      expect(decoded.currentTs).toBe(now);
-
-      const item = decoded.feeds['NSE_FO|52175'];
-      expect(item).toBeDefined();
-      expect(item?.lastPrice).toBe(124.5);
-      expect(item?.closePrice).toBe(110.0);
-      expect(item?.netChange).toBe(14.5);
-      expect(item?.volume).toBe(85000);
-      expect(item?.openInterest).toBe(120000);
-      expect(item?.openPrice).toBe(112.0);
-      expect(item?.highPrice).toBe(126.0);
-      expect(item?.depth?.bids.length).toBe(2);
-      expect(item?.depth?.asks.length).toBe(2);
-      expect(item?.depth?.bids[0]?.price).toBe(124.2);
-      expect(item?.depth?.asks[0]?.price).toBe(124.8);
-    });
-
-    it('decodes ltpc feed and normalizes to QuoteSnapshot', () => {
-      const now = Date.now();
-      const rawPayload = {
-        type: 0, // initial_feed
-        currentTs: now,
-        feeds: {
-          'NSE_INDEX|Nifty 50': {
-            ltpc: {
-              ltp: 25120.45,
-              cp: 24975.25,
-              ltt: now,
-              ltq: 50,
-            },
-          },
-        },
-      };
-
-      const binaryBuffer = decoder.encodeMarketFeed(rawPayload);
-      const decoded = decoder.decodeMarketFeed(binaryBuffer);
-
-      const item = decoded.feeds['NSE_INDEX|Nifty 50'];
-      expect(item).toBeDefined();
-      expect(item?.lastPrice).toBe(25120.45);
-      expect(item?.closePrice).toBe(24975.25);
-
-      const snapshot = decoder.normalizeToQuoteSnapshot(item!, false);
-      expect(snapshot.instrumentKey).toBe('NSE_INDEX|Nifty 50');
-      expect(snapshot.lastPrice).toBe(25120.45);
-      expect(snapshot.bidPrice).toBe(25120.45); // Defaults to ltp when no depth in ltpc
-      expect(snapshot.isStale).toBe(false);
-    });
+  it('does not invent executable depth for indexFF or LTPC messages', () => {
+    for (const union of [{ ltpc: { ltp: 25120.45, cp: 24975, ltt: now } }, { fullFeed: { indexFF: { ltpc: { ltp: 25120.45, cp: 24975, ltt: now } } } }]) {
+      const data = decoder.decodeMarketFeed(decoder.encodeMarketFeed({ type: 1, currentTs: now, feeds: { 'NSE_INDEX|Nifty 50': union } }));
+      expect(decoder.normalizeToQuoteSnapshot(data.feeds['NSE_INDEX|Nifty 50']!)).toMatchObject({ lastPrice: 25120.45, bidPrice: 0, askPrice: 0, bidQty: 0, askQty: 0, depthKnown: false });
+    }
   });
 
-  describe('UpstoxMarketFeedService resilience & state machine', () => {
-    let feedService: UpstoxMarketFeedService;
-    let mockGateway: EventsGateway;
+  it('handles market status packets without inventing quotes', () => {
+    const packet = decoder.encodeMarketFeed({ type: 2, currentTs: now, marketInfo: { segmentStatus: { NSE_FO: 3 } } });
+    expect(decoder.decodeMarketFeed(packet)).toMatchObject({ type: 'market_info', feeds: {}, marketInfo: { segmentStatus: { NSE_FO: 'NORMAL_CLOSE' } } });
+  });
 
-    beforeEach(() => {
-      const envService = new EnvService();
-      mockGateway = {
-        broadcast: vi.fn(),
-      } as any;
-      feedService = new UpstoxMarketFeedService(envService, decoder, mockGateway);
-    });
+  it('retains missing timestamps as unavailable and old timestamps as delayed', () => {
+    const old = decoder.decodeMarketFeed(decoder.encodeMarketFeed(marketPacket(now - 10000, now - 10000))).feeds['NSE_FO|52175']!;
+    expect(decoder.normalizeToQuoteSnapshot(old)).toMatchObject({ provenance: 'DELAYED', isStale: true, timestamp: new Date(now - 10000).toISOString() });
+    const missing = { ...old, eventTime: 0, lastTradeTime: 0 };
+    expect(decoder.normalizeToQuoteSnapshot(missing)).toMatchObject({ provenance: 'UNAVAILABLE', isStale: true, timestamp: '1970-01-01T00:00:00.000Z' });
+  });
 
-    it('filters out duplicate ticks with identical or older timestamps', () => {
-      const timestamp = 1760088000000;
-      const tick1 = {
-        type: 1,
-        currentTs: timestamp,
-        feeds: {
-          'NSE_FO|52175': {
-            ltpc: { ltp: 120.0, cp: 110.0, ltt: timestamp, ltq: 25 },
-          },
-        },
-      };
+  it('does not seed quotes or use an API application key as OAuth credentials', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    await feed.onModuleInit(); vi.advanceTimersByTime(10000);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(feed.getAllQuotes()).toEqual([]);
+    expect(feed.getFeedHealth()).toMatchObject({ status: FeedStatus.DISCONNECTED, provenance: 'UNAVAILABLE', totalTicksReceived: 0 });
+  });
 
-      const buffer1 = decoder.encodeMarketFeed(tick1);
-      feedService.handleBinaryMessage(buffer1);
+  it('rejects invented instrument keys and sends subscription messages as binary', () => {
+    expect(() => feed.subscribe(['NSE_FO|NIFTY_2026-10-15_25100_CE'])).toThrow('broker-issued');
+    const send = vi.fn(); (feed as any).ws = { readyState: 1, send, close: vi.fn() };
+    feed.subscribe(['NSE_FO|52175']);
+    expect(send).toHaveBeenCalledWith(expect.any(Buffer), { binary: true });
+    expect(JSON.parse(send.mock.calls[0]![0].toString()).data.instrumentKeys).toEqual(['NSE_FO|52175']);
+  });
 
-      const healthAfterFirst = feedService.getFeedHealth();
-      expect(healthAfterFirst.totalTicksReceived).toBe(1);
-      expect(healthAfterFirst.duplicateTicksIgnored).toBe(0);
+  it('retries when owner OAuth becomes available after startup and disconnects when it expires', async () => {
+    let token: any = null;
+    feed = new UpstoxMarketFeedService({ config: {} } as any, decoder, gateway as any, { getToken: () => token } as any);
+    const authorize = vi.spyOn(feed, 'initiateConnection').mockResolvedValue(undefined);
+    await feed.onModuleInit(); authorize.mockClear();
+    token = { accessToken: 'new-owner-token', expiresAt: new Date(now + 10000).toISOString() };
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(authorize).toHaveBeenCalledOnce();
+    const close = vi.fn();
+    (feed as any).authorizationToken = token.accessToken;
+    (feed as any).ws = { readyState: 1, close };
+    token.expiresAt = new Date(now - 1).toISOString();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(close).toHaveBeenCalledOnce();
+    expect(feed.getFeedHealth().status).toBe(FeedStatus.DISCONNECTED);
+  });
 
-      // Send identical duplicate tick
-      feedService.handleBinaryMessage(buffer1);
-      const healthAfterDuplicate = feedService.getFeedHealth();
-      expect(healthAfterDuplicate.totalTicksReceived).toBe(2);
-      expect(healthAfterDuplicate.duplicateTicksIgnored).toBe(1);
-    });
+  it('accepts a fresh depth update even when the last trade timestamp did not change', () => {
+    feed.handleBinaryMessage(decoder.encodeMarketFeed(marketPacket()));
+    feed.handleBinaryMessage(decoder.encodeMarketFeed(marketPacket(now + 1000, now)));
+    expect(feed.getFeedHealth().duplicateTicksIgnored).toBe(0);
+    feed.handleBinaryMessage(decoder.encodeMarketFeed(marketPacket(now + 1000, now)));
+    expect(feed.getFeedHealth().duplicateTicksIgnored).toBe(1);
+  });
 
-    it('detects quote gaps when tick timestamp jump exceeds threshold', () => {
-      const timestamp1 = 1760088000000;
-      const buffer1 = decoder.encodeMarketFeed({
-        type: 1,
-        currentTs: timestamp1,
-        feeds: {
-          'NSE_FO|52175': {
-            ltpc: { ltp: 120.0, cp: 110.0, ltt: timestamp1, ltq: 25 },
-          },
-        },
-      });
-      feedService.handleBinaryMessage(buffer1);
+  it('keeps stale data stale on weekends without converting disconnected status to connected', () => {
+    feed.handleBinaryMessage(decoder.encodeMarketFeed(marketPacket()));
+    vi.advanceTimersByTime(4000); (feed as any).checkStaleFeed();
+    expect(feed.getQuote('NSE_FO|52175')).toMatchObject({ isStale: true, provenance: 'DELAYED' });
+    (feed as any).checkStaleFeed();
+    expect(feed.getQuote('NSE_FO|52175')?.isStale).toBe(true);
+    expect(feed.getFeedHealth().status).toBe(FeedStatus.DISCONNECTED);
+  });
 
-      // Next tick 30 seconds later (> 15s quote gap threshold)
-      const timestamp2 = timestamp1 + 30000;
-      const buffer2 = decoder.encodeMarketFeed({
-        type: 1,
-        currentTs: timestamp2,
-        feeds: {
-          'NSE_FO|52175': {
-            ltpc: { ltp: 122.0, cp: 110.0, ltt: timestamp2, ltq: 25 },
-          },
-        },
-      });
-      feedService.handleBinaryMessage(buffer2);
-
-      const health = feedService.getFeedHealth();
-      expect(health.quoteGapsDetected).toBe(1);
-    });
-
-    it('handles simulated ticks and updates quote store', () => {
-      const sample = {
-        instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-        lastPrice: 130.0,
-        bidPrice: 129.8,
-        askPrice: 130.2,
-        bidQty: 100,
-        askQty: 100,
-        volume: 50000,
-        openInterest: 100000,
-        timestamp: new Date().toISOString(),
-        isStale: false,
-      };
-
-      feedService.injectSimulatedTick(sample);
-      const retrieved = feedService.getQuote('NSE_FO|NIFTY_2026-10-15_25100_CE');
-      expect(retrieved).toBeDefined();
-      expect(retrieved?.lastPrice).toBe(130.0);
-      expect(mockGateway.broadcast).toHaveBeenCalledWith('quotes.snapshot', [sample]);
-    });
+  it('labels explicit testing injections SIMULATED and prohibits production injection', () => {
+    const quote = decoder.normalizeToQuoteSnapshot(decoder.decodeMarketFeed(decoder.encodeMarketFeed(marketPacket())).feeds['NSE_FO|52175']!);
+    feed.injectSimulatedTick(quote);
+    expect(feed.getQuote('NSE_FO|52175')?.provenance).toBe('SIMULATED');
+    vi.stubEnv('NODE_ENV', 'production');
+    expect(() => feed.injectSimulatedTick(quote)).toThrow('only to tests');
+    vi.unstubAllEnvs();
   });
 });

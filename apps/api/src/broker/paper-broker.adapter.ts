@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { BrokerPort, FundsSnapshot, MarginEstimate, OrderAcknowledgement } from './broker.port';
 import {
   BrokerHealth,
@@ -14,11 +14,18 @@ import {
   ExitProtectionStatus,
   ProtectionResult,
   DailyBotTrade,
+  BrokerOrderSchema,
+  PositionSchema,
 } from '@trading-bot/contracts';
 import { calculateOptionCharges, ChargeBreakdown } from '@trading-bot/domain';
 import { InstrumentCatalogService } from '../instruments/instrument-catalog.service';
 import { UpstoxMarketFeedService } from '../market-data/upstox-market-feed.service';
 import { EventsGateway } from '../websocket/events.gateway';
+import { EnvService } from '../config/env.service';
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 
 export interface OrderFillEvent {
   id: string;
@@ -31,9 +38,17 @@ export interface OrderFillEvent {
   timestamp: string;
   estimatedCharges: number;
   actualCharges: number;
+  chargesSource?: 'SIMULATED' | 'ESTIMATED' | 'BROKER_CONFIRMED';
 }
 
 export interface PlacePaperOrderParams {
+  proposalId?: string;
+  reservationId?: string;
+  signalKey?: string;
+  symbol?: string;
+  reservedCapital?: number;
+  reservedRisk?: number;
+  entryIntentId?: string;
   intentId: string;
   tag: string;
   instrumentKey: string;
@@ -69,35 +84,56 @@ export class PaperBrokerAdapter implements BrokerPort {
   private orders: Map<string, BrokerOrder> = new Map();
   private positions: Map<string, Position> = new Map();
   private fills: OrderFillEvent[] = [];
+  private readonly storagePath: string | null;
+  private readonly initialCash: number;
+  private persistenceFailed = false;
 
   constructor(
     @Inject(InstrumentCatalogService) private readonly catalog: InstrumentCatalogService,
     @Inject(UpstoxMarketFeedService) private readonly feed: UpstoxMarketFeedService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
-  ) {}
+    @Optional() @Inject(EnvService) env?: EnvService,
+    @Optional() @Inject('PAPER_BROKER_STORAGE_PATH') storagePath?: string,
+  ) {
+    this.initialCash = env?.config.MAX_ACCOUNT_CAPITAL_INR ?? 10000;
+    this.storagePath = storagePath ? path.resolve(storagePath) : process.env.VITEST ? null : path.resolve(env?.config.STATE_DIRECTORY || process.env.STATE_DIRECTORY || '.data', 'paper-broker.json');
+    if (this.storagePath) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(this.storagePath, 'utf8'));
+        const saved = z.object({ version: z.literal(1), orders: z.array(BrokerOrderSchema), positions: z.array(PositionSchema), fills: z.array(z.object({
+          id: z.string(), orderId: z.string(), instrumentKey: z.string(), side: z.nativeEnum(OrderSide), fillQty: z.number().int().positive(),
+          fillPrice: z.number().positive(), charges: z.any(), timestamp: z.string(), estimatedCharges: z.number(), actualCharges: z.number().nonnegative(), chargesSource: z.enum(['SIMULATED', 'ESTIMATED', 'BROKER_CONFIRMED']).optional(),
+        })) }).parse(raw);
+        this.orders = new Map(saved.orders.map((order) => [order.id, order])); this.positions = new Map(saved.positions.map((position) => [position.instrumentKey, position])); this.fills = saved.fills as OrderFillEvent[];
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new ServiceUnavailableException('Paper broker ledger cannot be validated; simulator trading is blocked.'); }
+    }
+  }
 
   async getConnectionHealth(): Promise<BrokerHealth> {
     const feedHealth = this.feed.getFeedHealth();
     return {
       broker: 'UPSTOX',
       status: feedHealth.staleCount > 0 ? BrokerHealthStatus.DEGRADED : BrokerHealthStatus.HEALTHY,
-      isAuthenticated: true,
-      tokenExpiresAt: new Date(Date.now() + 86400000).toISOString(),
+      isAuthenticated: false,
+      tokenExpiresAt: null,
       registeredEgressIp: '127.0.0.1',
       currentEgressIp: '127.0.0.1',
-      ipMatches: true,
-      marketFeedConnected: true,
+      ipMatches: false,
+      marketFeedConnected: (this.feed.getAllQuotes?.().length ?? 0) > 0 && feedHealth.staleCount === 0,
       feedLatencyMs: feedHealth.feedLatencyMs,
       lastSeenAt: new Date().toISOString(),
     };
   }
 
   async getFunds(): Promise<FundsSnapshot> {
+    const available = this.initialCash + this.fills.reduce((sum, fill) => sum + (fill.side === OrderSide.SELL ? 1 : -1) * fill.fillPrice * fill.fillQty - fill.actualCharges, 0);
+    const margin = Array.from(this.positions.values()).reduce((sum, position) => sum + position.buyAvgPrice * position.netQuantity, 0);
     return {
+      source: 'PAPER_SIMULATION', status: 'SIMULATED', verifiedAt: new Date().toISOString(),
       currency: 'INR',
-      availableCash: 10000.0,
-      usedMargin: 0.0,
-      totalCollateral: 10000.0,
+      availableCash: Number(Math.max(0, available).toFixed(2)),
+      usedMargin: Number(margin.toFixed(2)),
+      totalCollateral: Number((available + margin).toFixed(2)),
       payinAmount: 0.0,
       spanMargin: 0.0,
       exposureMargin: 0.0,
@@ -134,13 +170,18 @@ export class PaperBrokerAdapter implements BrokerPort {
   public getConfirmedExit(orderId: string, buyPrice: number, quantity: number): { exitPrice: number; charges: number; netPnl: number } | undefined {
     const exits = this.fills.filter((fill) => fill.orderId === orderId && fill.side === OrderSide.SELL);
     if (exits.reduce((sum, fill) => sum + fill.fillQty, 0) !== quantity) return undefined;
-    let remaining = quantity;
+    const lots: Array<{ remaining: number; fill: OrderFillEvent }> = [];
     let entryCharges = 0;
-    for (const buy of this.fills.filter((fill) => fill.instrumentKey === exits[0]!.instrumentKey && fill.side === OrderSide.BUY)) {
-      const included = Math.min(remaining, buy.fillQty);
-      entryCharges += buy.actualCharges * included / buy.fillQty;
-      remaining -= included;
-      if (remaining === 0) break;
+    for (const fill of [...this.fills].reverse().filter((item) => item.instrumentKey === exits[0]!.instrumentKey)) {
+      if (fill.side === OrderSide.BUY) { lots.push({ remaining: fill.fillQty, fill }); continue; }
+      let remaining = fill.fillQty;
+      for (const lot of lots) {
+        const used = Math.min(remaining, lot.remaining);
+        if (fill.orderId === orderId) entryCharges += lot.fill.actualCharges * used / lot.fill.fillQty;
+        remaining -= used; lot.remaining -= used;
+        if (!remaining) break;
+      }
+      if (remaining) return undefined;
     }
     const exitPrice = exits.reduce((sum, fill) => sum + fill.fillPrice * fill.fillQty, 0) / quantity;
     const charges = Number((entryCharges + exits.reduce((sum, fill) => sum + fill.actualCharges, 0)).toFixed(2));
@@ -149,7 +190,13 @@ export class PaperBrokerAdapter implements BrokerPort {
 
   /** Rehydrate only a durably confirmed simulator entry; never fabricate an unresolved fill. */
   public restoreConfirmedPosition(trade: DailyBotTrade): void {
-    if (this.positions.size || this.orders.has(trade.orderId) || !trade.reservationId || !trade.openedAt || trade.entryActualCharges === undefined || trade.status !== 'OPEN') throw new Error('Confirmed paper position cannot be restored from incomplete or conflicting metadata.');
+    const persisted = this.orders.get(trade.orderId);
+    if (persisted) {
+      const position = this.positions.get(trade.instrumentKey);
+      if (!position || position.netQuantity !== trade.quantity || position.buyAvgPrice !== trade.entryPrice || persisted.filledQuantity !== trade.quantity) throw new Error('Persisted paper exposure conflicts with Daily Bot recovery.');
+      return;
+    }
+    if (this.positions.size || !trade.reservationId || !trade.openedAt || trade.entryActualCharges === undefined || trade.status !== 'OPEN') throw new Error('Confirmed paper position cannot be restored from incomplete or conflicting metadata.');
     this.positions.set(trade.instrumentKey, { id: `restored_${trade.orderId}`, instrumentKey: trade.instrumentKey, symbol: trade.symbol, netQuantity: trade.quantity, buyQuantity: trade.quantity, sellQuantity: 0, buyAvgPrice: trade.entryPrice, sellAvgPrice: 0, lastPrice: trade.currentPrice, unrealizedPnl: trade.grossPnl ?? 0, realizedPnl: 0, stopLossPrice: trade.stopPrice, targetPrice: null, lastVerifiedAt: trade.openedAt });
     this.orders.set(trade.orderId, { id: trade.orderId, intentId: trade.reservationId, brokerOrderId: trade.orderId, tag: 'RESTORED_DAILY_ENTRY', instrumentKey: trade.instrumentKey, side: OrderSide.BUY, orderType: OrderType.MARKET, product: ProductType.I, quantity: trade.quantity, price: trade.entryPrice, status: OrderStatus.FILLED, filledQuantity: trade.quantity, averageFillPrice: trade.entryPrice, createdAt: trade.openedAt, updatedAt: trade.openedAt });
     const charges = calculateOptionCharges({ buyPrice: trade.entryPrice, sellPrice: 0, quantity: trade.quantity });
@@ -157,12 +204,14 @@ export class PaperBrokerAdapter implements BrokerPort {
     charges.gst = Number((charges.gst - 3.6).toFixed(2));
     charges.totalRoundTripCharges = trade.entryActualCharges;
     this.fills.unshift({ id: `restored_fill_${trade.orderId}`, orderId: trade.orderId, instrumentKey: trade.instrumentKey, side: OrderSide.BUY, fillQty: trade.quantity, fillPrice: trade.entryPrice, timestamp: trade.openedAt, estimatedCharges: trade.estimatedCharges, actualCharges: trade.entryActualCharges, charges });
+    this.persist();
   }
 
   /**
    * Places and simulates execution of a paper order.
    */
   async placeOrder(params: PlacePaperOrderParams): Promise<OrderAcknowledgement> {
+    if (this.persistenceFailed) throw new ServiceUnavailableException('Paper broker persistence failed; restart after repairing storage.');
     const previous = Array.from(this.orders.values()).find((order) => order.intentId === params.intentId);
     if (previous) {
       return { orderId: previous.id, tag: previous.tag, status: previous.status === OrderStatus.REJECTED ? 'REJECTED' : 'ACKNOWLEDGED', message: 'Existing paper order returned for this intent.' };
@@ -201,6 +250,7 @@ export class PaperBrokerAdapter implements BrokerPort {
       };
 
       this.orders.set(orderId, rejectedOrder);
+      this.persist();
       this.gateway.broadcast('order.changed', rejectedOrder);
       this.logger.warn(`[PaperBroker] Order ${orderId} REJECTED due to stale feed.`);
 
@@ -215,9 +265,20 @@ export class PaperBrokerAdapter implements BrokerPort {
     // 2. Realistic Price & Slippage Simulation
     const basePrice = quote ? (params.side === OrderSide.BUY ? quote.askPrice : quote.bidPrice) : (params.price || 120.0);
     const slippage = params.side === OrderSide.BUY ? 0.25 : -0.25;
-    const executionPrice = Number(Math.max(1.0, basePrice + slippage).toFixed(2));
+    const tick = this.catalog.getInstrument(params.instrumentKey)?.tickSize ?? 0.05;
+    const executable = Math.max(1.0, basePrice + slippage);
+    const executionPrice = Number(((params.side === OrderSide.BUY ? Math.ceil((executable - 1e-9) / tick) : Math.floor((executable + 1e-9) / tick)) * tick).toFixed(2));
+    const entryFees = calculateOptionCharges({ buyPrice: executionPrice, sellPrice: 0, quantity: params.quantity }).totalRoundTripCharges - 23.6;
+    if (params.side === OrderSide.BUY && executionPrice * params.quantity + entryFees > (await this.getFunds()).availableCash) return { orderId, tag: params.tag, status: 'REJECTED', message: 'Virtual account cash does not cover this paper entry and fees.' };
     if (params.maximumExecutionPrice !== undefined && executionPrice > params.maximumExecutionPrice) {
       return { orderId, tag: params.tag, status: 'REJECTED', message: 'Executable ask moved above the reserved entry price; refresh and revalidate the signal.' };
+    }
+    if (params.orderType === OrderType.LIMIT && (!params.price || (params.side === OrderSide.BUY ? executionPrice > params.price : executionPrice < params.price))) {
+      this.orders.set(orderId, { id: orderId, intentId: params.intentId, brokerOrderId: orderId, tag: params.tag, instrumentKey: params.instrumentKey,
+        side: params.side, orderType: params.orderType, product: params.product, quantity: params.quantity, price: params.price, status: OrderStatus.ACKNOWLEDGED,
+        filledQuantity: 0, averageFillPrice: 0, createdAt: now, updatedAt: now });
+      this.persist();
+      return { orderId, tag: params.tag, status: 'ACKNOWLEDGED', message: 'Limit is not executable at the current bid/ask plus slippage. No paper fill was fabricated; cancel or reprice explicitly.' };
     }
 
     // 3. Partial Fill or Full Fill Decision
@@ -267,12 +328,14 @@ export class PaperBrokerAdapter implements BrokerPort {
       timestamp: now,
       estimatedCharges: params.estimatedCharges || 58.2,
       actualCharges: charges.totalRoundTripCharges,
+      chargesSource: 'SIMULATED',
     };
 
     this.fills.unshift(fillEvent);
 
     // 5. Update Positions Ledger
     this.updatePositionFromFill(params, executionPrice, filledQuantity);
+    this.persist();
 
     // 6. Broadcast Events
     this.gateway.broadcast('order.changed', brokerOrder);
@@ -303,6 +366,7 @@ export class PaperBrokerAdapter implements BrokerPort {
     if (req.quantity) existing.quantity = req.quantity;
     existing.updatedAt = new Date().toISOString();
     this.orders.set(orderId, existing);
+    this.persist();
     this.gateway.broadcast('order.changed', existing);
     return {
       orderId,
@@ -318,6 +382,7 @@ export class PaperBrokerAdapter implements BrokerPort {
       existing.status = OrderStatus.CANCELLED;
       existing.updatedAt = new Date().toISOString();
       this.orders.set(orderId, existing);
+      this.persist();
       this.gateway.broadcast('order.changed', existing);
     }
   }
@@ -344,6 +409,7 @@ export class PaperBrokerAdapter implements BrokerPort {
     existing.targetPrice = req.targetPrice;
     existing.lastVerifiedAt = new Date().toISOString();
     this.positions.set(req.instrumentKey, existing);
+    this.persist();
 
     const gttOrderId = `gtt_paper_${Date.now()}`;
     return {
@@ -364,6 +430,7 @@ export class PaperBrokerAdapter implements BrokerPort {
       stopPrice < (position.stopLossPrice ?? 0) || Math.abs(stopPrice / tick - Math.round(stopPrice / tick)) > 0.00001) return false;
     position.stopLossPrice = stopPrice;
     position.lastVerifiedAt = new Date().toISOString();
+    this.persist();
     this.gateway.broadcast('position.stop.updated', { instrumentKey, quantity, stopPrice });
     return true;
   }
@@ -439,6 +506,19 @@ export class PaperBrokerAdapter implements BrokerPort {
     const quoteTime = new Date(quote.timestamp).getTime();
     return !Number.isFinite(quoteTime) || quoteTime > now + 1000 || now - quoteTime > 3000 ||
       ![quote.bidPrice, quote.askPrice].every((price) => Number.isFinite(price) && price > 0) || quote.bidPrice > quote.askPrice;
+  }
+
+  private persist(): void {
+    if (!this.storagePath) return;
+    const directory = path.dirname(this.storagePath); const temporary = path.join(directory, `.paper-${randomUUID()}.tmp`);
+    let fd: number | undefined;
+    try {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); fd = fs.openSync(temporary, 'wx', 0o600);
+      fs.writeFileSync(fd, `${JSON.stringify({ version: 1, orders: Array.from(this.orders.values()), positions: Array.from(this.positions.values()), fills: this.fills })}\n`);
+      fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined; fs.renameSync(temporary, this.storagePath);
+      fd = fs.openSync(directory, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+    } catch { this.persistenceFailed = true; throw new ServiceUnavailableException('Paper order state was not durably confirmed. Simulator entries are blocked.'); }
+    finally { if (fd !== undefined) fs.closeSync(fd); if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
   }
 
 }

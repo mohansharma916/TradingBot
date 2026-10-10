@@ -1,17 +1,16 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
+import { BrokerRouterService } from '../broker/broker-router.service';
+import { TradingModeService } from '../trading/trading-mode.service';
+import { OrdersService } from '../orders/orders.service';
 import { EnvService } from '../config/env.service';
 import {
   RiskState,
   RiskStatus,
   TradeMode,
-  OrderSide,
-  OrderType,
   OrderStatus,
-  ProductType,
   FlattenPositionsResult,
   FlattenExitDetail,
 } from '@trading-bot/contracts';
-import { calculateOptionCharges } from '@trading-bot/domain';
 import { RiskReservationManager } from './risk-reservation.manager';
 import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
 import { UpstoxBrokerAdapter } from '../broker/upstox-broker.adapter';
@@ -31,12 +30,16 @@ export class RiskService {
     @Inject(PaperBrokerAdapter) private readonly paperBroker?: PaperBrokerAdapter,
     @Inject(UpstoxBrokerAdapter) private readonly upstoxBroker?: UpstoxBrokerAdapter,
     @Inject(EventsGateway) private readonly gateway?: EventsGateway,
+    @Optional() @Inject(BrokerRouterService) private readonly router?: BrokerRouterService,
+    @Optional() @Inject(TradingModeService) private readonly tradingMode?: TradingModeService,
+    @Optional() @Inject(OrdersService) private readonly ordersService?: OrdersService,
   ) {
     this.currentState = this.envService.config.DEFAULT_RISK_STATE;
     this.currentMode = this.envService.config.SYSTEM_MODE;
   }
 
   private getBroker() {
+    if (this.router) return this.router;
     return this.currentMode === TradeMode.PAPER
       ? this.paperBroker
       : this.upstoxBroker;
@@ -50,9 +53,9 @@ export class RiskService {
     const killSwitch = this.reservationManager.isKillSwitchActive();
 
     return {
-      mode: this.currentMode,
-      state: killSwitch ? RiskState.EMERGENCY_STOP : this.currentState,
-      totalCapital: cfg.MAX_ACCOUNT_CAPITAL_INR,
+      mode: this.tradingMode?.getMode() ?? this.currentMode,
+      state: killSwitch ? RiskState.EMERGENCY_STOP : this.reservationManager.isArmed() ? RiskState.ARMED : RiskState.DISARMED,
+      totalCapital: this.tradingMode?.isLive() ? this.tradingMode.getSnapshot().funds.totalCapital : this.reservationManager.getTotalAccountCapital(),
       availableCash,
       reservedCapital,
       maxAllInTradeLoss: cfg.MAX_ALL_IN_TRADE_RISK_INR,
@@ -63,13 +66,16 @@ export class RiskService {
       openPositionsCount: this.reservationManager.getOpenPositionsCount(),
       maxOpenPositions: 1,
       dailyTargetProfit: cfg.TARGET_DAILY_PROFIT_INR,
-      armedUntil: this.armedUntil,
+      armedUntil: this.reservationManager.getArmedUntil(),
       killSwitchActive: killSwitch,
-      egressIpVerified: true,
+      egressIpVerified: false,
+      fundsSource: this.tradingMode?.getSnapshot().funds.source ?? 'PAPER_SIMULATION',
+      fundsVerifiedAt: this.tradingMode?.getSnapshot().funds.verifiedAt ?? null,
     };
   }
 
   public arm(durationMinutes: number): RiskStatus {
+    this.reservationManager.arm(durationMinutes);
     if (this.reservationManager.isKillSwitchActive()) {
       throw new Error('Cannot arm when kill switch is active. Reset kill switch first.');
     }
@@ -80,6 +86,7 @@ export class RiskService {
   }
 
   public disarm(): RiskStatus {
+    this.reservationManager.disarm();
     this.currentState = RiskState.DISARMED;
     this.armedUntil = null;
     this.gateway?.broadcast('risk.disarmed', { state: this.currentState });
@@ -115,6 +122,7 @@ export class RiskService {
    * Reference: Blueprint Section 8 & Phase 6
    */
   public async flattenPositions(reason = 'Operator Manual Flatten'): Promise<FlattenPositionsResult> {
+    this.reservationManager.disarm();
     const broker = this.getBroker();
     if (!broker) {
       throw new Error('No broker adapter configured to execute flatten exit orders.');
@@ -142,63 +150,20 @@ export class RiskService {
     let totalActualCharges = 0;
 
     for (const pos of activePositions) {
-      // Submit explicit market sell order to broker
-      const ack = await broker.placeOrder({
-        intentId: `intent_flatten_${Date.now()}_${pos.instrumentKey}`,
-        tag: 'FLATTEN_ALL',
-        instrumentKey: pos.instrumentKey,
-        side: OrderSide.SELL,
-        orderType: OrderType.MARKET,
-        product: ProductType.I,
-        quantity: pos.netQuantity,
-      });
-
-      const confirmed = ack.status === 'REJECTED' ? undefined : (await broker.getOrders()).find((order) => order.id === ack.orderId && order.filledQuantity === pos.netQuantity && order.averageFillPrice > 0);
-      if (!confirmed) {
-        exitOrders.push({ orderId: ack.orderId, instrumentKey: pos.instrumentKey, symbol: pos.symbol, quantity: pos.netQuantity, exitPrice: 0, realizedPnl: 0, charges: 0, status: ack.status === 'REJECTED' ? OrderStatus.REJECTED : OrderStatus.ACKNOWLEDGED });
-        continue;
-      }
-      const exitPrice = confirmed.averageFillPrice;
-      const charges = calculateOptionCharges({ buyPrice: pos.buyAvgPrice, sellPrice: exitPrice, quantity: pos.netQuantity });
-      const paperExit = broker instanceof PaperBrokerAdapter ? broker.getConfirmedExit(ack.orderId, pos.buyAvgPrice, pos.netQuantity) : undefined;
-      if (paperExit) charges.totalRoundTripCharges = paperExit.charges;
-      const netPnl = paperExit?.netPnl ?? Number(((exitPrice - pos.buyAvgPrice) * pos.netQuantity - charges.totalRoundTripCharges).toFixed(2));
-      totalRealizedNetPnl += netPnl;
-      totalActualCharges += charges.totalRoundTripCharges;
-
-      // Settle reservation in risk reservation manager
-      const activeReservation = this.reservationManager
-        .getActiveReservations()
-        .find((r) => r.instrumentKey === pos.instrumentKey);
-
-      if (activeReservation) {
-        if (activeReservation.status === 'COMMITTED') this.reservationManager.settleReservation(activeReservation.id, netPnl);
-        else this.reservationManager.settleClosedPosition(
-          activeReservation.signalKey,
-          activeReservation.reservedCapital,
-          netPnl,
-        );
-      }
-
+      if (!this.ordersService) throw new Error('The shared owned-position exit service is unavailable.');
+      const result = await this.ordersService.closePosition(pos.instrumentKey);
+      const confirmed = result.success && result.status === OrderStatus.CLOSED;
       exitOrders.push({
-        orderId: ack.orderId,
-        instrumentKey: pos.instrumentKey,
-        symbol: pos.symbol,
-        quantity: pos.netQuantity,
-        exitPrice,
-        realizedPnl: netPnl,
-        charges: charges.totalRoundTripCharges,
-        status: OrderStatus.CLOSED,
+        orderId: result.orderId ?? '', instrumentKey: pos.instrumentKey, symbol: pos.symbol,
+        quantity: result.quantity ?? pos.netQuantity, exitPrice: result.exitPrice ?? 0,
+        realizedPnl: confirmed ? result.netPnl ?? 0 : 0, charges: confirmed ? result.charges ?? 0 : 0,
+        status: result.status ?? OrderStatus.UNKNOWN_BROKER_STATE,
       });
-
-      this.gateway?.broadcast('position.flattened', {
-        instrumentKey: pos.instrumentKey,
-        quantity: pos.netQuantity,
-        exitPrice,
-        netPnl,
-      });
+      if (confirmed) {
+        totalRealizedNetPnl += result.netPnl ?? 0;
+        totalActualCharges += result.charges ?? 0;
+      }
     }
-
     // Always disarm on flatten to maintain safety discipline
     this.currentState = RiskState.DISARMED;
     this.armedUntil = null;

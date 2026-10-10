@@ -22,6 +22,8 @@ import {
   requiresVersionBump,
   runStrategyBacktest,
 } from '@trading-bot/domain';
+import { TokenStorageService } from '../broker/token-storage.service';
+import { EnvService } from '../config/env.service';
 import { AgentCoordinatorService } from '../agents/agent-coordinator.service';
 import { ProposalsService } from '../proposals/proposals.service';
 
@@ -35,9 +37,11 @@ export class StrategiesService {
     @Inject(AgentCoordinatorService) private readonly coordinator: AgentCoordinatorService,
     @Inject(ProposalsService) private readonly proposalsService: ProposalsService,
     @Optional() @Inject('STRATEGIES_STORAGE_PATH') storagePath?: string,
+    @Optional() @Inject(EnvService) env?: EnvService,
+    @Optional() @Inject(TokenStorageService) private readonly tokens?: TokenStorageService,
   ) {
     const isTest = process.env.NODE_ENV === 'test' || process.env.VITEST === 'true';
-    this.storagePath = storagePath || process.env.STRATEGIES_STORAGE_PATH || (isTest ? '' : path.resolve(process.cwd(), '.data/strategies.json'));
+    this.storagePath = storagePath || process.env.STRATEGIES_STORAGE_PATH || (isTest ? '' : path.resolve(env?.config.STATE_DIRECTORY ?? '.data', 'strategies.json'));
     if (this.storagePath) {
       this.loadFromDisk();
     } else {
@@ -57,39 +61,33 @@ export class StrategiesService {
             try {
               const validated = StrategyConfigSchema.parse(strat);
               this.strategies.set(validated.id, validated);
-            } catch {
-              // skip invalid entries
-            }
+            } catch { throw new Error('Invalid persisted strategy.'); }
           }
         }
         if (parsed?.versionHistory && typeof parsed.versionHistory === 'object') {
           for (const [id, hist] of Object.entries(parsed.versionHistory)) {
             if (Array.isArray(hist)) {
-              this.strategyVersionHistory.set(id, hist as StrategyConfig[]);
+              this.strategyVersionHistory.set(id, hist.map(record => StrategyConfigSchema.parse(record)));
             }
           }
         }
       }
-    } catch (err) {
-      console.warn('[StrategiesService] Could not load persisted strategies from disk:', err);
-    }
+    } catch { throw new Error('Persisted strategies cannot be validated; trading startup is blocked.'); }
   }
 
   private saveToDisk(): void {
     if (!this.storagePath) return;
+    const directory = path.dirname(this.storagePath);
+    fs.mkdirSync(directory, {recursive:true, mode:0o700});
+    const temporary = this.storagePath + '.' + randomUUID() + '.tmp';
+    const fd = fs.openSync(temporary, 'wx', 0o600);
     try {
-      const dir = path.dirname(this.storagePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      const data = {
-        strategies: Array.from(this.strategies.values()),
-        versionHistory: Object.fromEntries(this.strategyVersionHistory.entries()),
-      };
-      fs.writeFileSync(this.storagePath, JSON.stringify(data, null, 2), 'utf8');
-    } catch (err) {
-      console.warn('[StrategiesService] Could not persist strategies to disk:', err);
-    }
+      fs.writeFileSync(fd, JSON.stringify({strategies:[...this.strategies.values()], versionHistory:Object.fromEntries(this.strategyVersionHistory)}));
+      fs.fsyncSync(fd);
+    } finally { fs.closeSync(fd); }
+    fs.renameSync(temporary, this.storagePath);
+    const dirFd = fs.openSync(directory, 'r');
+    try { fs.fsyncSync(dirFd); } finally { fs.closeSync(dirFd); }
   }
 
   private findStrategyInDailyBotStorage(id: string): StrategyConfig | undefined {
@@ -306,6 +304,8 @@ export class StrategiesService {
     // Detect if immutable version bump is needed
     if (requiresVersionBump(existing, validated)) {
       validated.version = existing.version + 1;
+      validated.status = StrategyStatus.DRAFT;
+      this.proposalsService.invalidateApprovals(id);
       const history = this.strategyVersionHistory.get(id) || [];
       history.push(existing);
       this.strategyVersionHistory.set(id, history);
@@ -342,14 +342,17 @@ export class StrategiesService {
       }
     }
 
-    const underlying = parsedReq.underlying || strategy.underlying || 'NIFTY';
-    const interval = parsedReq.timeframe || strategy.timeframe || '5m';
+    const underlying = reqDto?.underlying || strategy.underlying;
+    if (underlying !== strategy.underlying) throw new Error('Backtest underlying must match the strategy.');
+    const interval = reqDto?.timeframe || strategy.timeframe;
+    if (interval !== strategy.timeframe) throw new Error('Backtest timeframe must match the strategy.');
 
-    // Fetch 100% REAL historical exchange candles from Yahoo Finance / Upstox API
+    // Underlying OHLC comes from a named provider; options premiums remain a disclosed model.
     const { candles, dataSource } = await fetchRealHistoricalCandles({
       underlying,
       days: parsedReq.days,
       interval,
+      authToken: this.tokens?.hasValidToken() ? this.tokens.getToken()?.accessToken : undefined,
       fromDate: parsedReq.fromDate,
       toDate: parsedReq.toDate,
     });
@@ -367,7 +370,7 @@ export class StrategiesService {
       id: '550e8400-e29b-41d4-a716-446655440002',
       name: 'NIFTY EMA20 RSI Long Call',
       version: 1,
-      status: StrategyStatus.PAPER_ACTIVE,
+      status: StrategyStatus.DRAFT,
       tradeMode: TradeMode.PAPER,
       market: 'NSE_FO',
       underlying: 'NIFTY',

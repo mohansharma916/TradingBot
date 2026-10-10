@@ -18,8 +18,8 @@ export interface StoredDailyBotDraft {
  *
  * Components computed:
  * - Brokerage: Flat ₹20 buy + ₹20 sell = ₹40.00
- * - STT: 0.1% on sell-side turnover
- * - Exchange Turnover Fee: 0.0505% on total turnover
+ * - STT: 0.15% on sell-side turnover
+ * - Exchange Turnover Fee: 0.03553% on total turnover
  * - SEBI Turnover Charge: ₹10 per crore (0.0001%)
  * - Stamp Duty: 0.003% on buy-side turnover
  * - GST: 18% on (Brokerage + Exchange + SEBI charges)

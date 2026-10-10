@@ -6,22 +6,9 @@ import { StrategyConfig } from '@trading-bot/contracts';
  */
 export function calculateStrategyVersionHash(config: Partial<StrategyConfig>): string {
   // Extract core parameters that define the strategy's trading logic
-  const canonicalData = {
-    underlying: config.underlying,
-    timeframe: config.timeframe,
-    allowedInstruments: config.allowedInstruments,
-    session: config.session,
-    entry: config.entry,
-    selection: config.selection,
-    risk: {
-      maxCapitalInr: config.risk?.maxCapitalInr ?? config.maxCapitalInr,
-      maxAllInTradeLossInr: config.risk?.maxAllInTradeLossInr ?? config.maxAllInTradeLossInr,
-      maxAllInDailyLossInr: config.risk?.maxAllInDailyLossInr ?? config.maxAllInDailyLossInr,
-      maxOpenPositions: config.risk?.maxOpenPositions ?? config.maxOpenPositions,
-      targetNetProfitInr: config.risk?.targetNetProfitInr ?? config.targetNetProfitInr,
-    },
-    exit: config.exit,
-  };
+  // Exclude presentation/lifecycle fields; retain EVERY parameter that can affect evaluation,
+  // selection, sizing, exits, approvals or execution. Newly added trading fields participate too.
+  const { id, name, description, tags, status, isArchived, version, versionHash, ...canonicalData } = config;
 
   function canonicalize(obj: any): any {
     if (obj === null || typeof obj !== 'object') return obj;

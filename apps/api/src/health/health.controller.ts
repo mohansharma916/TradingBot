@@ -1,4 +1,6 @@
-import { Controller, Get, Inject } from '@nestjs/common';
+import { Controller, Get, Inject, Optional } from '@nestjs/common';
+import { TradingModeService } from '../trading/trading-mode.service';
+import { RuntimeLeaseService } from '../trading/runtime-lease.service';
 import { EnvService } from '../config/env.service';
 import { DiagnosticsReport } from '@trading-bot/contracts';
 import { UpstoxMarketFeedService } from '../market-data/upstox-market-feed.service';
@@ -16,6 +18,8 @@ export class HealthController {
     @Inject(TokenStorageService) private readonly tokenStorage: TokenStorageService,
     @Inject(RiskService) private readonly riskService: RiskService,
     @Inject(ReconciliationSchedulerService) private readonly reconciliationScheduler: ReconciliationSchedulerService,
+    @Optional() @Inject(TradingModeService) private readonly mode?: TradingModeService,
+    @Optional() @Inject(RuntimeLeaseService) private readonly lease?: RuntimeLeaseService,
   ) {}
 
   @Get('live')
@@ -25,22 +29,19 @@ export class HealthController {
       uptime: Math.floor((Date.now() - this.startTime) / 1000),
       timestamp: new Date().toISOString(),
       service: 'trading-api',
-      mode: this.envService.config.SYSTEM_MODE,
+      mode: this.mode?.getMode() ?? this.envService.config.SYSTEM_MODE,
     };
   }
 
   @Get('ready')
   getReady() {
-    return {
-      status: 'ok',
-      checks: {
-        envConfig: true,
-        database: true,
-        brokerAdapterConfigured: Boolean(this.envService.config.UPSTOX_API_KEY),
-        workerConnected: true,
-      },
-      timestamp: new Date().toISOString(),
+    const checks = {
+      ownerLoginConfigured: Boolean(this.envService.config.OWNER_PASSWORD),
+      accountRuntimeOwned: this.lease?.isOwner() ?? false,
+      brokerSessionAvailable: !this.mode?.isLive() || this.tokenStorage.hasValidToken(),
+      genuineFeedAvailable: this.marketFeed.getFeedHealth().provenance === 'LIVE',
     };
+    return {status: Object.values(checks).every(Boolean) ? 'ready' : 'degraded', checks, timestamp:new Date().toISOString()};
   }
 
   @Get('diagnostics')
@@ -54,17 +55,17 @@ export class HealthController {
     return {
       uptimeSeconds: Math.floor((Date.now() - this.startTime) / 1000),
       memoryUsageMb: Number((memory.heapUsed / 1024 / 1024).toFixed(2)),
-      systemMode: this.envService.config.SYSTEM_MODE,
+      systemMode: this.mode?.getMode() ?? this.envService.config.SYSTEM_MODE,
       marketFeed: {
-        connected: feedHealth.staleCount === 0,
+        connected: feedHealth.status === 'CONNECTED' && feedHealth.provenance === 'LIVE',
         latencyMs: feedHealth.feedLatencyMs,
         staleTicksCount: feedHealth.staleCount,
-        lastTickAt: new Date().toISOString(),
+        lastTickAt: feedHealth.lastTickReceivedAt ?? null,
       },
       brokerConnection: {
         authenticated: tokenMeta.exists && !tokenMeta.isExpired,
-        rateLimiterTokensRemaining: 25,
-        egressIpMatch: true,
+        rateLimiterTokensRemaining: null,
+        egressIpMatch: null,
         registeredIp: this.envService.config.UPSTOX_EGRESS_IP,
         tokenExpiresInSeconds: tokenMeta.secondsRemaining,
       },

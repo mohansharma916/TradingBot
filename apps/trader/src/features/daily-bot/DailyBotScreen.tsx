@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View,
   useWindowDimensions,
@@ -7,6 +7,7 @@ import { useRouter } from 'expo-router';
 import { DailyBotConfig, DailyBotSession, DailyBotSetup, TradeMode } from '@trading-bot/contracts';
 import { colors, spacing } from '@trading-bot/ui';
 import { useDailyBot } from '../../hooks/useDailyBot';
+import { useWorkstation } from '../../hooks/useWorkstation';
 import {
   configToDraft, createDailyBotDraft, DailyBotDraft, validateDailyBotDraft,
   estimateSebiOptionCharges, loadSavedDraft, saveDraftToStorage,
@@ -98,7 +99,7 @@ function SessionMonitor({ session, busy, control }: {
         <Metric label="Profit protection target" value={money(trade.protectedNetProfit)} />
         <Metric label="Trailing" value={trade.trailingActive ? 'ACTIVE' : 'Waiting for threshold'} />
       </View>
-      <Text style={styles.hint}>Order {trade.orderId} · Paper protection is managed by the backend. Profit protection is a target.</Text>
+      <Text style={styles.hint}>Order {trade.orderId} · {session.config.tradingMode === TradeMode.PAPER ? 'Virtual position protection' : 'Broker position protection'} is managed by the backend. Profit protection is a target.</Text>
     </View>)}
     <Text style={styles.label}>Recent Bot Events</Text>
     {session.events.slice(-8).reverse().map((event, index) => <View key={`${event.timestamp}-${index}`} style={styles.event}>
@@ -111,6 +112,7 @@ function SessionMonitor({ session, busy, control }: {
 
 export default function DailyBotScreen() {
   const bot = useDailyBot();
+  const { state: workstation, snapshot } = useWorkstation();
   const router = useRouter();
   const { width } = useWindowDimensions();
   const [tab, setTab] = useState<'today' | 'history' | 'report'>('today');
@@ -121,13 +123,21 @@ export default function DailyBotScreen() {
   const [consent, setConsent] = useState(false);
   const today = bot.today;
   const session = today?.activeSession ?? today?.session;
+  const previousMode = useRef(workstation.mode);
+  useEffect(() => {
+    if (previousMode.current === workstation.mode) return;
+    previousMode.current = workstation.mode;
+    setDraft((current) => current ? { ...current, tradingMode: workstation.mode } : current);
+    setSavedSetup(null); setConsent(false); bot.clearPreflight();
+    void bot.refresh();
+  }, [workstation.mode]);
 
   // Restore draft from storage if returning to this screen
   useEffect(() => {
     if (!today || draft !== null || today.activeSession || today.session) return;
     const stored = loadSavedDraft(today.tradingDate);
     if (stored) {
-      setDraft(stored.draft);
+      setDraft({ ...stored.draft, tradingMode: workstation.mode });
       setStep(stored.step);
       if (stored.savedSetupId) {
         const found = today.setups.find((s) => s.id === stored.savedSetupId) ?? (today.todaySetup?.id === stored.savedSetupId ? today.todaySetup : null);
@@ -163,8 +173,9 @@ export default function DailyBotScreen() {
     if (!today) return;
     const initialDraft = setup ? configToDraft({ ...setup.config, tradingDate: today.tradingDate }) :
       createDailyBotDraft(today.tradingDate, today.strategies[0]);
+    initialDraft.tradingMode = workstation.mode;
     setDraft(initialDraft);
-    setSavedSetup(setup?.config.tradingDate === today.tradingDate ? setup : null);
+    setSavedSetup(setup?.config.tradingDate === today.tradingDate && setup.config.tradingMode === workstation.mode ? setup : null);
     setStep(0); setConsent(false); setValidationError(null); bot.clearPreflight(); setTab('today');
     saveDraftToStorage(today.tradingDate, initialDraft, 0, setup?.id);
   };
@@ -225,8 +236,8 @@ export default function DailyBotScreen() {
     {today && <>
       <View style={styles.row}>
         <Metric label="Trading date · IST" value={today.tradingDate} />
-        <Metric label="Available paper funds" value={money(today.availableFunds)} />
-        <Metric label="Execution" value={session?.config.tradingMode ?? 'PAPER'} />
+        <Metric label={workstation.mode === TradeMode.PAPER ? "Available virtual funds" : "Available Upstox funds"} value={snapshot?.funds.status === 'UNAVAILABLE' ? 'Unavailable' : money(today.availableFunds)} />
+        <Metric label="Execution" value={session?.config.tradingMode ?? workstation.mode} />
         <Metric label="Today's bot" value={session?.status ?? (today.todaySetup ? 'SETUP SAVED' : 'NOT STARTED')} />
       </View>
       <View style={styles.tabs}>
@@ -267,18 +278,14 @@ export default function DailyBotScreen() {
             {field('name', 'Setup Name', 'A name to help you reuse this configuration.', false)}
             {field('dailyCapitalBudget', 'Total Trading Fund for Today (₹)', 'Capital allocation, separate from permitted loss. Maximum account capital: ₹10,000.')}
             {field('maxCapitalPerTrade', 'Maximum Capital Per Trade (₹)')}
-            <Text style={styles.label}>Execution Mode</Text>
-            <View style={styles.row}>{[{ mode: TradeMode.PAPER, label: 'Paper Trading' }, { mode: TradeMode.APPROVAL, label: 'Manual Approval' },
-              { mode: TradeMode.AUTO, label: 'Fully Automated' }].map(({ mode, label }) =>
-              <Button key={mode} label={label} secondary={draft.tradingMode !== mode}
-                disabled={!today.supportedModes.includes(mode)} onPress={() => update('tradingMode', mode)} />)}</View>
-            <Text style={styles.hint}>Paper mode executes strategy signals with simulated funds. Live modes require validated broker protection and account authorization.</Text>
+            <Text style={styles.label}>Execution Account: {workstation.mode === TradeMode.PAPER ? 'Testing' : 'Live'}</Text>
+            <Text style={styles.hint}>Choose Testing or Live in the top navigation. Testing uses virtual funds with strategy signals from available market data. Live uses your verified Upstox account and requires owner approval.</Text>
           </>}
           {step === 1 && <View style={styles.fields}>
             {field('dailyMaxLossAllIn', 'Maximum Daily Loss (₹)', 'Includes trading costs and outstanding risk. Account cap: ₹1,500.')}
             {field('perTradeMaxLossAllIn', 'Maximum Risk Per Trade (₹)', 'Stop-loss risk plus charges and slippage. Account cap: ₹500.')}
             {field('maximumTradesPerDay', 'Maximum Trades Per Day')}
-            {field('maxRoundTripCharges', 'Maximum Estimated Round-trip Charges (₹)', 'Statutory fees per round trip. Automatically estimated as per SEBI rules.')}
+            {field('maxRoundTripCharges', 'Maximum Estimated Round-trip Charges (₹)', 'Estimated fees per round trip. Actual charges come from fills and broker reconciliation.')}
 
             {(() => {
               const currentCap = Number(draft.maxCapitalPerTrade) || 5000;
@@ -293,12 +300,12 @@ export default function DailyBotScreen() {
                     </Text>
                   </View>
                   <Text style={styles.hint}>
-                    Calculated live per SEBI & NSE F&O statutory rules for ₹{currentCap.toLocaleString('en-IN')} trade capital:
+                    Estimated from configured statutory rates for ₹{currentCap.toLocaleString('en-IN')} trade capital:
                   </Text>
                   <View style={styles.sebiGrid}>
                     <Text style={styles.hint}>• Brokerage: ₹{sebi.breakdown.brokerage.toFixed(2)} (Flat ₹20 buy + ₹20 sell)</Text>
-                    <Text style={styles.hint}>• STT (0.1% sell-side): ₹{sebi.breakdown.stt.toFixed(2)}</Text>
-                    <Text style={styles.hint}>• Exchange charges (0.0505%): ₹{sebi.breakdown.exchangeCharges.toFixed(2)}</Text>
+                    <Text style={styles.hint}>• STT (0.15% sell-side): ₹{sebi.breakdown.stt.toFixed(2)}</Text>
+                    <Text style={styles.hint}>• Exchange charges (0.03553%): ₹{sebi.breakdown.exchangeCharges.toFixed(2)}</Text>
                     <Text style={styles.hint}>• GST (18% on fees): ₹{sebi.breakdown.gst.toFixed(2)}</Text>
                     <Text style={styles.hint}>• Stamp Duty & SEBI charges: ₹{(sebi.breakdown.stampDuty + sebi.breakdown.sebiCharges).toFixed(2)}</Text>
                   </View>
@@ -384,7 +391,7 @@ export default function DailyBotScreen() {
             <View style={styles.strategyFooterNote}>
               <Text style={styles.label}>Need Custom Strategy Rules or Backtesting?</Text>
               <Text style={styles.hint}>
-                The strategy selected above is pre-configured and ready to run today. If you need to view historical logs, edit code, or test indicators in the Strategy Studio, you can open it without losing your setup progress.
+                The selected strategy must pass the readiness checks before this session starts. Open the Strategy Studio to review its rules and historical tests without losing your setup progress.
               </Text>
               <Button
                 label="Open Strategy Studio (Draft Safely Saved)"

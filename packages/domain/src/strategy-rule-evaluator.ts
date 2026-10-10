@@ -37,6 +37,7 @@ export interface EvaluatorCache {
 export function buildIndicatorCache(
   candles: Candle[],
   astConfig: StrategyAstConfig,
+  options: { timeframeMinutes?: number; candleTimestampBasis?: 'OPEN' | 'CLOSE' } = {},
 ): EvaluatorCache {
   const cache: EvaluatorCache = {
     indicatorSeries: new Map(),
@@ -136,7 +137,9 @@ export function buildIndicatorCache(
 
       case IndicatorType.HIGHEST_HIGH: {
         const lookback = ind.lookback ?? period;
-        const series = calculateHighestHigh(candles, lookback);
+        const series = astConfig.templateId === 'tpl_opening_range_breakout' && id === 'high_3_bars'
+          ? openingRangeSeries(candles, 'high', options)
+          : calculateHighestHigh(candles, lookback);
         const padded = padSeries(series, candles.length);
         cache.indicatorSeries.set(id, padded);
         if (lookback > maxWarmup) maxWarmup = lookback;
@@ -145,7 +148,9 @@ export function buildIndicatorCache(
 
       case IndicatorType.LOWEST_LOW: {
         const lookback = ind.lookback ?? period;
-        const series = calculateLowestLow(candles, lookback);
+        const series = astConfig.templateId === 'tpl_opening_range_breakout' && id === 'low_3_bars'
+          ? openingRangeSeries(candles, 'low', options)
+          : calculateLowestLow(candles, lookback);
         const padded = padSeries(series, candles.length);
         cache.indicatorSeries.set(id, padded);
         if (lookback > maxWarmup) maxWarmup = lookback;
@@ -171,6 +176,34 @@ export function buildIndicatorCache(
 
   cache.warmupRequired = maxWarmup;
   return cache;
+}
+
+/** Freeze the complete 09:15–09:30 IST range; missing opening bars never become a guessed range. */
+function openingRangeSeries(candles: Candle[], field: 'high' | 'low', options: { timeframeMinutes?: number; candleTimestampBasis?: 'OPEN' | 'CLOSE' }): number[] {
+  const interval = (options.timeframeMinutes ?? 5) * 60000;
+  let day = '';
+  let collected: Candle[] = [];
+  let frozen = NaN;
+  return candles.map((candle) => {
+    const timestamp = Number(new Date(candle.timestamp));
+    const start = timestamp - (options.candleTimestampBasis === 'CLOSE' ? interval : 0);
+    const ist = new Date(start + 330 * 60000);
+    if (!Number.isFinite(start)) return NaN;
+    const currentDay = ist.toISOString().slice(0, 10);
+    if (currentDay !== day) { day = currentDay; collected = []; frozen = NaN; }
+    const minutes = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    if (minutes >= 555 && minutes < 570) {
+      collected.push(candle);
+      const expected = 15 * 60000 / interval;
+      if (Number.isInteger(expected) && collected.length === expected && minutes + interval / 60000 === 570) {
+        const first = Number(new Date(collected[0]!.timestamp)) - (options.candleTimestampBasis === 'CLOSE' ? interval : 0);
+        const firstMinutes = new Date(first + 330 * 60000).getUTCHours() * 60 + new Date(first + 330 * 60000).getUTCMinutes();
+        const contiguous = collected.every((bar, index) => Number(new Date(bar.timestamp)) - Number(new Date(collected[0]!.timestamp)) === index * interval);
+        if (firstMinutes === 555 && contiguous) frozen = field === 'high' ? Math.max(...collected.map((bar) => bar.high)) : Math.min(...collected.map((bar) => bar.low));
+      }
+    }
+    return frozen;
+  });
 }
 
 function padSeries(series: number[], targetLength: number): number[] {
@@ -459,6 +492,14 @@ export function evaluateStrategyAst(
     }
   }
 
+  const confirming = astConfig.entryRules?.confirmingCandles ?? 1;
+  if (confirming > 1) {
+    for (let offset = 1; offset < confirming; offset++) {
+      bullish = bullish && barIndex - offset >= cache.warmupRequired && evaluateRuleGroup(astConfig.bullishEntry, barIndex - offset, candles, cache);
+      bearish = bearish && barIndex - offset >= cache.warmupRequired && evaluateRuleGroup(astConfig.bearishEntry, barIndex - offset, candles, cache);
+    }
+  }
+
   return {
     bullishSignal: bullish,
     bearishSignal: bearish,
@@ -537,9 +578,9 @@ export function convertLegacyStrategyToAst(strategy: StrategyConfig): StrategyAs
     },
     exitRules: {
       stopLossBasis: 'OPTION_PREMIUM',
-      stopLossValue: Math.max(3, (strategy.risk?.maxAllInTradeLossInr ?? 200) / 25),
+      stopLossValue: strategy.exit?.stopLossPoints,
       targetProfitBasis: 'OPTION_PREMIUM',
-      targetProfitValue: Math.max(5, (strategy.risk?.targetNetProfitInr ?? 300) / 25),
+      targetProfitValue: strategy.exit?.targetPoints,
       marketCutoffTime: strategy.exit?.marketCutoff ?? '15:10',
       exitOnOppositeSignal: false,
       exitOnIndicatorReversal: false,

@@ -30,6 +30,9 @@ export function calculateOptionCharges(params: {
   quantity: number;
 }): ChargeBreakdown {
   const { buyPrice, sellPrice, quantity } = params;
+  if (![buyPrice, sellPrice, quantity].every(Number.isFinite) || buyPrice < 0 || sellPrice < 0 || buyPrice + sellPrice <= 0 || !Number.isInteger(quantity) || quantity <= 0) {
+    throw new RangeError('Charges require nonnegative finite turnover, an executed leg and a positive integer quantity.');
+  }
 
   const buyTurnover = buyPrice * quantity;
   const sellTurnover = sellPrice * quantity;

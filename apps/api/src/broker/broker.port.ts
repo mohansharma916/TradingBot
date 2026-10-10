@@ -7,6 +7,9 @@ import {
 } from '@trading-bot/contracts';
 
 export interface FundsSnapshot {
+  source?: 'LIVE_BROKER' | 'PAPER_SIMULATION' | 'UNAVAILABLE';
+  status?: 'VERIFIED' | 'SIMULATED' | 'UNAVAILABLE';
+  verifiedAt?: string;
   currency: string;
   availableCash: number;
   usedMargin: number;
@@ -24,9 +27,19 @@ export interface MarginEstimate {
 
 export interface OrderAcknowledgement {
   orderId: string;
+  orderIds?: string[];
   tag: string;
   status: string;
   message: string;
+}
+
+export interface ConfirmedOrderFill {
+  status: string;
+  filledQuantity: number;
+  averagePrice: number;
+  complete: boolean;
+  terminal: boolean;
+  orderIds: string[];
 }
 
 export interface BrokerPort {
@@ -41,4 +54,6 @@ export interface BrokerPort {
   modifyOrder(req: any): Promise<OrderAcknowledgement>;
   cancelOrder(orderId: string): Promise<void>;
   placeProtectiveExit?(req: any): Promise<ProtectionResult>;
+  cancelProtectiveExit?(gttOrderId: string): Promise<void>;
+  confirmFill?(ack: OrderAcknowledgement, expectedQuantity: number): Promise<ConfirmedOrderFill>;
 }

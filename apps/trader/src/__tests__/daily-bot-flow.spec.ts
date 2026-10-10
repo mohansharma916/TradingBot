@@ -9,7 +9,7 @@ import {
 const mocks = vi.hoisted(() => ({
   getDailyBotToday: vi.fn(), createDailyBotSetup: vi.fn(), cloneDailyBotSetup: vi.fn(),
   preflightDailyBot: vi.fn(), startDailyBot: vi.fn(), controlDailyBot: vi.fn(),
-  push: vi.fn(), emergencyStop: vi.fn(), width: 1200, platform: 'web',
+  push: vi.fn(), emergencyStop: vi.fn(), width: 1200, platform: 'web', mode: 'PAPER', authenticated: true,
 }));
 
 vi.mock('../services/api', () => ({ apiClient: mocks }));
@@ -25,8 +25,11 @@ vi.mock('react-native', async () => {
   };
 });
 vi.mock('../hooks/useWorkstation', () => ({
+  WorkstationProvider: ({ children }: { children: React.ReactNode }) => children,
   useWorkstation: () => ({
-    state: { mode: TradeMode.PAPER, riskState: RiskState.DISARMED, egressIpVerified: true },
+    state: { mode: mocks.mode, riskState: RiskState.DISARMED, egressIpVerified: true },
+    isAuthenticated: mocks.authenticated, checkingSession: false, pending: null, error: null,
+    snapshot: null, login: vi.fn(), logout: vi.fn(), selectMode: vi.fn(),
     emergencyStop: mocks.emergencyStop,
   }),
 }));
@@ -94,6 +97,7 @@ beforeEach(() => {
   // Expo uses an automatic JSX transform; expose React for Vitest's classic TSX transform.
   vi.stubGlobal('React', React);
   mocks.width = 1200; mocks.platform = 'web';
+  mocks.mode = 'PAPER'; mocks.authenticated = true;
   today = { tradingDate: '2026-10-12', setups: [], todaySetup: null, previousSetup: null,
     activeSession: null, session: null, strategies: [strategy, otherStrategy],
     availableFunds: 10000, supportedModes: [TradeMode.PAPER] };
@@ -128,11 +132,21 @@ afterEach(() => {
 });
 
 describe('Daily Trading Bot setup and execution flow', () => {
+  it('inherits the globally selected Live account when saving a setup', async () => {
+    mocks.mode = 'APPROVAL'; today.supportedModes = [TradeMode.PAPER, TradeMode.APPROVAL];
+    render(React.createElement(DailyBotScreen));
+    await beginSetup();
+    expect(screen.getByText('Execution Account: Live')).toBeTruthy();
+    step('Step 6: Review & Start');
+    fireEvent.click(button('Save Setup & Check Readiness'));
+    await screen.findByText('Ready to Start');
+    expect(mocks.createDailyBotSetup).toHaveBeenCalledWith(expect.objectContaining({ tradingMode: TradeMode.APPROVAL }));
+  });
   it('shows the first setup action and waits for a saved, checked, authorized session', async () => {
     render(React.createElement(DailyBotScreen));
     await beginSetup();
-    expect(button('Manual Approval').getAttribute('aria-disabled')).toBe('true');
-    expect(button('Fully Automated').getAttribute('aria-disabled')).toBe('true');
+    expect(screen.queryByRole('button', { name: 'Manual Approval' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Fully Automated' })).toBeNull();
     step('Step 6: Review & Start');
     expect(button('Start Trading Bot').getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(button('Start Trading Bot'));
@@ -280,12 +294,20 @@ describe('Daily Trading Bot setup and execution flow', () => {
 });
 
 describe('Daily Trading Bot navigation', () => {
+  it('gates the trading application behind the owner login form', () => {
+    mocks.authenticated = false;
+    render(React.createElement(RootLayout));
+    expect(screen.getByRole('textbox', { name: 'Owner username' })).toBeTruthy();
+    expect(screen.getByLabelText('Owner password')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Daily Trading Bot' })).toBeNull();
+  });
   it.each([
     ['web', 1200], ['web', 390], ['ios', 390],
   ] as const)('puts the main feature first and Dashboard last in the rendered %s menu at width %i', (platform, width) => {
     mocks.platform = platform; mocks.width = width;
     render(React.createElement(RootLayout));
-    const names = screen.getAllByRole('button').map((element) => element.getAttribute('aria-label')).filter((name) => name !== 'Emergency freeze' && name !== null);
+    const navNames = ['Daily Trading Bot', 'Strategies', 'Markets', 'Proposals', 'Orders', 'Risk', 'Health', 'Dashboard'];
+    const names = screen.getAllByRole('button').map((element) => element.getAttribute('aria-label')).filter((name) => navNames.includes(name || ''));
     expect(names[0]).toBe('Daily Trading Bot');
     expect(names[names.length - 1]).toBe('Dashboard');
     fireEvent.click(button('Daily Trading Bot'));

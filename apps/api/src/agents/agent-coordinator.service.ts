@@ -20,7 +20,6 @@ export class AgentCoordinatorService {
     @Inject(StrategyAnalystAgent) private readonly analyst: StrategyAnalystAgent,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
   ) {
-    this.seedSampleTasks();
   }
 
   /**
@@ -39,7 +38,7 @@ export class AgentCoordinatorService {
       id: taskId,
       agentType: AgentType.COORDINATOR,
       status: AgentTaskStatus.RUNNING,
-      objective: `Scan ${strategy.underlying} liquid options and evaluate 5m EMA/RSI rules for strategy '${strategy.name}'`,
+      objective: `Scan ${strategy.underlying} observed option quotes and evaluate ${strategy.timeframe} strategy rules for '${strategy.name}'`,
       toolsInvoked: [],
       resultSummary: 'Executing MarketScanner...',
       startedAt,
@@ -106,35 +105,4 @@ export class AgentCoordinatorService {
     }
   }
 
-  private seedSampleTasks(): void {
-    this.recentTasks.push({
-      id: '550e8400-e29b-41d4-a716-446655440077',
-      agentType: AgentType.COORDINATOR,
-      status: AgentTaskStatus.COMPLETED,
-      objective: 'Scheduled 5m close scan for NIFTY EMA20 RSI strategy',
-      toolsInvoked: [
-        {
-          tool: 'scan_universe' as any,
-          timestamp: new Date(Date.now() - 300000).toISOString(),
-          input: { underlying: 'NIFTY', minVolume: 1000, maxSpreadPct: 1.0 },
-          output: { candidatesCount: 8, topSymbol: 'NIFTY26OCT25100CE', topSpread: 0.24 },
-        },
-        {
-          tool: 'calculate_indicators' as any,
-          timestamp: new Date(Date.now() - 295000).toISOString(),
-          input: { instrumentKey: 'NSE_INDEX|Nifty 50', timeframe: '5m', emaPeriod: 20, rsiPeriod: 14 },
-          output: { isWarmedUp: true, ema: 25115.0, rsi: 58.4, vwap: 25102.5 },
-        },
-        {
-          tool: 'evaluate_strategy' as any,
-          timestamp: new Date(Date.now() - 290000).toISOString(),
-          input: { strategyId: '550e8400-e29b-41d4-a716-446655440002', instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE' },
-          output: { passed: true, signal: 'BUY_CALL', confidence: 0.78 },
-        },
-      ],
-      resultSummary: 'Signal confirmed for NIFTY 25100 CE. 5m EMA crossed above, RSI 58.4 with 0.24% spread. Proposal drafted.',
-      startedAt: new Date(Date.now() - 300000).toISOString(),
-      completedAt: new Date(Date.now() - 285000).toISOString(),
-    });
-  }
 }

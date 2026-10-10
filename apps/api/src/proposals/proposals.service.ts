@@ -1,19 +1,32 @@
-import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Inject, Optional } from '@nestjs/common';
 import {
-  AgentType,
-  OrderSide,
-  ProductType,
   ProposalStatus,
   TradeProposal,
+  TradeProposalSchema,
 } from '@trading-bot/contracts';
 import { EventsGateway } from '../websocket/events.gateway';
+import { EnvService } from '../config/env.service';
+import fs from 'node:fs';
+import path from 'node:path';
 
 @Injectable()
 export class ProposalsService {
   private proposals: Map<string, TradeProposal> = new Map();
 
-  constructor(@Inject(EventsGateway) private readonly gateway: EventsGateway) {
-    this.seedSampleProposal();
+  private storage: string | null;
+  constructor(@Inject(EventsGateway) private readonly gateway: EventsGateway,
+    @Optional() @Inject(EnvService) env?: EnvService) {
+    this.storage = !env || process.env.VITEST && (!env.config.STATE_DIRECTORY || env.config.STATE_DIRECTORY === '.data') ? null : path.resolve(env.config.STATE_DIRECTORY ?? '.data','proposals.json');
+    if (this.storage && fs.existsSync(this.storage)) {
+      const saved = JSON.parse(fs.readFileSync(this.storage,'utf8'));
+      if (!Array.isArray(saved)) throw new Error('Proposal store is invalid.');
+      for (const record of saved) {
+        const proposal = TradeProposalSchema.parse(record);
+        // Owner approvals are invalid after process restart; dispatch must be explicitly reviewed again.
+        if ([ProposalStatus.APPROVED, ProposalStatus.PENDING].includes(proposal.status)) proposal.status = ProposalStatus.SUPERSEDED;
+        this.proposals.set(proposal.id,proposal);
+      }
+    }
   }
 
   public getAllProposals(): TradeProposal[] {
@@ -36,7 +49,8 @@ export class ProposalsService {
   }
 
   public addProposal(proposal: TradeProposal): void {
-    this.proposals.set(proposal.id, proposal);
+    this.proposals.set(proposal.id, TradeProposalSchema.parse(proposal));
+    this.persist();
     this.gateway.broadcast('proposal.created', proposal);
   }
 
@@ -57,6 +71,7 @@ export class ProposalsService {
 
     proposal.status = ProposalStatus.APPROVED;
     this.proposals.set(id, proposal);
+    this.persist();
 
     const intentId = `intent_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     this.gateway.broadcast('proposal.approved', { proposalId: id, intentId });
@@ -76,6 +91,7 @@ export class ProposalsService {
 
     proposal.status = ProposalStatus.REJECTED;
     this.proposals.set(id, proposal);
+    this.persist();
     this.gateway.broadcast('proposal.rejected', { proposalId: id, reason });
 
     return {
@@ -88,51 +104,28 @@ export class ProposalsService {
     const now = Date.now();
     for (const [id, proposal] of this.proposals.entries()) {
       if (
-        proposal.status === ProposalStatus.PENDING &&
+        [ProposalStatus.PENDING, ProposalStatus.APPROVED].includes(proposal.status) &&
         new Date(proposal.expiresAt).getTime() <= now
       ) {
         proposal.status = ProposalStatus.EXPIRED;
         this.proposals.set(id, proposal);
+    this.persist();
         this.gateway.broadcast('proposal.expired', { proposalId: id });
       }
     }
   }
 
-  private seedSampleProposal(): void {
-    const sample: TradeProposal = {
-      id: '550e8400-e29b-41d4-a716-446655440001',
-      strategyId: '550e8400-e29b-41d4-a716-446655440002',
-      strategyVersion: 1,
-      proposingAgent: AgentType.STRATEGY_ANALYST,
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      symbol: 'NIFTY26OCT25100CE',
-      side: OrderSide.BUY,
-      product: ProductType.I,
-      suggestedEntryPrice: 122.5,
-      suggestedStopPrice: 114.0,
-      suggestedTargetPrice: 136.0,
-      lotSize: 25,
-      quantity: 25,
-      estimatedCapitalRequired: 3062.5,
-      estimatedRoundTripCosts: 58.2,
-      allInMaxLoss: 270.7,
-      estimatedNetProfit: 279.3,
-      evidence: {
-        indicators: {
-          ema20: 25115.0,
-          rsi14: 58.4,
-          vwap: 25102.5,
-          spreadPct: 0.24,
-          volume: 45000,
-        },
-        rationale: '5m EMA bullish cross + RSI 58.4 confirmation on closed bar with tight 0.24% spread.',
-        confidence: 0.78,
-      },
-      status: ProposalStatus.PENDING,
-      expiresAt: new Date(Date.now() + 600000).toISOString(), // 10 minutes in future for demo
-      createdAt: new Date().toISOString(),
-    };
-
-    this.proposals.set(sample.id, sample);
+  public invalidateApprovals(strategyId?: string): void {
+    for (const proposal of this.proposals.values()) if ((!strategyId || proposal.strategyId === strategyId) && [ProposalStatus.PENDING,ProposalStatus.APPROVED].includes(proposal.status)) proposal.status = ProposalStatus.SUPERSEDED;
+    this.persist();
+  }
+  private persist(): void {
+    if (!this.storage) return;
+    fs.mkdirSync(path.dirname(this.storage),{recursive:true,mode:0o700});
+    const temporary = this.storage + '.' + process.pid + '.tmp';
+    const descriptor = fs.openSync(temporary,'w',0o600);
+    try { fs.writeFileSync(descriptor,JSON.stringify(Array.from(this.proposals.values()))); fs.fsyncSync(descriptor); }
+    finally { fs.closeSync(descriptor); }
+    fs.renameSync(temporary,this.storage);
   }
 }

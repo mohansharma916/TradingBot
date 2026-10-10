@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import {
   DailyBotCloneRequestSchema,
   DailyBotConfig,
@@ -20,6 +20,7 @@ import { RiskReservationManager } from '../risk/risk-reservation.manager';
 import { StrategiesService } from '../strategies/strategies.service';
 import { DailyBotExecutionService } from './daily-bot-execution.service';
 import { DailyBotState, DailyBotStore } from './daily-bot.store';
+import { TradingModeService } from '../trading/trading-mode.service';
 
 export function dailyBotTradingDate(date = new Date()): string {
   return new Date(date.getTime() + 330 * 60_000).toISOString().slice(0, 10);
@@ -38,8 +39,8 @@ function isTradingDate(date: string): boolean {
   return day !== 0 && day !== 6 && !NSE_HOLIDAYS_2026[date];
 }
 
-function dayOutcomes(state: DailyBotState, tradingDate: string) {
-  const sessions = state.sessions.filter((session) => session.config.tradingDate === tradingDate);
+function dayOutcomes(state: DailyBotState, tradingDate: string, mode: TradeMode) {
+  const sessions = state.sessions.filter((session) => session.config.tradingDate === tradingDate && session.config.tradingMode === mode);
   const closedTrades = Array.from(new Map(sessions.flatMap((session) => session.trades).filter((trade) => trade.status === 'CLOSED').map((trade) => [trade.orderId, trade])).values());
   return {
     sessions,
@@ -72,6 +73,7 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
     @Inject(StrategiesService) private readonly strategies: StrategiesService,
     @Inject(EnvService) private readonly env: EnvService,
     @Inject(RiskReservationManager) private readonly reservations: RiskReservationManager,
+    @Optional() @Inject(TradingModeService) private readonly mode?: TradingModeService,
   ) {
     const savedState = this.store.snapshot();
     this.restoreMissingStrategies(savedState);
@@ -118,9 +120,9 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
       session.lastMessage = unresolvedEntry
         ? 'API restarted during an entry intent. Its broker result was not durably confirmed; new entries are blocked until the order and account state are reviewed.'
         : restoredPosition
-        ? 'API restarted. Confirmed paper fills, positions and risk reservations were restored from durable records. Protection continues; new entries are paused until an explicit resume.'
+        ? 'API restarted. Confirmed fills, positions and risk reservations were restored from durable records. Protection continues; live exposure requires broker reconciliation and new entries require an explicit resume.'
         : hasOpenTrade(session)
-        ? 'API restarted with an unresolved paper position. New entries are blocked until broker state is reconciled; no position has been assumed closed.'
+        ? 'API restarted with unresolved exposure. New entries are blocked until broker state is reconciled; no position has been assumed closed.'
         : 'API restarted. New entries are paused; review preflight and explicitly resume.';
       session.events.push({ timestamp: new Date().toISOString(), type: 'RECOVERY_REQUIRED', message: session.lastMessage });
       changed = true;
@@ -153,7 +155,7 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
       session: sessions.find((session) => session.config.tradingDate === tradingDate) || null,
       strategies: structuredClone(this.strategies.getAllStrategies()),
       availableFunds: Math.max(0, this.reservations.getAvailableCash()),
-      supportedModes: [TradeMode.PAPER],
+      supportedModes: [TradeMode.PAPER, TradeMode.APPROVAL],
     };
   }
 
@@ -217,7 +219,7 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
     const preflight = await this.execution.preflight(setup.config, setup.strategySnapshot, existingSession);
     const state = this.store.snapshot();
     const active = state.sessions.find((session) => session.id !== exceptSessionId && isActive(session));
-    const outcomes = dayOutcomes(state, setup.config.tradingDate);
+    const outcomes = dayOutcomes(state, setup.config.tradingDate, setup.config.tradingMode);
     const currentStrategy = this.strategies.getAllStrategies().find((strategy) => strategy.id === setup.config.strategyId);
     const account = this.env.config;
     preflight.checks.push({
@@ -256,15 +258,15 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
       if (!request.operatorConsent) throw new BadRequestException('Explicit operator consent is required to start the Daily Bot.');
       const state = this.store.snapshot();
       const setup = this.getSetup(state, id);
-      if (setup.config.tradingMode !== TradeMode.PAPER) {
-        throw new BadRequestException('Daily Bot live modes are disabled until broker-confirmed delayed trailing protection is supported. Choose PAPER.');
-      }
+      const globalMode = this.mode?.getMode() ?? TradeMode.PAPER;
+      if (setup.config.tradingMode !== globalMode || ![TradeMode.PAPER, TradeMode.APPROVAL].includes(setup.config.tradingMode)) throw new BadRequestException('Saved setup must match the global Testing/PAPER or Live/APPROVAL mode. Unsupervised live automation is disabled.');
+      if (setup.config.tradingMode === TradeMode.APPROVAL && (!this.env.config.LIVE_EXECUTION_ENABLED || request.confirmationCode !== 'LIVE')) throw new BadRequestException('Live start requires LIVE_EXECUTION_ENABLED and explicit confirmationCode LIVE with operator consent.');
       if (state.sessions.some(isActive)) throw new ConflictException('An active or unresolved Daily Bot session already exists. Review that session before starting another.');
       const preflight = await this.evaluatePreflight(setup);
       if (!preflight.passed) throw new BadRequestException({ message: 'Daily Bot preflight failed', preflight });
 
       // Repeated sessions may not reset trading-day losses, trade counts or signal deduplication.
-      const outcomes = dayOutcomes(state, setup.config.tradingDate);
+      const outcomes = dayOutcomes(state, setup.config.tradingDate, setup.config.tradingMode);
       const now = new Date().toISOString();
       const session = DailyBotSessionSchema.parse({
         id: randomUUID(), setupId: setup.id, config: structuredClone(setup.config), strategySnapshot: structuredClone(setup.strategySnapshot),
@@ -274,11 +276,12 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
         trades: outcomes.closedTrades, pendingProposalId: null, pendingProposal: null,
         processedSignalKeys: outcomes.processedSignalKeys,
         lastScanBar: null,
-        events: [{ timestamp: now, type: 'STARTED', message: 'Operator authorized paper execution after successful preflight.' }],
+        events: [{ timestamp: now, type: 'STARTED', message: setup.config.tradingMode === TradeMode.APPROVAL ? 'Operator authorized a supervised Live session. Each entry requires explicit approval; confirmed fills require broker stop protection.' : 'Operator authorized simulated Testing execution after successful preflight.' }],
       });
       if (outcomes.sessions.length) session.events.push({ timestamp: now, type: 'DAY_BUDGET_RESTORED', message: 'Earlier trades, losses and consumed signals for this date were retained.' });
       state.sessions.push(session);
-      this.store.commit(state);
+      this.armForSession(session);
+      try { this.store.commit(state); } catch (error) { this.reservations.disarm(); throw error; }
       return structuredClone(session);
     });
   }
@@ -293,8 +296,7 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
       this.volatileSessions.delete(session.id);
     } catch (error) {
       session.status = 'ERROR';
-      session.pendingProposalId = null;
-      session.pendingProposal = null;
+      this.reservations.disarm();
       session.lastMessage = 'Persistence failed. New entries are disabled; review broker positions and repair storage before resuming.';
       this.volatileSessions.set(session.id, structuredClone(session));
       throw error;
@@ -307,6 +309,7 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
       const session = this.getSession(id);
       if (session.status !== 'RUNNING' && session.status !== 'PAUSED') throw new ConflictException('Only a running session can be paused.');
       session.status = 'PAUSED';
+      this.reservations.disarm();
       session.pendingProposalId = null;
       session.pendingProposal = null;
       session.lastMessage = 'New entries paused. Existing position protection continues on the server.';
@@ -325,6 +328,7 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
       const preflight = await this.evaluatePreflight(setup, session.id);
       if (!preflight.passed) throw new BadRequestException({ message: 'Resume preflight failed', preflight });
       session.status = 'RUNNING';
+      this.armForSession(session);
       session.lastMessage = 'New entries resumed after a fresh preflight.';
       session.events.push({ timestamp: new Date().toISOString(), type: 'RESUMED', message: session.lastMessage });
       this.saveSession(session);
@@ -335,6 +339,7 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
   public stop(id: string, emergency = false): Promise<DailyBotSession> {
     return this.serialize(async () => {
       const session = this.getSession(id);
+      this.reservations.disarm();
       session.status = 'STOPPING';
       session.pendingProposalId = null;
       session.pendingProposal = null;
@@ -393,5 +398,12 @@ export class DailyBotService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this.ticking = false;
     }
+  }
+
+  private armForSession(session: DailyBotSession): void {
+    const clock = new Date(Date.now() + 330 * 60000);
+    const [hours, minutes] = session.config.mandatoryExitTime.split(':').map(Number);
+    const remaining = Math.ceil((hours! * 60 + minutes!) - (clock.getUTCHours() * 60 + clock.getUTCMinutes()));
+    this.reservations.arm(Math.max(1, Math.min(480, remaining)));
   }
 }

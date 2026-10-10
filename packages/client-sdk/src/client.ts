@@ -38,6 +38,8 @@ import {
   BacktestRequest,
   BacktestResult,
   StrategyAstConfig,
+  TradingModeSnapshot,
+  TradeMode,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -71,6 +73,27 @@ export class TradingPlatformClient {
 
   public setToken(token: string) {
     this.authToken = token;
+  }
+
+  public setAuthToken(token?: string) { this.authToken = token; }
+
+  public async login(username: string, password: string): Promise<{ token: string; expiresAt: string }> {
+    const result = await this.request<{ token: string; expiresAt: string }>('/auth/login', {
+      method: 'POST', body: JSON.stringify({ username, password }),
+    });
+    this.setAuthToken(result.token);
+    return result;
+  }
+
+  public async logout(): Promise<void> {
+    try { await this.request('/auth/logout', { method: 'POST' }); }
+    finally { this.setAuthToken(undefined); }
+  }
+
+  public getTradingMode(): Promise<TradingModeSnapshot> { return this.request('/trading/mode'); }
+
+  public selectTradingMode(mode: TradeMode.PAPER | TradeMode.APPROVAL): Promise<TradingModeSnapshot> {
+    return this.request('/trading/mode', { method: 'POST', body: JSON.stringify({ mode }) });
   }
 
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -451,6 +474,7 @@ export class TradingPlatformClient {
     const res = await this.fetch(`${this.baseUrl}/reports/daily/export-csv`, {
       headers,
     });
+    if (!res.ok) throw new Error(`API error ${res.status} on report export`);
     return res.text();
   }
 

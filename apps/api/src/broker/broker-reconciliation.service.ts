@@ -1,22 +1,25 @@
-import { Injectable, Inject, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
+import { Injectable, Inject, Logger, OnApplicationBootstrap, OnModuleDestroy, Optional } from '@nestjs/common';
 import { PaperBrokerAdapter } from './paper-broker.adapter';
 import { UpstoxBrokerAdapter } from './upstox-broker.adapter';
 import { RiskReservationManager } from '../risk/risk-reservation.manager';
 import { UpstoxOAuthService } from './upstox-oauth.service';
 import { EventsGateway } from '../websocket/events.gateway';
 import { EnvService } from '../config/env.service';
+import { BrokerRouterService } from './broker-router.service';
+import { LiveExecutionLedgerService } from './live-execution-ledger.service';
 import {
   ReconciliationReport,
   ReconciliationDiscrepancy,
   Position,
   BrokerOrder,
-  TradeMode,
 } from '@trading-bot/contracts';
 
 @Injectable()
-export class BrokerReconciliationService implements OnApplicationBootstrap {
+export class BrokerReconciliationService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(BrokerReconciliationService.name);
   private latestReport: ReconciliationReport | null = null;
+  private timer?: ReturnType<typeof setInterval>;
+  private running = false;
 
   constructor(
     @Inject(PaperBrokerAdapter) private readonly localBroker: PaperBrokerAdapter,
@@ -24,7 +27,9 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
     @Inject(RiskReservationManager) private readonly riskReservationManager: RiskReservationManager,
     @Inject(UpstoxOAuthService) private readonly oauthService: UpstoxOAuthService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
-    @Optional() @Inject(EnvService) private readonly envService?: EnvService,
+    @Optional() @Inject(EnvService) _envService?: EnvService,
+    @Optional() @Inject(BrokerRouterService) private readonly router?: BrokerRouterService,
+    @Optional() @Inject(LiveExecutionLedgerService) private readonly ledger?: LiveExecutionLedgerService,
   ) {}
 
   /**
@@ -33,7 +38,14 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
   async onApplicationBootstrap() {
     this.logger.log('[BrokerReconciliation] Running startup broker ledger reconciliation...');
     await this.runReconciliation();
+    this.timer = setInterval(() => {
+      if (!this.router?.isLive() || this.running) return;
+      this.running = true;
+      void this.runReconciliation().catch(() => this.riskReservationManager.setKillSwitch(true)).finally(() => { this.running = false; });
+    }, 15000);
+    this.timer.unref();
   }
+  public onModuleDestroy(): void { if (this.timer) clearInterval(this.timer); }
 
   /**
    * Performs an exhaustive reconciliation audit comparing local ledger against broker state.
@@ -46,8 +58,10 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
     const discrepancies: ReconciliationDiscrepancy[] = [];
 
     // 1. Fetch Local App Ledger
-    const localPositions = await this.localBroker.getPositions();
-    const localOrders = await this.localBroker.getOrders();
+    const live = this.router?.isLive() ?? false;
+    if (live && (options.mockBrokerPositions || options.mockBrokerOrders)) throw new Error('Simulated reconciliation fixtures are restricted to Testing mode.');
+    let localPositions = live ? this.ledger?.getPositions() || [] : await this.localBroker.getPositions();
+    let localOrders = live ? this.ledger?.getOrders() || [] : await this.localBroker.getOrders();
 
     // 2. Fetch Remote Broker State (or fixtures for test)
     let brokerPositions: Position[] = [];
@@ -57,7 +71,7 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
       if (options.mockBrokerPositions) {
         brokerPositions = options.mockBrokerPositions;
       } else {
-        brokerPositions = this.envService?.config.SYSTEM_MODE === TradeMode.APPROVAL || this.envService?.config.SYSTEM_MODE === TradeMode.AUTO
+        brokerPositions = live
           ? await this.upstoxBroker.getPositions()
           : await this.localBroker.getPositions();
       }
@@ -65,12 +79,28 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
       if (options.mockBrokerOrders) {
         brokerOrders = options.mockBrokerOrders;
       } else {
-        brokerOrders = this.envService?.config.SYSTEM_MODE === TradeMode.APPROVAL || this.envService?.config.SYSTEM_MODE === TradeMode.AUTO
+        brokerOrders = live
           ? await this.upstoxBroker.getOrders()
           : await this.localBroker.getOrders();
       }
+      if (live) {
+        if (!this.ledger) throw new Error('Durable live ledger is missing.');
+        this.ledger.observeOrders(brokerOrders);
+        localPositions = this.ledger.getPositions(); localOrders = this.ledger.getOrders();
+        for (const intent of this.ledger.getEntries()) {
+          if (['SUBMITTING', 'UNKNOWN_BROKER_STATE', 'PROTECTION_FAILED'].includes(intent.state) || (intent.filledQuantity > 0 && intent.side === 'BUY' && intent.state !== 'CLOSED' && !intent.gttOrderId)) {
+            discrepancies.push({ type: 'ORDER_MISMATCH', instrumentKey: intent.instrumentKey, brokerValue: null, localValue: intent.intentId,
+              severity: 'CRITICAL', actionTaken: 'Live intent or protection remains unresolved; entries frozen.' });
+          }
+          if (intent.side === 'BUY' && intent.filledQuantity > 0 && intent.state !== 'CLOSED' && intent.gttOrderId) {
+            await this.upstoxBroker.verifyProtectiveExit(intent.gttOrderId, intent.instrumentKey, intent.filledQuantity, intent.stopLossPrice!);
+          }
+        }
+      }
     } catch (err: any) {
       this.logger.warn(`[BrokerReconciliation] Remote broker read degraded: ${err.message}`);
+      discrepancies.push({ type: 'ORDER_MISMATCH', instrumentKey: '*', brokerValue: 'UNAVAILABLE', localValue: null, severity: 'CRITICAL',
+        actionTaken: 'Complete successful broker reads are required. Account state is unknown; entries frozen.' });
     }
 
     // 3. Position Matching
@@ -136,7 +166,7 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
     }
 
     // 4. Order Mismatch Detection
-    const localOrderIds = new Set(localOrders.map((o) => o.brokerOrderId || o.id));
+    const localOrderIds = new Set(live ? this.ledger!.getEntries().flatMap((intent) => intent.orderIds) : localOrders.map((o) => o.brokerOrderId || o.id));
     for (const bo of brokerOrders) {
       const isTerminal = bo.status === 'FILLED' || bo.status === 'CANCELLED' || bo.status === 'REJECTED';
       if (!isTerminal && bo.brokerOrderId && !localOrderIds.has(bo.brokerOrderId)) {
@@ -181,7 +211,7 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
       executionFrozen: hasCritical,
     };
 
-    this.oauthService.setLastReconciledAt(timestamp);
+    if (!hasCritical) this.oauthService.setLastReconciledAt(timestamp);
 
     return this.latestReport;
   }
@@ -190,13 +220,13 @@ export class BrokerReconciliationService implements OnApplicationBootstrap {
     if (!this.latestReport) {
       return {
         timestamp: new Date().toISOString(),
-        status: 'CLEAN',
+        status: 'MISMATCH_DETECTED',
         brokerPositionsCount: 0,
         localPositionsCount: 0,
         brokerOrdersCount: 0,
         localOrdersCount: 0,
-        discrepancies: [],
-        executionFrozen: false,
+        discrepancies: [{ type: 'ORDER_MISMATCH', instrumentKey: '*', brokerValue: 'UNVERIFIED', localValue: null, severity: 'CRITICAL', actionTaken: 'Startup reconciliation has not completed.' }],
+        executionFrozen: true,
       };
     }
     return this.latestReport;

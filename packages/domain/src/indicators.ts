@@ -61,7 +61,7 @@ export function calculateRSI(closes: number[], period = 14): number[] {
   let avgLoss = losses.slice(0, period).reduce((a, b) => a + b, 0) / period;
 
   let rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-  let rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + rs);
+  let rsi = avgLoss === 0 ? (avgGain === 0 ? 50 : 100) : 100 - 100 / (1 + rs);
   rsiValues.push(Number(rsi.toFixed(2)));
 
   for (let i = period; i < gains.length; i++) {
@@ -69,7 +69,7 @@ export function calculateRSI(closes: number[], period = 14): number[] {
     avgLoss = (avgLoss * (period - 1) + losses[i]!) / period;
 
     rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
-    rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + rs);
+    rsi = avgLoss === 0 ? (avgGain === 0 ? 50 : 100) : 100 - 100 / (1 + rs);
     rsiValues.push(Number(rsi.toFixed(2)));
   }
 
@@ -110,7 +110,7 @@ export function calculateVWAP(candles: Candle[]): number[] {
     cumulativeTypicalVolume += typicalPrice * candle.volume;
     cumulativeVolume += candle.volume;
 
-    const vwap = cumulativeVolume === 0 ? typicalPrice : cumulativeTypicalVolume / cumulativeVolume;
+    const vwap = cumulativeVolume === 0 ? NaN : cumulativeTypicalVolume / cumulativeVolume;
     vwapValues.push(Number(vwap.toFixed(2)));
   }
 

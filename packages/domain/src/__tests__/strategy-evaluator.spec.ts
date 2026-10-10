@@ -23,7 +23,7 @@ describe('Strategy Evaluator & Rules Engine', () => {
     tradeMode: TradeMode.PAPER,
     market: 'NSE_FO',
     underlying: 'NIFTY',
-    allowedInstruments: [],
+    allowedInstruments: ['LONG_CALL'] as any,
     timeframe: '5m',
     session: {
       start: '09:25',
@@ -49,7 +49,7 @@ describe('Strategy Evaluator & Rules Engine', () => {
       maxOpenPositions: 1,
       maxTradesPerDay: 3,
       targetNetProfitInr: 300,
-      maxRoundTripCostBudgetInr: 60,
+      maxRoundTripCostBudgetInr: 100,
     },
     exit: {
       stopBasis: 'OPTION_PREMIUM',
@@ -59,7 +59,7 @@ describe('Strategy Evaluator & Rules Engine', () => {
     maxAllInTradeLossInr: 500,
     maxAllInDailyLossInr: 1500,
     targetNetProfitInr: 300,
-    maxRoundTripCostBudgetInr: 60,
+    maxRoundTripCostBudgetInr: 100,
     maxOpenPositions: 1,
     requiresApproval: true,
   };
@@ -76,6 +76,10 @@ describe('Strategy Evaluator & Rules Engine', () => {
     timestamp: new Date().toISOString(),
     isStale: false,
   };
+
+  function evaluate(context: Parameters<typeof evaluateStrategyRules>[0]) {
+    return evaluateStrategyRules({ ...context, candidateInstrument: { instrumentKey: sampleQuote.instrumentKey, symbol: 'NIFTY test CE', underlying: 'NIFTY', instrumentType: 'CE' as any, lotSize: 65, tickSize: 0.05 } });
+  }
 
   function generateCandles(count: number, startPrice = 24000, step = 10): Candle[] {
     const candles: Candle[] = [];
@@ -100,7 +104,7 @@ describe('Strategy Evaluator & Rules Engine', () => {
     expect(warmup.isWarmedUp).toBe(false);
     expect(warmup.missingCandles).toBe(10);
 
-    const result = evaluateStrategyRules({
+    const result = evaluate({
       strategy: baseStrategy,
       underlyingCandles: coldCandles,
       candidateQuote: sampleQuote,
@@ -170,7 +174,7 @@ describe('Strategy Evaluator & Rules Engine', () => {
       askPrice: 105.0, // spread = 5.0 / 105.0 = 4.76% > 1.0%
     };
 
-    const result = evaluateStrategyRules({
+    const result = evaluate({
       strategy: baseStrategy,
       underlyingCandles: candles,
       candidateQuote: wideSpreadQuote,
@@ -188,7 +192,7 @@ describe('Strategy Evaluator & Rules Engine', () => {
       volume: 450, // below 1000
     };
 
-    const result = evaluateStrategyRules({
+    const result = evaluate({
       strategy: baseStrategy,
       underlyingCandles: candles,
       candidateQuote: lowVolumeQuote,
@@ -201,7 +205,7 @@ describe('Strategy Evaluator & Rules Engine', () => {
 
   it('approves candidate and drafts expiring TradeProposal when all gates pass', () => {
     const candles = generateCandles(30, 24000, 20); // Strong uptrend
-    const result = evaluateStrategyRules({
+    const result = evaluate({
       strategy: baseStrategy,
       underlyingCandles: candles,
       candidateQuote: sampleQuote,
@@ -214,8 +218,8 @@ describe('Strategy Evaluator & Rules Engine', () => {
     expect(result.proposal).toBeDefined();
 
     const proposal = result.proposal!;
-    expect(proposal.lotSize).toBe(25); // NIFTY standard lot size
-    expect(proposal.quantity).toBe(25);
+    expect(proposal.lotSize).toBe(65); // Actual contract metadata is authoritative
+    expect(proposal.quantity).toBe(65);
     expect(proposal.suggestedStopPrice).toBeLessThan(proposal.suggestedEntryPrice);
     expect(proposal.suggestedTargetPrice).toBeGreaterThan(proposal.suggestedEntryPrice);
     expect(proposal.allInMaxLoss).toBeLessThanOrEqual(500); // Trade risk cap

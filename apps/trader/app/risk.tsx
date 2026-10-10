@@ -25,7 +25,7 @@ export default function RiskCenterScreen() {
   const handleConfirmFlatten = async () => {
     const res = await flattenPositions(flattenReason);
     setShowFlattenModal(false);
-    showToast(res.message);
+    if (res) showToast(res.message);
   };
 
   return (
@@ -76,7 +76,7 @@ export default function RiskCenterScreen() {
               Risk Control Center
             </h1>
             <Badge
-              label={state.isLiveSynced ? '🟢 LIVE API SYNCED' : '⚠️ OFFLINE / PAPER SIMULATION'}
+              label={state.isLiveSynced ? 'API CONNECTED' : 'ACCOUNT DATA UNAVAILABLE'}
               variant={state.isLiveSynced ? 'success' : 'purple'}
               size="sm"
             />
@@ -204,7 +204,7 @@ export default function RiskCenterScreen() {
             />
           </div>
           <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 6 }}>
-            Egress IP: {state.egressIpVerified ? 'Verified 127.0.0.1' : 'Unverified'}
+            Egress IP: {state.egressIpVerified ? 'Verified by server' : 'Unverified'}
           </div>
         </div>
       </div>

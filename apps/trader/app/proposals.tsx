@@ -2,11 +2,14 @@ import { useState, useEffect } from 'react';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
 import { AgentTask, ProposalStatus, TradeProposal } from '@trading-bot/contracts';
 import { apiClient } from '../src/services/api';
+import { useWorkstation } from '../src/hooks/useWorkstation';
 
 export default function ProposalsScreen() {
+  const { state: workstation } = useWorkstation();
   const [activeTab, setActiveTab] = useState<'PROPOSALS' | 'AGENT_TASKS'>('PROPOSALS');
+  const [pendingProposal, setPendingProposal] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(165);
+  const [clockTime, setClockTime] = useState(Date.now());
 
   const [proposals, setProposals] = useState<TradeProposal[]>([]);
   const [tasks, setTasks] = useState<AgentTask[]>([]);
@@ -19,8 +22,8 @@ export default function ProposalsScreen() {
     const loadData = async () => {
       try {
         const [props, taskList] = await Promise.all([
-          apiClient.getPendingProposals().catch(() => null),
-          apiClient.getAgentTasks().catch(() => null),
+          apiClient.getPendingProposals(),
+          apiClient.getAgentTasks(),
         ]);
         if (isMounted) {
           if (props) {
@@ -31,9 +34,7 @@ export default function ProposalsScreen() {
             setTasks(taskList);
           }
         }
-      } catch {
-        // graceful offline fallback
-      }
+      } catch (failure) { if (isMounted) { setIsLiveConnected(false); setStatusMessage(failure instanceof Error ? failure.message : 'Proposals unavailable.'); } }
     };
     loadData();
     const interval = setInterval(loadData, 5000);
@@ -41,19 +42,10 @@ export default function ProposalsScreen() {
       isMounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [workstation.mode]);
 
-  // Live countdown timer
   useEffect(() => {
-    const timer = setInterval(() => {
-      setSecondsRemaining((prev) => {
-        if (prev <= 1) {
-          clearInterval(timer);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    const timer = setInterval(() => setClockTime(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
 
@@ -64,27 +56,23 @@ export default function ProposalsScreen() {
   };
 
   const handleApprove = async (proposalId: string) => {
-    setProposals((prev) =>
-      prev.map((p) => (p.id === proposalId ? { ...p, status: ProposalStatus.APPROVED } : p)),
-    );
+    if (pendingProposal) return; setPendingProposal(proposalId);
     try {
-      const res = await apiClient.approveProposal(proposalId);
-      setStatusMessage(
-        `Trade Proposal authorized! Intent ${res?.intentId || proposalId} dispatched to risk orchestrator with GTT Protective Exits.`,
-      );
-    } catch {
-      setStatusMessage(
-        `Trade Proposal authorized by owner! Supervised execution dispatched: Freshness revalidated (<3s), capital locked (₹3,062.50), and GTT Protective Exits attached (Stop: ₹114.00, Target: ₹136.00).`,
-      );
-    }
+      const result = await apiClient.approveProposal(proposalId);
+      if (!result.success) throw new Error('Proposal approval was not accepted.');
+      setProposals(await apiClient.getPendingProposals());
+      setStatusMessage(`Approval recorded. Intent ${result.intentId}; check the confirmed order ledger for execution and protection.`);
+    } catch (failure) { setStatusMessage(failure instanceof Error ? failure.message : 'Approval was not confirmed.'); }
+    finally { setPendingProposal(null); }
   };
-
   const handleReject = async (proposalId: string) => {
-    setProposals((prev) =>
-      prev.map((p) => (p.id === proposalId ? { ...p, status: ProposalStatus.REJECTED } : p)),
-    );
-    apiClient.rejectProposal(proposalId, 'Rejected by owner in workstation').catch(() => {});
-    setStatusMessage(`Trade Proposal rejected by owner. Central risk reservations released.`);
+    if (pendingProposal) return; setPendingProposal(proposalId);
+    try {
+      const result = await apiClient.rejectProposal(proposalId, 'Rejected by owner in workstation');
+      if (!result.success) throw new Error('Rejection was not accepted.');
+      setProposals(await apiClient.getPendingProposals()); setStatusMessage('Proposal rejection recorded.');
+    } catch (failure) { setStatusMessage(failure instanceof Error ? failure.message : 'Rejection was not confirmed.'); }
+    finally { setPendingProposal(null); }
   };
 
   return (
@@ -97,7 +85,7 @@ export default function ProposalsScreen() {
               Trade Proposals & Agent Workspace
             </h1>
             <Badge
-              label={isLiveConnected ? '🟢 LIVE API' : '⚠️ OFFLINE / PAPER'}
+              label={isLiveConnected ? 'API CONNECTED' : 'PROPOSALS UNAVAILABLE'}
               variant={isLiveConnected ? 'success' : 'purple'}
               size="sm"
             />
@@ -206,11 +194,12 @@ export default function ProposalsScreen() {
                 No Pending Trade Proposals
               </div>
               <div style={{ fontSize: typography.fontSize.xs, marginTop: 4 }}>
-                Multi-agent strategy analysts are monitoring live 5m closed candles. Trade proposals will appear here when market conditions match registered rules.
+                Proposals appear after the backend confirms available market data, strategy rules, and account risk checks.
               </div>
             </div>
           ) : (
             proposals.map((proposal) => {
+            const secondsRemaining = Math.max(0, Math.ceil((Date.parse(proposal.expiresAt) - clockTime) / 1000));
             const isPending = proposal.status === ProposalStatus.PENDING && secondsRemaining > 0;
             const isExpired = secondsRemaining === 0 && proposal.status === ProposalStatus.PENDING;
 
@@ -232,7 +221,7 @@ export default function ProposalsScreen() {
                   <div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
                       <h2 style={{ margin: 0, fontSize: typography.fontSize.lg }}>
-                        {proposal.symbol} ({proposal.side} Long Call)
+                        {proposal.symbol} ({proposal.side})
                       </h2>
                       <Badge label={proposal.proposingAgent} variant="primary" />
                       {isPending && (
@@ -243,14 +232,14 @@ export default function ProposalsScreen() {
                       {proposal.status === ProposalStatus.REJECTED && <Badge label="REJECTED" variant="neutral" />}
                     </div>
                     <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, marginTop: 4 }}>
-                      Strategy: NIFTY EMA20 RSI Long Call v{proposal.strategyVersion} | Mode: PAPER | Lot: {proposal.lotSize}
+                      Strategy: {proposal.strategyId} v{proposal.strategyVersion} | Selected account: {workstation.mode === 'PAPER' ? 'Testing' : 'Live'} | Lot: {proposal.lotSize}
                     </div>
                   </div>
 
                   <div style={{ textAlign: 'right' }}>
-                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>CALIBRATED CONFIDENCE</div>
+                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>HEURISTIC SCORE</div>
                     <div style={{ fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold, color: colors.cyan }}>
-                      {((proposal.evidence.confidence || 0.78) * 100).toFixed(0)}%
+                      {((proposal.evidence.confidence ?? 0) * 100).toFixed(0)}%
                     </div>
                   </div>
                 </div>
@@ -262,7 +251,7 @@ export default function ProposalsScreen() {
                     <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.textPrimary, fontFamily: typography.fontFamily.mono }}>
                       ₹{proposal.suggestedEntryPrice.toFixed(2)}
                     </div>
-                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Qty: {proposal.quantity} (1 Lot)</div>
+                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>Qty: {proposal.quantity} ({proposal.quantity / proposal.lotSize} Lots)</div>
                   </div>
 
                   <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
@@ -282,7 +271,7 @@ export default function ProposalsScreen() {
                   </div>
 
                   <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
-                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>ALL-IN RISK (CAP ₹500)</div>
+                    <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>ESTIMATED ALL-IN RISK</div>
                     <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.loss, fontFamily: typography.fontFamily.mono }}>
                       ₹{proposal.allInMaxLoss.toFixed(2)}
                     </div>
@@ -293,14 +282,15 @@ export default function ProposalsScreen() {
                 {/* AI Agent Evidence & Objective Data */}
                 <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.sm }}>
                   <div style={{ fontSize: typography.fontSize.xs, fontWeight: typography.fontWeight.bold, color: colors.cyan, marginBottom: spacing.xs }}>
-                    OBJECTIVE EVIDENCE BREAKDOWN (CONFIRMED ON CLOSED BAR)
+                    REPORTED STRATEGY EVIDENCE
                   </div>
                   <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, lineHeight: 1.8 }}>
-                    • <strong>5-Minute EMA(20):</strong> 25,115.00 (Bullish cross above on confirmed candle close)<br />
-                    • <strong>RSI(14):</strong> 58.40 (Positive momentum confirmation &gt; 55.0 threshold)<br />
-                    • <strong>VWAP:</strong> 25,102.50 (Price trading comfortably above session intraday VWAP)<br />
-                    • <strong>Bid/Ask Spread:</strong> 0.24% (Tight liquidity gate passed &lt; 1.0% limit)<br />
-                    • <strong>Contract Volume:</strong> 45,000 units (Deep liquidity above 1,000 unit threshold)
+                    <div>{proposal.evidence.rationale}</div>
+                    {Object.entries(proposal.evidence.indicators).map(([name, value]) => (
+                      <div key={name}><strong>{name}:</strong> {String(value)}</div>
+                    ))}
+                    {Object.keys(proposal.evidence.indicators).length === 0 && <div>No indicator values were supplied.</div>}
+                    <div>The heuristic score is a rule assessment, not a calibrated probability of profit.</div>
                   </div>
                 </div>
 
@@ -308,7 +298,7 @@ export default function ProposalsScreen() {
                 {isPending && (
                   <div style={{ display: 'flex', gap: spacing.md, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
                     <button
-                      onClick={() => handleReject(proposal.id)}
+                      disabled={!!pendingProposal} onClick={() => handleReject(proposal.id)}
                       style={{
                         padding: `${spacing.sm}px ${spacing.xl}px`,
                         borderRadius: borderRadius.md,
@@ -323,7 +313,7 @@ export default function ProposalsScreen() {
                       Reject Proposal
                     </button>
                     <button
-                      onClick={() => handleApprove(proposal.id)}
+                      disabled={!!pendingProposal} onClick={() => handleApprove(proposal.id)}
                       style={{
                         padding: `${spacing.sm}px ${spacing.xl}px`,
                         borderRadius: borderRadius.md,

@@ -1,289 +1,131 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
-import { Instrument, InstrumentType, OptionChainResult, SearchInstrumentsQuery } from '@trading-bot/contracts';
-import { getStandardLotSize } from '@trading-bot/domain';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { gunzipSync } from 'node:zlib';
+import { Instrument, InstrumentType, OptionChainResult, QuoteSnapshot, SearchInstrumentsQuery } from '@trading-bot/contracts';
 
-export function getStrikeStep(underlying: string): number {
-  const upper = underlying.toUpperCase();
-  if (upper.includes('BANK')) return 100;
-  return 50; // NIFTY, FINNIFTY
+export const UPSTOX_INSTRUMENT_MASTER_URL = 'https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz';
+const UNDERLYING_BY_KEY: Record<string, string> = {
+  'NSE_INDEX|Nifty 50': 'NIFTY', 'NSE_INDEX|Nifty Bank': 'BANKNIFTY', 'NSE_INDEX|Nifty Fin Service': 'FINNIFTY',
+};
+
+/** Calendar formatting only. Contract expiries come from the broker master. */
+export function dateInIst(date: Date): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date);
 }
-
-export function generateStrikesForSpot(
-  spotPrice: number,
-  underlying: string,
-  spanCount = 15,
-): number[] {
-  const step = getStrikeStep(underlying);
-  const atm = Math.round(spotPrice / step) * step;
-  const strikes: number[] = [];
-  for (let i = -spanCount; i <= spanCount; i++) {
-    strikes.push(atm + i * step);
-  }
-  return strikes;
-}
-
-/**
- * Returns the next N upcoming expiry dates for a given weekday.
- * NSE expiry schedule (current as of 2026):
- *   - NIFTY weekly:    Tuesday  (day=2)
- *   - FINNIFTY weekly: Tuesday  (day=2)
- *   - BANKNIFTY weekly: Wednesday (day=3)
- *   - Monthly expiries: last Tuesday/Wednesday of the month
- * Source: https://www.nseindia.com/static/products-services/equity-derivatives-nifty50
- */
-export function getUpcomingExpiries(baseDate = new Date(), count = 5, weekday = 2): string[] {
-  const expiries: string[] = [];
-  const current = new Date(baseDate);
-  current.setHours(0, 0, 0, 0);
-
-  const day = current.getDay();
-  // Weekday: 0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
-  const daysUntilTarget = (weekday - day + 7) % 7;
-  const firstExpiry = new Date(current);
-  // If today is already the target weekday, include it; otherwise advance to the next one
-  firstExpiry.setDate(current.getDate() + (daysUntilTarget === 0 ? 0 : daysUntilTarget));
-
-  for (let i = 0; i < count; i++) {
-    const d = new Date(firstExpiry);
-    d.setDate(firstExpiry.getDate() + i * 7);
-    expiries.push(d.toISOString().split('T')[0]!);
-  }
-  return expiries;
-}
-
-/** @deprecated Use getUpcomingExpiries(date, count, 2) for NIFTY/FINNIFTY or (date, count, 3) for BANKNIFTY */
-export function getUpcomingThursdays(baseDate = new Date(), count = 5): string[] {
-  return getUpcomingExpiries(baseDate, count, 4); // kept for backward compat with old tests
-}
-
 
 @Injectable()
-export class InstrumentCatalogService implements OnModuleInit {
-  private instruments: Map<string, Instrument> = new Map();
-  private underlyingIndex: Map<string, string[]> = new Map(); // underlying -> instrumentKeys[]
+export class InstrumentCatalogService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(InstrumentCatalogService.name);
+  private instruments = new Map<string, Instrument>();
+  private loadedAt: string | null = null;
+  private refreshTimer: NodeJS.Timeout | null = null;
 
-  onModuleInit() {
-    this.bootstrapCatalog();
+  async onModuleInit(): Promise<void> {
+    try { await this.refreshCatalog(); }
+    catch (error) { this.logger.error(`Instrument metadata unavailable: ${error instanceof Error ? error.message : 'download failed'}`); }
+    this.refreshTimer = setInterval(() => {
+      if (!this.getCatalogHealth().available) void this.refreshCatalog().catch(() => {});
+    }, 60000);
+    this.refreshTimer.unref();
   }
 
-  public bootstrapCatalog(): void {
-    // NSE expiry schedule (current 2026):
-    //   NIFTY / FINNIFTY → Tuesday weekly expiry (weekday=2)
-    //   BANKNIFTY         → Wednesday weekly expiry (weekday=3)
-    const niftyExpiries = Array.from(new Set(['2026-10-15', ...getUpcomingExpiries(new Date(), 4, 2)])).sort(); // Tuesdays + test fixture
-    const bankniftyExpiries = getUpcomingExpiries(new Date(), 4, 3);   // Wednesdays
+  onModuleDestroy(): void { if (this.refreshTimer) clearInterval(this.refreshTimer); }
 
-    // 1. Index Spot Instruments
-    this.addInstrument({
-      instrumentKey: 'NSE_INDEX|Nifty 50',
-      exchange: 'NSE_INDEX',
-      symbol: 'NIFTY 50',
-      underlying: 'NIFTY',
-      instrumentType: InstrumentType.EQUITY,
-      lotSize: 25,
-      tickSize: 0.05,
-    });
-
-    this.addInstrument({
-      instrumentKey: 'NSE_INDEX|Nifty Bank',
-      exchange: 'NSE_INDEX',
-      symbol: 'BANKNIFTY',
-      underlying: 'BANKNIFTY',
-      instrumentType: InstrumentType.EQUITY,
-      lotSize: 15,
-      tickSize: 0.05,
-    });
-
-    this.addInstrument({
-      instrumentKey: 'NSE_INDEX|Nifty Fin Service',
-      exchange: 'NSE_INDEX',
-      symbol: 'FINNIFTY',
-      underlying: 'FINNIFTY',
-      instrumentType: InstrumentType.EQUITY,
-      lotSize: 25,
-      tickSize: 0.05,
-    });
-
-    // 2. Algorithmically generate F&O Option Contracts based on exchange step rules (Step 50 for NIFTY/FINNIFTY, Step 100 for BANKNIFTY)
-    // No hardcoded strike numbers: dynamically spans +/- 20 steps around current market spot
-    this.registerStrikesForUnderlying('NIFTY',     22520.45, niftyExpiries,     20);
-    this.registerStrikesForUnderlying('NIFTY',     25100.00, niftyExpiries,     15);
-    this.registerStrikesForUnderlying('BANKNIFTY', 55256.65, bankniftyExpiries, 20);
-    this.registerStrikesForUnderlying('BANKNIFTY', 52400.00, bankniftyExpiries, 15);
-    this.registerStrikesForUnderlying('FINNIFTY',  23900.00, niftyExpiries,     15);
-
-    console.log(`[InstrumentCatalog] Dynamically indexed ${this.instruments.size} F&O instruments and spot indexes (NIFTY: Tue expiry, BANKNIFTY: Wed expiry).`);
+  public async refreshCatalog(): Promise<number> {
+    const response = await fetch(UPSTOX_INSTRUMENT_MASTER_URL, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error(`Instrument master returned HTTP ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const json = buffer[0] === 0x1f && buffer[1] === 0x8b ? gunzipSync(buffer) : buffer;
+    return this.bootstrapCatalog(JSON.parse(json.toString('utf8')));
   }
 
-  /**
-   * Generates and registers options strikes algorithmically around any spot price.
-   * Step: 50 for NIFTY & FINNIFTY, 100 for BANKNIFTY.
-   */
-  public registerStrikesForUnderlying(
-    underlying: string,
-    spotPrice: number,
-    expiries: string[],
-    spanCount = 15,
-  ): void {
-    const upper = underlying.toUpperCase();
-    const lotSize = getStandardLotSize(upper);
-    const strikes = generateStrikesForSpot(spotPrice, upper, spanCount);
-
-    for (const expiry of expiries) {
-      for (const strike of strikes) {
-        // CE
-        const ceKey = `NSE_FO|${upper}_${expiry}_${strike}_CE`;
-        if (!this.instruments.has(ceKey)) {
-          this.addInstrument({
-            instrumentKey: ceKey,
-            exchange: 'NSE_FO',
-            symbol: `${upper} ${strike} CE ${expiry}`,
-            underlying: upper,
-            instrumentType: InstrumentType.CE,
-            strikePrice: strike,
-            lotSize,
-            tickSize: 0.05,
-            expiry: `${expiry}T15:30:00.000Z`,
-          });
-        }
-
-        // PE
-        const peKey = `NSE_FO|${upper}_${expiry}_${strike}_PE`;
-        if (!this.instruments.has(peKey)) {
-          this.addInstrument({
-            instrumentKey: peKey,
-            exchange: 'NSE_FO',
-            symbol: `${upper} ${strike} PE ${expiry}`,
-            underlying: upper,
-            instrumentType: InstrumentType.PE,
-            strikePrice: strike,
-            lotSize,
-            tickSize: 0.05,
-            expiry: `${expiry}T15:30:00.000Z`,
-          });
-        }
-      }
+  /** Import broker records. An empty startup cannot create tradable contracts. */
+  public bootstrapCatalog(records?: unknown): number {
+    if (records === undefined) return this.instruments.size;
+    if (!Array.isArray(records)) throw new Error('Instrument master must contain an array.');
+    const next = new Map<string, Instrument>();
+    for (const raw of records) {
+      if (!raw || typeof raw !== 'object') continue;
+      const row = raw as Record<string, unknown>;
+      const key = row.instrument_key;
+      const kind = row.instrument_type;
+      if (row.segment !== 'NSE_FO' || (kind !== 'CE' && kind !== 'PE') || typeof key !== 'string' || !/^NSE_FO\|\d+$/.test(key)) continue;
+      const underlying = typeof row.underlying_key === 'string' ? UNDERLYING_BY_KEY[row.underlying_key] : undefined;
+      if (!underlying || typeof row.trading_symbol !== 'string' || !row.trading_symbol.trim()) continue;
+      const lotSize = Number(row.lot_size);
+      const tickPaise = Number(row.tick_size);
+      const strikePrice = Number(row.strike_price);
+      const expiryMs = typeof row.expiry === 'number' ? row.expiry : Date.parse(String(row.expiry));
+      if (!Number.isInteger(lotSize) || lotSize <= 0 || !Number.isFinite(tickPaise) || tickPaise <= 0 || !Number.isFinite(strikePrice) || strikePrice <= 0 || !Number.isFinite(expiryMs) || expiryMs <= Date.now()) continue;
+      const instrument: Instrument = {
+        instrumentKey: key, exchange: 'NSE_FO', symbol: row.trading_symbol,
+        underlying, instrumentType: kind === 'CE' ? InstrumentType.CE : InstrumentType.PE,
+        strikePrice, lotSize, tickSize: tickPaise / 100, expiry: new Date(expiryMs).toISOString(),
+      };
+      const duplicate = next.get(key);
+      if (duplicate && JSON.stringify(duplicate) !== JSON.stringify(instrument)) throw new Error(`Conflicting metadata for ${key}`);
+      next.set(key, instrument);
     }
+    if (next.size === 0) throw new Error('Instrument master has no valid, unexpired supported option contracts.');
+    this.instruments = next;
+    this.loadedAt = new Date().toISOString();
+    return next.size;
   }
 
-  private addInstrument(inst: Instrument) {
-    this.instruments.set(inst.instrumentKey, inst);
-    const existing = this.underlyingIndex.get(inst.underlying) || [];
-    if (!existing.includes(inst.instrumentKey)) existing.push(inst.instrumentKey);
-    this.underlyingIndex.set(inst.underlying, existing);
+  public getCatalogHealth(): { available: boolean; loadedAt: string | null; instruments: number } {
+    return { available: !!this.loadedAt && dateInIst(new Date(this.loadedAt)) === dateInIst(new Date()), loadedAt: this.loadedAt, instruments: this.instruments.size };
   }
 
   public getInstrument(key: string): Instrument | undefined {
-    return this.instruments.get(key);
+    const instrument = this.instruments.get(key);
+    return this.getCatalogHealth().available && instrument?.expiry && Date.parse(instrument.expiry) > Date.now() ? instrument : undefined;
   }
 
   public getUnderlyingInstruments(underlying: string): Instrument[] {
-    const keys = this.underlyingIndex.get(underlying.toUpperCase()) || [];
-    return keys.map((k) => this.instruments.get(k)).filter(Boolean) as Instrument[];
+    if (!this.getCatalogHealth().available) return [];
+    return [...this.instruments.values()].filter((instrument) => instrument.underlying === underlying.toUpperCase() && !!instrument.expiry && Date.parse(instrument.expiry) > Date.now());
   }
 
   public searchInstruments(params: SearchInstrumentsQuery): Instrument[] {
-    const { query, underlying, instrumentType, limit = 20 } = params;
-    const q = query.trim().toUpperCase();
-
-    const results: Instrument[] = [];
-    for (const inst of this.instruments.values()) {
-      if (underlying && inst.underlying.toUpperCase() !== underlying.toUpperCase()) {
-        continue;
-      }
-      if (instrumentType && inst.instrumentType !== instrumentType) {
-        continue;
-      }
-      if (inst.symbol.toUpperCase().includes(q) || inst.instrumentKey.toUpperCase().includes(q)) {
-        results.push(inst);
-        if (results.length >= limit) break;
-      }
-    }
-    return results;
+    if (!this.getCatalogHealth().available) return [];
+    const query = params.query.trim().toUpperCase();
+    const limit = Math.min(200, Math.max(1, Number(params.limit) || 20));
+    return [...this.instruments.values()].filter((instrument) => this.getInstrument(instrument.instrumentKey) &&
+      (!params.underlying || instrument.underlying === params.underlying.toUpperCase()) &&
+      (!params.instrumentType || instrument.instrumentType === params.instrumentType) &&
+      (instrument.symbol.toUpperCase().includes(query) || instrument.instrumentKey.toUpperCase().includes(query))).slice(0, limit);
   }
 
   public getAvailableExpiries(underlying: string): string[] {
-    const keys = this.underlyingIndex.get(underlying.toUpperCase()) || [];
-    const expiries = new Set<string>();
-
-    for (const key of keys) {
-      const inst = this.instruments.get(key);
-      if (inst?.expiry) {
-        expiries.add(inst.expiry.split('T')[0]!);
-      }
-    }
-
-    return Array.from(expiries).sort();
+    return [...new Set(this.getUnderlyingInstruments(underlying).map((instrument) => dateInIst(new Date(instrument.expiry!))))].sort();
   }
 
-  public buildOptionChain(
-    underlying: string,
-    expiryDate?: string,
-    spotPrice = 22520.45,
-    getQuoteFn?: (key: string) => { lastPrice: number; bidPrice: number; askPrice: number; volume: number; openInterest: number; netChangePct: number; isStale: boolean } | undefined,
-  ): OptionChainResult {
-    const upperUnderlying = underlying.toUpperCase();
-    const availableExpiries = this.getAvailableExpiries(upperUnderlying);
-    const selectedExpiry = expiryDate || availableExpiries[0] || '2026-10-15';
-    const lotSize = getStandardLotSize(upperUnderlying);
-
-    // Dynamically guarantee all strikes around this exact spot price are indexed
-    if (spotPrice && spotPrice > 0) {
-      this.registerStrikesForUnderlying(upperUnderlying, spotPrice, [selectedExpiry], 15);
-    }
-
-    const keys = this.underlyingIndex.get(upperUnderlying) || [];
+  public buildOptionChain(underlying: string, expiryDate?: string, spotPrice = 0,
+    getQuoteFn?: (key: string) => Partial<QuoteSnapshot> | undefined): OptionChainResult {
+    const upper = underlying.toUpperCase();
+    const availableExpiries = this.getAvailableExpiries(upper);
+    const selectedExpiry = expiryDate || availableExpiries[0] || '';
+    const instruments = this.getUnderlyingInstruments(upper).filter((instrument) => dateInIst(new Date(instrument.expiry!)) === selectedExpiry);
     const strikeMap = new Map<number, { call?: any; put?: any }>();
-
-    for (const key of keys) {
-      const inst = this.instruments.get(key);
-      if (!inst || !inst.strikePrice || !inst.expiry) continue;
-      if (!inst.expiry.startsWith(selectedExpiry)) continue;
-
-      const strike = inst.strikePrice;
-      const current = strikeMap.get(strike) || {};
-
-      const quote = getQuoteFn ? getQuoteFn(key) : undefined;
-      const defaultLtp = inst.instrumentType === InstrumentType.CE
-        ? Math.max(10, Math.round(150 - (strike - spotPrice) * 0.45))
-        : Math.max(10, Math.round(150 + (strike - spotPrice) * 0.45));
-
-      const contractData = {
-        instrumentKey: inst.instrumentKey,
-        symbol: inst.symbol,
-        lastPrice: quote ? quote.lastPrice : defaultLtp,
-        bidPrice: quote ? quote.bidPrice : defaultLtp - 0.3,
-        askPrice: quote ? quote.askPrice : defaultLtp + 0.3,
-        volume: quote ? quote.volume : 54000,
-        openInterest: quote ? quote.openInterest : 42000,
-        netChangePct: quote ? quote.netChangePct : 1.25,
-        isStale: quote ? quote.isStale : false,
+    for (const instrument of instruments) {
+      const quote = getQuoteFn?.(instrument.instrumentKey);
+      const known = quote && ['LIVE', 'DELAYED', 'SIMULATED'].includes(quote.provenance || '') && Number.isFinite(quote.lastPrice) && Number(quote.lastPrice) > 0;
+      const row = strikeMap.get(instrument.strikePrice!) || {};
+      const contract = {
+        instrumentKey: instrument.instrumentKey, symbol: instrument.symbol,
+        lastPrice: known ? quote.lastPrice! : 0, bidPrice: known ? quote.bidPrice || 0 : 0,
+        askPrice: known ? quote.askPrice || 0 : 0, volume: known ? quote.volume || 0 : 0,
+        openInterest: known ? quote.openInterest || 0 : 0, netChangePct: known ? quote.netChangePct || 0 : 0,
+        isStale: !known || quote.isStale !== false, provenance: known ? quote.provenance : 'UNAVAILABLE',
+        depthKnown: !!known && quote.depthKnown === true, lotSize: instrument.lotSize,
       };
-
-      if (inst.instrumentType === InstrumentType.CE) {
-        current.call = contractData;
-      } else if (inst.instrumentType === InstrumentType.PE) {
-        current.put = contractData;
-      }
-
-      strikeMap.set(strike, current);
+      if (instrument.instrumentType === InstrumentType.CE) row.call = contract; else row.put = contract;
+      strikeMap.set(instrument.strikePrice!, row);
     }
-
-    const strikes = Array.from(strikeMap.entries())
-      .sort((a, b) => a[0] - b[0])
-      .map(([strikePrice, data]) => ({
-        strikePrice,
-        call: data.call,
-        put: data.put,
-      }));
-
+    const lotSizes = new Set(instruments.map((instrument) => instrument.lotSize));
     return {
-      underlying: upperUnderlying,
-      spotPrice,
-      expiryDate: selectedExpiry,
-      availableExpiries,
-      lotSize,
-      strikes,
+      underlying: upper, spotPrice: Number.isFinite(spotPrice) && spotPrice > 0 ? spotPrice : 0,
+      expiryDate: selectedExpiry, availableExpiries, lotSize: lotSizes.size === 1 ? [...lotSizes][0]! : 0,
+      strikes: [...strikeMap].sort(([a], [b]) => a - b).map(([strikePrice, row]) => ({ strikePrice, ...row })),
       timestamp: new Date().toISOString(),
     };
   }

@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DailyBotConfig, DailyBotConfigSchema, DailyBotSession, OrderSide, OrderType, ProductType,
-  QuoteSnapshot, TradeMode,
+  QuoteSnapshot, TradeMode, StrategyStatus,
 } from '@trading-bot/contracts';
 import { calculateOptionCharges, Candle } from '@trading-bot/domain';
 import { AgentCoordinatorService } from '../agents/agent-coordinator.service';
@@ -24,7 +24,8 @@ import { ReconciliationSchedulerService } from '../broker/reconciliation-schedul
 import { StrategiesService } from '../strategies/strategies.service';
 
 describe('Daily Bot execution and protective lifecycle', () => {
-  const optionKey = 'NSE_FO|NIFTY_2026-10-15_25100_CE';
+  const optionKey = 'NSE_FO|51001';
+  const brokerRecords = [{ segment: 'NSE_FO', instrument_key: optionKey, instrument_type: 'CE', underlying_key: 'NSE_INDEX|Nifty 50', trading_symbol: 'NIFTY26O1325100CE', lot_size: 65, tick_size: 5, strike_price: 25100, expiry: Date.parse('2026-10-13T10:00:00Z') }];
   let runtime: DailyBotExecutionService;
   let feed: UpstoxMarketFeedService;
   let tools: AgentToolsService;
@@ -32,6 +33,10 @@ describe('Daily Bot execution and protective lifecycle', () => {
   let reservations: RiskReservationManager;
   let coordinator: AgentCoordinatorService;
   let session: DailyBotSession;
+  let env: EnvService;
+  let catalog: InstrumentCatalogService;
+  let gateway: any;
+  let proposals: ProposalsService;
 
   function quote(key = optionKey, bid = 100): QuoteSnapshot {
     return { instrumentKey: key, bidPrice: bid, askPrice: bid + 0.2, lastPrice: bid + 0.1, bidQty: 250, askQty: 250, volume: 50000, openInterest: 10000, netChange: 0, netChangePct: 0, isStale: false, timestamp: new Date().toISOString() };
@@ -50,28 +55,125 @@ describe('Daily Bot execution and protective lifecycle', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-12T04:30:00.000Z')); // Monday 10:00 IST
-    const env = new EnvService();
-    const gateway = { broadcast: vi.fn() } as any;
-    const catalog = new InstrumentCatalogService();
-    catalog.bootstrapCatalog();
+    env = new EnvService();
+    gateway = { broadcast: vi.fn() } as any;
+    catalog = new InstrumentCatalogService();
+    catalog.bootstrapCatalog(brokerRecords);
     feed = new UpstoxMarketFeedService(env, new ProtobufDecoderService(), gateway);
     tools = new AgentToolsService(catalog, feed);
     tools.setClosedCandles('NSE_INDEX|Nifty 50', history());
     coordinator = new AgentCoordinatorService(new MarketScannerAgent(tools), new StrategyAnalystAgent(tools), gateway);
-    const proposals = new ProposalsService(gateway);
+    proposals = new ProposalsService(gateway);
     const strategies = new StrategiesService(coordinator, proposals);
     const strategy = structuredClone(strategies.getAllStrategies()[0]!);
+    strategy.status = StrategyStatus.PAPER_ACTIVE; // Explicit test authorization; production templates begin unvalidated.
     strategy.risk!.maxAllInTradeLossInr = 500;
     strategy.maxAllInTradeLossInr = 500;
+    strategy.risk!.maxRoundTripCostBudgetInr = 100;
+    strategy.maxRoundTripCostBudgetInr = 100;
+    strategy.risk!.maxCapitalInr = 10000;
+    strategy.maxCapitalInr = 10000;
     reservations = new RiskReservationManager(env, gateway);
+    reservations.arm(480);
     broker = new PaperBrokerAdapter(catalog, feed, gateway);
     runtime = new DailyBotExecutionService(broker, reservations, coordinator, tools, feed, catalog, env, proposals, gateway);
-    const config = DailyBotConfigSchema.parse({ name: 'Morning test', tradingDate: '2026-10-12', tradingMode: TradeMode.PAPER, strategyId: strategy.id, dailyCapitalBudget: 10000, dailyMaxLossAllIn: 600, perTradeMaxLossAllIn: 500, maxCapitalPerTrade: 5000 });
+    const config = DailyBotConfigSchema.parse({ name: 'Morning test', tradingDate: '2026-10-12', tradingMode: TradeMode.PAPER, strategyId: strategy.id, dailyCapitalBudget: 10000, dailyMaxLossAllIn: 600, perTradeMaxLossAllIn: 500, maxCapitalPerTrade: 10000, maxRoundTripCharges: 100 });
     session = makeSession(config, strategy);
     tick();
   });
 
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+
+  function liveHarness(liveQuotes = true) {
+    env.config.LIVE_EXECUTION_ENABLED = true;
+    session.config.tradingMode = TradeMode.APPROVAL;
+    const getQuote = feed.getQuote.bind(feed);
+    if (liveQuotes) vi.spyOn(feed, 'getQuote').mockImplementation((key) => {
+      const snapshot = getQuote(key);
+      return snapshot ? { ...snapshot, provenance: 'LIVE', depthKnown: true } : undefined;
+    });
+    // Explicit broker test doubles: this fixture never contacts Upstox or places real orders.
+    const router = {
+      isLive: () => true,
+      getFunds: vi.fn(async () => ({ source: 'LIVE_BROKER', status: 'VERIFIED', availableCash: 10000 })),
+      getPositions: vi.fn(() => broker.getPositions()),
+      getOrders: vi.fn(() => broker.getOrders()),
+      getFills: vi.fn(() => broker.getFills()),
+      placeOrder: vi.fn((input: any) => broker.placeOrder(input)),
+      confirmFill: vi.fn(async (ack: any, quantity: number) => {
+        const order = (await broker.getOrders()).find((item) => item.id === ack.orderId);
+        return { complete: order?.filledQuantity === quantity, terminal: true, filledQuantity: order?.filledQuantity ?? 0, averagePrice: order?.averageFillPrice ?? 0, status: order?.status };
+      }),
+      placeProtectiveExit: vi.fn(async () => ({ success: true, gttOrderId: 'gtt_verified_fixture' })),
+    };
+    const ledger = { getEntries: vi.fn(() => []) };
+    const orders = { closePosition: vi.fn(), reconcileExternalExitIfFlat: vi.fn() };
+    runtime = new DailyBotExecutionService(broker, reservations, coordinator, tools, feed, catalog, env, proposals, gateway, router as any, { getMode: () => TradeMode.APPROVAL } as any, ledger as any, orders as any);
+    return { router, ledger, orders };
+  }
+
+  it('keeps Live scans pending until individual approval and protects only the confirmed filled quantity', async () => {
+    const { router } = liveHarness();
+    await runtime.tick(session);
+    expect(session.pendingProposal).not.toBeNull();
+    expect(router.placeOrder).not.toHaveBeenCalled();
+    expect(session.events.at(-1)?.type).toBe('OWNER_APPROVAL_REQUIRED');
+    await runtime.approveEntry(session);
+    expect(router.placeOrder).toHaveBeenCalledWith(expect.objectContaining({ side: OrderSide.BUY, orderType: OrderType.LIMIT, reservationId: expect.any(String), proposalId: expect.any(String), signalKey: expect.any(String), reservedRisk: expect.any(Number) }));
+    expect(router.placeProtectiveExit).toHaveBeenCalledWith(expect.objectContaining({ quantity: 65, instrumentKey: optionKey }));
+    expect(session.trades[0]).toMatchObject({ quantity: 65, gttId: 'gtt_verified_fixture', instrumentSnapshot: { lotSize: 65 } });
+  });
+
+  it('rejects simulated quotes in Live even when the funds test double is verified', async () => {
+    const { router } = liveHarness(false);
+    const preflight = await runtime.preflight(session.config, session.strategySnapshot);
+    expect(preflight.checks.find((check) => check.id === 'market-data')?.passed).toBe(false);
+    await runtime.tick(session);
+    expect(router.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('retains an ambiguous dispatched Live BUY, its pending proposal, consumed signal and full reservation', async () => {
+    const { router } = liveHarness();
+    await runtime.tick(session);
+    const proposalId = session.pendingProposalId;
+    router.placeOrder.mockRejectedValueOnce(new Error('Transport failed after dispatch'));
+    await expect(runtime.approveEntry(session)).rejects.toThrow('Transport failed');
+    expect(session.pendingProposalId).toBe(proposalId);
+    expect(session.processedSignalKeys).toHaveLength(1);
+    expect(reservations.getHeldReservationsCount()).toBe(1);
+    expect(reservations.isKillSwitchActive()).toBe(true);
+    expect(router.placeProtectiveExit).not.toHaveBeenCalled();
+    await runtime.tick(session);
+    expect(router.placeOrder).toHaveBeenCalledOnce();
+  });
+
+  it('does not promote a partial Live fill to a full protected trade or release its risk', async () => {
+    const { router } = liveHarness();
+    await runtime.tick(session);
+    router.confirmFill.mockResolvedValueOnce({ complete: false, terminal: false, filledQuantity: 32, averagePrice: 100.45, status: 'PARTIALLY_FILLED' });
+    await expect(runtime.approveEntry(session)).rejects.toThrow('partial');
+    expect(session.trades).toEqual([]);
+    expect(session.pendingProposalId).not.toBeNull();
+    expect(reservations.getHeldReservationsCount()).toBe(1);
+    expect(router.placeProtectiveExit).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for unsupported AST reversal exits and never dispatches an order', async () => {
+    session.strategySnapshot.astConfig = { ...session.strategySnapshot.astConfig!, exitRules: { exitOnIndicatorReversal: true } };
+    const preflight = await runtime.preflight(session.config, session.strategySnapshot);
+    expect(preflight.checks.find((check) => check.id === 'strategy')?.passed).toBe(false);
+    await runtime.tick(session);
+    expect(await broker.getOrders()).toEqual([]);
+  });
+
+  it('does not restore an already persisted Paper reservation or deduct its capital twice', async () => {
+    await runtime.tick(session);
+    const cash = reservations.getAvailableCash();
+    expect(runtime.restoreDailyLedger([structuredClone(session)])).toEqual(new Set([session.id]));
+    expect(reservations.getAvailableCash()).toBe(cash);
+    expect(reservations.getOpenPositionsCount()).toBe(1);
+    expect(reservations.isKillSwitchActive()).toBe(false);
+  });
 
   it('runs the real scanning and rule workflow, creates one protected fill, and deduplicates concurrent ticks', async () => {
     expect(await broker.getPositions()).toEqual([]);
@@ -82,7 +184,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     expect(workflow).toHaveBeenCalledOnce();
     expect(workflow).toHaveBeenCalledWith(expect.objectContaining({ id: session.config.strategyId }), { strictMarketData: true });
     expect(session.tradesExecuted).toBe(1);
-    expect(session.trades[0]!.quantity).toBe(25);
+    expect(session.trades[0]!.quantity).toBe(65);
     const position = (await broker.getPositions())[0]!;
     expect(position.stopLossPrice).toBe(session.trades[0]!.stopPrice);
     expect(position.targetPrice).toBeNull();
@@ -95,7 +197,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     tools.setClosedCandles('NSE_INDEX|Nifty 50', []);
     const preflight = await runtime.preflight(session.config, session.strategySnapshot);
     expect(preflight.passed).toBe(true);
-    expect(preflight.checks.find((item) => item.id === 'closed-bars')!.message).toContain('waiting');
+    expect(preflight.checks.find((item) => item.id === 'closed-bars')!.message).toContain('Waiting');
     await runtime.tick(session);
     expect(await broker.getOrders()).toEqual([]);
     expect(session.events[0]!.type).toBe('NO_ENTRY_SIGNAL');
@@ -113,7 +215,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     feed.injectSimulatedTick({ ...quote(), timestamp: 'invalid' });
     expect((await runtime.preflight(session.config, session.strategySnapshot)).passed).toBe(false);
     tick();
-    await broker.placeOrder({ intentId: 'external', tag: 'EXTERNAL', instrumentKey: optionKey, side: OrderSide.BUY, orderType: OrderType.MARKET, product: ProductType.I, quantity: 25 });
+    await broker.placeOrder({ intentId: 'external', tag: 'EXTERNAL', instrumentKey: optionKey, side: OrderSide.BUY, orderType: OrderType.MARKET, product: ProductType.I, quantity: 65 });
     const exposure = await runtime.preflight(session.config, session.strategySnapshot);
     expect(exposure.checks.find((item) => item.id === 'reconciliation')!.passed).toBe(false);
     await runtime.tick(session);
@@ -126,7 +228,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     await runtime.tick(session);
     expect(await broker.getOrders()).toEqual([]);
     expect(session.tradesExecuted).toBe(0);
-    expect(session.events[0]!.message).toContain('Risk Gate');
+    expect(session.events[0]!.message).toContain('all-in risk budget');
   });
 
   it('continues initial-stop protection while paused and settles verified fills and charges exactly once', async () => {
@@ -148,22 +250,23 @@ describe('Daily Bot execution and protective lifecycle', () => {
   });
 
   it('activates trailing using executable bid after charges and never loosens a tick-aligned stop', async () => {
+    session.strategySnapshot.exit.targetPoints = 50;
     await runtime.tick(session);
     const trade = session.trades[0]!;
-    tick(113);
+    tick(105.5);
     await runtime.tick(session);
     expect(trade.trailingActive).toBe(false); // Gross gain alone exceeds 300; net executable gain does not.
-    tick(116);
+    tick(106.5);
     await runtime.tick(session);
     expect(trade.trailingActive).toBe(true);
     expect(trade.protectedNetProfit).toBeGreaterThanOrEqual(100);
     const first = trade.stopPrice;
-    tick(121);
+    tick(110);
     await runtime.tick(session);
     const second = trade.stopPrice;
     expect(second).toBeGreaterThan(first);
     expect(second / 0.05).toBeCloseTo(Math.round(second / 0.05), 5);
-    tick(119);
+    tick(109);
     await runtime.tick(session);
     expect(trade.stopPrice).toBeGreaterThanOrEqual(second);
     feed.injectSimulatedTick({ ...quote(optionKey, 130), timestamp: new Date(Date.now() - 10000).toISOString() });
@@ -183,7 +286,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     expect(trade.status).toBe('EXIT_PENDING');
     expect(reservations.getAvailableCash()).toBe(cash);
     expect(reservations.getReservation(trade.reservationId!)!.status).toBe('COMMITTED');
-    expect((await broker.getPositions())[0]!.netQuantity).toBe(25);
+    expect((await broker.getPositions())[0]!.netQuantity).toBe(65);
     place.mockRestore();
     vi.advanceTimersByTime(1);
     tick(105);
@@ -261,7 +364,8 @@ describe('Daily Bot execution and protective lifecycle', () => {
     await runtime.tick(session);
     feed.injectSimulatedTick({ ...quote(), isStale: true });
     const gateway = { broadcast: vi.fn() } as any;
-    const risk = new RiskService(new EnvService(), reservations, broker, undefined, gateway);
+    const orders = new OrdersService(broker, reservations, new ProposalsService(gateway), gateway);
+    const risk = new RiskService(new EnvService(), reservations, broker, undefined, gateway, undefined, undefined, orders);
     const result = await risk.flattenPositions('Stale emergency attempt');
     expect(result.success).toBe(false);
     expect(result.positionsClosed).toBe(0);
@@ -310,7 +414,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     tick(90);
     await runtime.tick(session, () => { throw new Error('Exit checkpoint unavailable'); });
     expect(place).not.toHaveBeenCalled();
-    expect((await broker.getPositions())[0]!.netQuantity).toBe(25);
+    expect((await broker.getPositions())[0]!.netQuantity).toBe(65);
     expect(reservations.getReservation(session.trades[0]!.reservationId!)!.status).toBe('COMMITTED');
   });
 
@@ -320,14 +424,14 @@ describe('Daily Bot execution and protective lifecycle', () => {
     const gateway = { broadcast: vi.fn() } as any;
     const env = new EnvService();
     const catalog = new InstrumentCatalogService();
-    catalog.bootstrapCatalog();
+    catalog.bootstrapCatalog(brokerRecords);
     const freshReservations = new RiskReservationManager(env, gateway);
     const freshBroker = new PaperBrokerAdapter(catalog, feed, gateway);
     const restored = new DailyBotExecutionService(freshBroker, freshReservations, coordinator, tools, feed, catalog, env, new ProposalsService(gateway), gateway);
     expect(restored.restoreDailyLedger([saved])).toEqual(new Set([saved.id]));
-    expect((await freshBroker.getPositions())[0]!.netQuantity).toBe(25);
+    expect((await freshBroker.getPositions())[0]!.netQuantity).toBe(65);
     expect(freshReservations.getReservation(saved.trades[0]!.reservationId!)!.status).toBe('COMMITTED');
-    expect(freshReservations.getAvailableCash()).toBeCloseTo(10000 - saved.trades[0]!.entryPrice * 25, 2);
+    expect(freshReservations.getAvailableCash()).toBeCloseTo(10000 - saved.trades[0]!.entryPrice * 65, 2);
     saved.status = 'PAUSED';
     tick(90);
     await restored.tick(saved);
@@ -342,7 +446,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     const gateway = { broadcast: vi.fn() } as any;
     const env = new EnvService();
     const catalog = new InstrumentCatalogService();
-    catalog.bootstrapCatalog();
+    catalog.bootstrapCatalog(brokerRecords);
     const freshReservations = new RiskReservationManager(env, gateway);
     const freshBroker = new PaperBrokerAdapter(catalog, feed, gateway);
     const restored = new DailyBotExecutionService(freshBroker, freshReservations, coordinator, tools, feed, catalog, env, new ProposalsService(gateway), gateway);
@@ -353,9 +457,9 @@ describe('Daily Bot execution and protective lifecycle', () => {
     expect(freshReservations.isKillSwitchActive()).toBe(true);
   });
 
-  it('allows another affordable trade after a losing fill while preserving initial setup funding checks', async () => {
+  it('preserves remaining daily loss and funding checks after a losing fill', async () => {
     await runtime.tick(session);
-    tick(90);
+    tick(95);
     await runtime.tick(session);
     expect(session.trades[0]!.status).toBe('CLOSED');
     tick(100);
@@ -378,9 +482,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     const freshBroker = new PaperBrokerAdapter(catalog, feed, gateway);
     const restored = new DailyBotExecutionService(freshBroker, freshReservations, coordinator, tools, feed, catalog, env, new ProposalsService(gateway), gateway);
     expect(restored.restoreDailyLedger([saved])).toEqual(new Set([saved.id]));
-    const catalogCount = catalog.getUnderlyingInstruments('NIFTY').length;
-    catalog.onModuleInit();
-    expect(catalog.getUnderlyingInstruments('NIFTY')).toHaveLength(catalogCount);
+    expect(catalog.getUnderlyingInstruments('NIFTY')).toEqual([]); // Recovery uses durable metadata and never creates a catalog.
     const remote = { getPositions: vi.fn().mockResolvedValue([]), getOrders: vi.fn().mockResolvedValue([]) } as any;
     const oauth = { setLastReconciledAt: vi.fn() } as any;
     const reconciliation = new BrokerReconciliationService(freshBroker, remote, freshReservations, oauth, gateway, env);
@@ -395,8 +497,8 @@ describe('Daily Bot execution and protective lifecycle', () => {
     expect(freshReservations.isKillSwitchActive()).toBe(false);
     expect(remote.getPositions).not.toHaveBeenCalled();
     expect(remote.getOrders).not.toHaveBeenCalled();
-    env.config.SYSTEM_MODE = TradeMode.AUTO;
-    expect((await reconciliation.runReconciliation()).status).toBe('MISMATCH_DETECTED');
-    expect(remote.getPositions).toHaveBeenCalledOnce();
+    expect((await reconciliation.runReconciliation()).status).toBe('CLEAN');
+    expect(remote.getPositions).not.toHaveBeenCalled();
+    reconciliation.onModuleDestroy();
   });
 });

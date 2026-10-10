@@ -33,6 +33,10 @@ export interface RiskEvaluationResult {
 
 export function evaluateTradeRisk(input: EvaluateTradeRiskInput): RiskEvaluationResult {
   const reasons: string[] = [];
+  const numericValues = [input.entryPrice, input.stopPrice, input.targetPrice, input.quantity, input.lotSize, input.availableCash, input.maxCapitalInr, input.maxAllInTradeLossInr, input.dailyLossCapInr, input.realizedNetDailyLossInr, input.openRiskReservationsInr, input.currentOpenPositions, input.maxOpenPositions, input.slippageBufferPct ?? 0.02];
+  if (!numericValues.every(Number.isFinite) || input.entryPrice <= 0 || input.stopPrice <= 0 || input.targetPrice <= 0 || !Number.isInteger(input.quantity) || input.quantity <= 0 || !Number.isInteger(input.lotSize) || input.lotSize <= 0) {
+    return { allowed: false, reasons: ['All prices, balances and risk limits must be finite numbers.'], capitalRequired: 0, grossLossAtStop: 0, estimatedRoundTripCosts: 0, slippageBuffer: 0, allInRisk: 0, targetGrossProfit: 0, remainingDailyRiskBudget: 0 };
+  }
   const {
     entryPrice,
     stopPrice,

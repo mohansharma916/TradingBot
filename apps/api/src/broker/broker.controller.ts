@@ -7,6 +7,7 @@ import {
   Inject,
   HttpCode,
   HttpStatus,
+  Optional,
 } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
 import {
@@ -20,22 +21,22 @@ import { UpstoxBrokerAdapter } from './upstox-broker.adapter';
 import { UpstoxOAuthService } from './upstox-oauth.service';
 import { BrokerReconciliationService } from './broker-reconciliation.service';
 import { ReconciliationSchedulerService } from './reconciliation-scheduler.service';
+import { BrokerRouterService } from './broker-router.service';
 
 @Controller('broker')
 export class BrokerController {
   constructor(
-    @Inject(EnvService) private readonly envService: EnvService,
+    @Inject(EnvService) _envService: EnvService,
     @Inject(PaperBrokerAdapter) private readonly paperBroker: PaperBrokerAdapter,
-    @Inject(UpstoxBrokerAdapter) private readonly upstoxBroker: UpstoxBrokerAdapter,
+    @Inject(UpstoxBrokerAdapter) _upstoxBroker: UpstoxBrokerAdapter,
     @Inject(UpstoxOAuthService) private readonly oauthService: UpstoxOAuthService,
     @Inject(BrokerReconciliationService) private readonly reconciliationService: BrokerReconciliationService,
     @Inject(ReconciliationSchedulerService) private readonly reconciliationScheduler: ReconciliationSchedulerService,
+    @Optional() @Inject(BrokerRouterService) private readonly router?: BrokerRouterService,
   ) {}
 
   private getActiveAdapter() {
-    return this.envService.config.SYSTEM_MODE === 'PAPER'
-      ? this.paperBroker
-      : this.upstoxBroker;
+    return this.router?.getBroker() || this.paperBroker;
   }
 
   @Get('health')

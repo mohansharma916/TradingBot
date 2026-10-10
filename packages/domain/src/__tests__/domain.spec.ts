@@ -28,8 +28,8 @@ describe('Domain Package', () => {
 
   describe('lot-size', () => {
     it('identifies NIFTY and BANKNIFTY lot sizes', () => {
-      expect(getStandardLotSize('NIFTY26OCT25000CE')).toBe(25);
-      expect(getStandardLotSize('BANKNIFTY26OCT52000PE')).toBe(15);
+      expect(getStandardLotSize('NIFTY26OCT25000CE')).toBe(65);
+      expect(getStandardLotSize('BANKNIFTY26OCT52000PE')).toBe(30);
       expect(isValidLotQuantity(50, 25)).toBe(true);
       expect(isValidLotQuantity(30, 25)).toBe(false);
     });

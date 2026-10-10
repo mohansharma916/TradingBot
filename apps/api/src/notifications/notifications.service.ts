@@ -12,20 +12,6 @@ export class NotificationsService {
   private alerts: Map<string, SystemAlert> = new Map();
 
   constructor(@Inject(EventsGateway) private readonly gateway: EventsGateway) {
-    this.seedInitialAlert();
-  }
-
-  private seedInitialAlert(): void {
-    const initialAlert: SystemAlert = {
-      id: crypto.randomUUID(),
-      severity: AlertSeverity.INFO,
-      category: 'SYSTEM',
-      title: 'Platform Initialized in Supervised Approval Mode',
-      message: 'Risk gates, AES-256-GCM tokens, and streaming Protobuf V3 data feed are operational.',
-      acknowledged: false,
-      timestamp: new Date().toISOString(),
-    };
-    this.alerts.set(initialAlert.id, initialAlert);
   }
 
   public dispatchAlert(params: {
@@ -86,7 +72,7 @@ export class NotificationsService {
       severity,
       category: 'SYSTEM',
       title: 'Incident Recovery Drill Alert',
-      message: 'Simulated operational drill: verifying multi-channel alert delivery.',
+      message: 'Simulated operational drill: checking in-app alert delivery.',
     });
   }
 }

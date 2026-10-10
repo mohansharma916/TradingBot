@@ -490,7 +490,7 @@ export const PREDEFINED_STRATEGY_TEMPLATES: StrategyTemplateItem[] = [
   {
     id: 'tpl_opening_range_breakout',
     name: 'Opening Range Breakout (ORB)',
-    description: 'Trades sharp direction breakouts of the initial 15-minute high/low range with volume expansion before 11:30 AM IST cutoff.',
+    description: 'Research template: confirmed breaks of the frozen 09:15–09:30 IST range with volume expansion before 11:30. Missing opening bars block the signal.',
     category: 'BREAKOUT',
     recommendedUnderlying: 'NIFTY',
     recommendedTimeframe: '5m',
@@ -507,7 +507,7 @@ export const PREDEFINED_STRATEGY_TEMPLATES: StrategyTemplateItem[] = [
         id: 'group_orb_bull',
         operator: LogicalOperator.AND,
         enabled: true,
-        description: 'Close breaks above 3-bar High (first 15m) with volume expansion',
+        description: 'Close breaks above the frozen opening range high with volume expansion',
         conditions: [
           {
             id: 'c_orb_high_break',
@@ -531,7 +531,7 @@ export const PREDEFINED_STRATEGY_TEMPLATES: StrategyTemplateItem[] = [
         id: 'group_orb_bear',
         operator: LogicalOperator.AND,
         enabled: true,
-        description: 'Close breaks below 3-bar Low (first 15m) with volume expansion',
+        description: 'Close breaks below the frozen opening range low with volume expansion',
         conditions: [
           {
             id: 'c_orb_low_break',

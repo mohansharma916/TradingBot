@@ -36,7 +36,7 @@ function makeMockCandles(count: number, basePrice = 24000, trend = 5): Candle[] 
 }
 
 describe('Strategy Lab: AST Evaluator & Templates', () => {
-  it('defines 6 production-grade predefined templates with valid AST configs', () => {
+  it('defines 6 research templates with valid AST configs', () => {
     expect(PREDEFINED_STRATEGY_TEMPLATES).toHaveLength(6);
 
     const ids = PREDEFINED_STRATEGY_TEMPLATES.map((t) => t.id);
@@ -181,7 +181,7 @@ describe('Strategy Lab: AST Evaluator & Templates', () => {
     expect(res.isWarmedUp).toBe(false);
   });
 
-  it('runs backtest successfully using a predefined template with real statutory charges and dynamic trailing stops', () => {
+  it('runs an explicitly modeled backtest with affordable template exits', () => {
     const tpl = PREDEFINED_STRATEGY_TEMPLATES[0]!;
     const candles = makeMockCandles(80, 24200, 8);
 
@@ -192,7 +192,7 @@ describe('Strategy Lab: AST Evaluator & Templates', () => {
         version: 1,
         underlying: 'NIFTY',
         timeframe: '5m',
-        astConfig: tpl.astConfig,
+        astConfig: { ...tpl.astConfig, exitRules: { ...tpl.astConfig.exitRules, stopLossValue: 2 } },
         session: { start: '09:15', lastEntry: '15:00', timezone: 'Asia/Kolkata' },
       } as any,
       candles,

@@ -1,4 +1,13 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { OwnerAuthGuard } from './auth/owner-auth.guard';
+import { OwnerAuthService } from './auth/owner-auth.service';
+import { TradingModeService } from './trading/trading-mode.service';
+import { TradingController } from './trading/trading.controller';
+import { RuntimeLeaseService } from './trading/runtime-lease.service';
+import { BrokerRouterService } from './broker/broker-router.service';
+import { LiveExecutionLedgerService } from './broker/live-execution-ledger.service';
+import { LiveExitMonitorService } from './orders/live-exit-monitor.service';
 import { EnvService } from './config/env.service';
 import { HealthController } from './health/health.controller';
 import { AuthController } from './auth/auth.controller';
@@ -45,6 +54,7 @@ import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.servic
 @Module({
   imports: [],
   controllers: [
+    TradingController,
     HealthController,
     AuthController,
     BrokerController,
@@ -62,6 +72,13 @@ import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.servic
   ],
   providers: [
     EnvService,
+    RuntimeLeaseService,
+    OwnerAuthService,
+    { provide: APP_GUARD, useClass: OwnerAuthGuard },
+    TradingModeService,
+    BrokerRouterService,
+    LiveExecutionLedgerService,
+    LiveExitMonitorService,
     RiskService,
     EventsGateway,
     ProtobufDecoderService,
@@ -92,6 +109,9 @@ import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.servic
   ],
   exports: [
     EnvService,
+    TradingModeService,
+    BrokerRouterService,
+    LiveExecutionLedgerService,
     RiskService,
     EventsGateway,
     ProtobufDecoderService,

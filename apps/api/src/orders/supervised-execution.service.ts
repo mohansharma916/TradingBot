@@ -1,37 +1,20 @@
-import {
-  Injectable,
-  Inject,
-  NotFoundException,
-  BadRequestException,
-  Logger,
-} from '@nestjs/common';
-import {
-  OrderStatus,
-  OrderType,
-  TradeMode,
-  ExitProtectionStatus,
-  SupervisedExecutionRequest,
-  SupervisedExecutionResult,
-  ProposalStatus,
-} from '@trading-bot/contracts';
-import {
-  transitionOrderState,
-  validateGTTExitParameters,
-} from '@trading-bot/domain';
+import { Injectable, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
+import { OrderStatus, OrderType, OrderSide, ExitProtectionStatus, SupervisedExecutionRequest, SupervisedExecutionResult, ProposalStatus } from '@trading-bot/contracts';
+import { validateGTTExitParameters, calculateOptionCharges } from '@trading-bot/domain';
 import { EnvService } from '../config/env.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
-import { UpstoxBrokerAdapter } from '../broker/upstox-broker.adapter';
+import { UpstoxBrokerAdapter, BrokerRequestError } from '../broker/upstox-broker.adapter';
 import { UpstoxMarketFeedService } from '../market-data/upstox-market-feed.service';
 import { RiskReservationManager } from '../risk/risk-reservation.manager';
 import { GoLiveChecklistService } from './go-live-checklist.service';
 import { EventsGateway } from '../websocket/events.gateway';
-import crypto from 'node:crypto';
+import { BrokerRouterService } from '../broker/broker-router.service';
+import { LiveExecutionLedgerService } from '../broker/live-execution-ledger.service';
+import { ConfirmedOrderFill, OrderAcknowledgement } from '../broker/broker.port';
 
 @Injectable()
 export class SupervisedExecutionService {
-  private readonly logger = new Logger(SupervisedExecutionService.name);
-
   constructor(
     @Inject(EnvService) private readonly envService: EnvService,
     @Inject(ProposalsService) private readonly proposalsService: ProposalsService,
@@ -41,291 +24,104 @@ export class SupervisedExecutionService {
     @Inject(RiskReservationManager) private readonly riskReservationManager: RiskReservationManager,
     @Inject(GoLiveChecklistService) private readonly goLiveChecklist: GoLiveChecklistService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
+    @Optional() @Inject(BrokerRouterService) private readonly router?: BrokerRouterService,
+    @Optional() @Inject(LiveExecutionLedgerService) private readonly ledger?: LiveExecutionLedgerService,
   ) {}
-
-  private getBrokerAdapter() {
-    return this.envService.config.SYSTEM_MODE === TradeMode.PAPER
-      ? this.paperBroker
-      : this.upstoxBroker;
-  }
-
-  /**
-   * Executes an owner-approved TradeProposal under supervised execution with GTT protective exits.
-   * 
-   * Strict Invariants:
-   * 1. Short-Lived Owner Approval Window: Must be approved within 180s.
-   * 2. Pre-Trade Revalidation: Market quote latency < 3,000ms, spread <= 1.0%.
-   * 3. Idempotent Intent: Unique intentId prevents duplicate broker dispatches.
-   * 4. State Discipline: Broker ACK is NEVER labeled as FILLED.
-   * 5. Protection Mandate: Fills immediately attach multi-leg GTT protective exits.
-   * 6. Protection Failure Freeze: If protection cannot be established, execution freezes.
-   */
-  public async executeSupervisedProposal(
-    req: SupervisedExecutionRequest,
-  ): Promise<SupervisedExecutionResult> {
+  public async executeSupervisedProposal(req: SupervisedExecutionRequest): Promise<SupervisedExecutionResult> {
     const proposal = this.proposalsService.getProposal(req.proposalId);
-    if (!proposal) {
-      throw new NotFoundException(`Trade proposal '${req.proposalId}' not found.`);
+    if (!proposal) throw new NotFoundException(`Trade proposal '${req.proposalId}' not found.`);
+    const live = this.router?.isLive() ?? false;
+    const broker = live ? this.upstoxBroker : this.paperBroker;
+    if (live && (!this.envService.config.LIVE_EXECUTION_ENABLED || !this.ledger || !this.goLiveChecklist.getChecklist().liveExecutionPermitted)) throw new BadRequestException('Live execution requires the enabled feature flag, durable ledger and verified owner checklist.');
+    if (live && [req.simulateTimeout, req.simulateProtectionFailure, req.simulateUncoveredPosition, req.simulateExitLimitUnfilled].some(Boolean)) throw new BadRequestException('Simulation controls cannot be used in Live mode.');
+    if (proposal.status !== ProposalStatus.APPROVED) throw new BadRequestException(`Proposal '${req.proposalId}' must be APPROVED by owner before supervised execution. Current status: ${proposal.status}`);
+    if (!Number.isFinite(Date.parse(proposal.expiresAt)) || Date.now() >= Date.parse(proposal.expiresAt)) throw new BadRequestException('Proposal approval window has expired. A fresh proposal and approval are required.');
+    if (proposal.side !== OrderSide.BUY) throw new BadRequestException('Only long-option BUY proposals can enter through this supervised workflow.');
+    // Freshness is mandatory. A missing quote cannot authorize execution.
+    const quote = this.marketFeed.getQuote(proposal.instrumentKey);
+    const age = quote ? Date.now() - Date.parse(quote.timestamp) : NaN;
+    if (!quote || quote.isStale || !Number.isFinite(age) || age < -1000 || age > 3000 || !Number.isFinite(quote.bidPrice) || quote.bidPrice <= 0 || !Number.isFinite(quote.askPrice) || quote.askPrice < quote.bidPrice) throw new BadRequestException('Pre-trade revalidation failed: missing quote or quote age exceeds 3,000ms safety threshold.');
+    if (live && (quote.provenance !== 'LIVE' || quote.depthKnown !== true || quote.bidQty <= 0 || quote.askQty <= 0)) throw new BadRequestException('Live execution requires genuine fresh broker depth and positive executable bid/ask quantities.');
+    const spread = (quote.askPrice - quote.bidPrice) / quote.askPrice * 100;
+    if (spread > 1) throw new BadRequestException('Pre-trade revalidation failed: spread exceeds 1.0% maximum liquidity ceiling.');
+    const maximumPrice = Math.max(proposal.suggestedEntryPrice, quote.askPrice + (live ? 0 : 0.25));
+    const capital = Math.max(proposal.estimatedCapitalRequired, maximumPrice * proposal.quantity);
+    const charges = calculateOptionCharges({ buyPrice: maximumPrice, sellPrice: Math.max(1, proposal.suggestedStopPrice - 0.25), quantity: proposal.quantity }).totalRoundTripCharges;
+    const risk = Math.max(proposal.allInMaxLoss, (maximumPrice - proposal.suggestedStopPrice + 0.25) * proposal.quantity + charges + 10);
+    if (live) {
+      const instrument = await broker.getInstrument(proposal.instrumentKey);
+      if (!instrument || !/^NSE_FO\|\d+$/.test(instrument.instrumentKey) || proposal.quantity % instrument.lotSize !== 0) throw new BadRequestException('Live orders require the broker instrument token and correct contract lot size.');
+      const funds = await broker.getFunds();
+      if (funds.source !== 'LIVE_BROKER' || funds.status !== 'VERIFIED' || capital + charges > funds.availableCash) throw new BadRequestException('Verified live funds do not cover entry capital and estimated charges.');
+      this.riskReservationManager.synchronizeFunds(funds.availableCash);
     }
-
-    // 0. Live Execution Safety & Go-Live Checklist Gate
-    if (this.envService.config.SYSTEM_MODE !== TradeMode.PAPER || this.envService.config.LIVE_EXECUTION_ENABLED) {
-      const checklist = this.goLiveChecklist.getChecklist();
-      if (!checklist.liveExecutionPermitted) {
-        throw new BadRequestException(
-          'Live broker execution blocked: 10-point Go-Live safety checklist is not fully signed off by platform owner.',
-        );
-      }
-    }
-
-    // 1. Owner Approval Mode & Window Check
-    if (proposal.status !== ProposalStatus.APPROVED) {
-      throw new BadRequestException(
-        `Proposal '${req.proposalId}' must be APPROVED by owner before supervised execution. Current status: ${proposal.status}`,
-      );
-    }
-
-    const expiresAtMs = new Date(proposal.expiresAt).getTime();
-    if (Date.now() > expiresAtMs) {
-      throw new BadRequestException(
-        `Proposal approval window has expired. Fresh market scan required to prevent stale execution.`,
-      );
-    }
-
-    // 2. Pre-Trade Revalidation (Quote Freshness & Spread)
-    if (req.revalidateFreshness) {
-      const quote = this.marketFeed.getQuote(proposal.instrumentKey);
-      if (quote) {
-        const quoteAgeMs = Date.now() - new Date(quote.timestamp).getTime();
-        if (quote.isStale || quoteAgeMs > 3000) {
-          throw new BadRequestException(
-            `Pre-trade revalidation failed: Market feed quote age (${quoteAgeMs}ms) exceeds 3,000ms safety threshold.`,
-          );
-        }
-
-        const spreadPct = Number(
-          (((quote.askPrice - quote.bidPrice) / quote.lastPrice) * 100).toFixed(2),
-        );
-        if (spreadPct > 1.0) {
-          throw new BadRequestException(
-            `Pre-trade revalidation failed: Bid/Ask spread (${spreadPct}%) exceeds 1.0% maximum liquidity ceiling.`,
-          );
-        }
-      }
-    }
-
-    // 3. Central Transactional Capital Reservation & Unique Intent ID
-    const intentId = `intent_${crypto.randomBytes(8).toString('hex')}`;
-    const signalKey = `${proposal.strategyId}:${proposal.instrumentKey}:5m:${Date.now()}`;
-
-    const reservation = this.riskReservationManager.acquireReservation({
-      proposalId: proposal.id,
-      signalKey,
-      instrumentKey: proposal.instrumentKey,
-      capitalRequired: proposal.estimatedCapitalRequired,
-      allInRisk: proposal.allInMaxLoss,
-    });
-
-    // 4. Anomaly Simulation: Request Timeout / Unknown State
+    const intentId = `supervised_${proposal.id}`;
+    const signalKey = `${proposal.strategyId}:${proposal.instrumentKey}:5m:${proposal.id}`;
+    if (live && this.ledger!.getIntent(intentId)) throw new BadRequestException('This proposal already has a durable live intent; reconcile its existing outcome instead of replaying it.');
+    const reservation = this.riskReservationManager.acquireReservation({ proposalId: proposal.id, signalKey, instrumentKey: proposal.instrumentKey, capitalRequired: capital, allInRisk: risk });
+    const result = (status: OrderStatus, protection: ExitProtectionStatus, quantity: number, price: number, message: string, orderId = intentId, gttOrderId?: string): SupervisedExecutionResult => ({ orderId, intentId, orderStatus: status, protectionStatus: protection, filledQuantity: quantity, averagePrice: price, message, ...(gttOrderId ? { gttOrderId } : {}) });
     if (req.simulateTimeout) {
-      this.logger.warn(`[SupervisedExecution] Simulating broker network timeout for intent '${intentId}'.`);
-      this.riskReservationManager.releaseReservation(reservation.id, 'Simulated broker timeout');
-      return {
-        orderId: `ord_unknown_${Date.now()}`,
-        intentId,
-        orderStatus: OrderStatus.UNKNOWN_BROKER_STATE,
-        protectionStatus: ExitProtectionStatus.UNPROTECTED,
-        filledQuantity: 0,
-        averagePrice: 0,
-        message: 'Simulated request timeout: Order status UNKNOWN. Manual broker query and reconciliation required.',
-      };
+      this.riskReservationManager.setKillSwitch(true);
+      return result(OrderStatus.UNKNOWN_BROKER_STATE, ExitProtectionStatus.UNPROTECTED, 0, 0, 'Simulated request timeout: outcome unknown; reservation retained and entries frozen.');
     }
-
-    let currentStatus = OrderStatus.SUBMITTING;
-    currentStatus = transitionOrderState(currentStatus, OrderStatus.ACKNOWLEDGED);
-
+    let dispatched = false;
+    let ack: OrderAcknowledgement | undefined;
+    let confirmed: ConfirmedOrderFill | undefined;
     try {
-      // 5. Broker Order Dispatch
-      const broker = this.getBrokerAdapter();
-      const ack = await broker.placeOrder({
-        intentId,
-        tag: `SUP_${proposal.strategyVersion}`,
-        instrumentKey: proposal.instrumentKey,
-        side: proposal.side,
-        orderType: OrderType.LIMIT,
-        product: proposal.product,
-        quantity: proposal.quantity,
-        price: proposal.suggestedEntryPrice,
-        stopLossPrice: proposal.suggestedStopPrice,
-        targetPrice: proposal.suggestedTargetPrice,
-      });
-
+      dispatched = true;
+      ack = await broker.placeOrder({ intentId, proposalId: proposal.id, reservationId: reservation.id, signalKey, symbol: proposal.symbol,
+        reservedCapital: capital, reservedRisk: risk, tag: intentId.slice(0, 20), instrumentKey: proposal.instrumentKey,
+        side: proposal.side, orderType: OrderType.LIMIT, product: proposal.product, quantity: proposal.quantity, price: proposal.suggestedEntryPrice,
+        stopLossPrice: proposal.suggestedStopPrice, targetPrice: proposal.suggestedTargetPrice, estimatedCharges: charges, maximumExecutionPrice: maximumPrice });
       if (ack.status === 'REJECTED') {
         this.riskReservationManager.releaseReservation(reservation.id, ack.message);
-        return {
-          orderId: ack.orderId,
-          intentId,
-          orderStatus: OrderStatus.REJECTED,
-          protectionStatus: ExitProtectionStatus.UNPROTECTED,
-          filledQuantity: 0,
-          averagePrice: 0,
-          message: `Broker order rejected: ${ack.message}`,
-        };
+        return result(OrderStatus.REJECTED, ExitProtectionStatus.UNPROTECTED, 0, 0, ack.message, ack.orderId);
       }
-
-      // Order Filled Confirmation
-      currentStatus = transitionOrderState(currentStatus, OrderStatus.FILLED);
-      const filledQty = proposal.quantity;
-      const fillPrice = proposal.suggestedEntryPrice;
-
-      // 6. Commit Reservation to Open Position
-      this.riskReservationManager.commitReservationToPosition(
-        reservation.id,
-        proposal.estimatedCapitalRequired,
-      );
-
-      // 7. Multi-Leg GTT Exit Protection Setup
-      currentStatus = transitionOrderState(currentStatus, OrderStatus.EXIT_PROTECTION_PENDING);
-
-      // Anomaly Simulation: Protection Failure
-      if (req.simulateProtectionFailure) {
-        this.logger.error(`[SupervisedExecution] Simulating GTT protective exit placement failure!`);
-        currentStatus = transitionOrderState(currentStatus, OrderStatus.PROTECTION_FAILED);
-
-        // Safety Invariant: Protection failure triggers account kill switch
-        this.riskReservationManager.setKillSwitch(true);
-        this.gateway.broadcast('order.protection_failed', {
-          orderId: ack.orderId,
-          intentId,
-          reason: 'Simulated GTT protective trigger rejection.',
-        });
-
-        return {
-          orderId: ack.orderId,
-          intentId,
-          orderStatus: OrderStatus.PROTECTION_FAILED,
-          protectionStatus: ExitProtectionStatus.PROTECTION_FAILED,
-          filledQuantity: filledQty,
-          averagePrice: fillPrice,
-          message: 'CRITICAL: Protective exit placement failed. Trading engine FROZEN via Kill Switch.',
-        };
-      }
-
-      // Anomaly Simulation: Uncovered Position
-      if (req.simulateUncoveredPosition) {
-        this.logger.warn(`[SupervisedExecution] Simulating uncovered position without protective stops.`);
-        this.riskReservationManager.setKillSwitch(true);
-        return {
-          orderId: ack.orderId,
-          intentId,
-          orderStatus: OrderStatus.FILLED,
-          protectionStatus: ExitProtectionStatus.UNPROTECTED,
-          filledQuantity: filledQty,
-          averagePrice: fillPrice,
-          message: 'WARNING: Uncovered position detected! Entry filled without GTT protection. Engine frozen.',
-        };
-      }
-
-      // Anomaly Simulation: Exit Limit Unfilled
-      if (req.simulateExitLimitUnfilled) {
-        this.logger.error(`[SupervisedExecution] Simulating exit limit unfilled / trigger gap without market execution!`);
-        currentStatus = transitionOrderState(currentStatus, OrderStatus.MANUAL_INTERVENTION_REQUIRED);
-        this.riskReservationManager.setKillSwitch(true);
-        this.gateway.broadcast('order.exit_unfilled', {
-          orderId: ack.orderId,
-          intentId,
-          reason: 'GTT stop limit trigger slipped unfilled. Price breached. Manual intervention required.',
-        });
-
-        return {
-          orderId: ack.orderId,
-          intentId,
-          orderStatus: OrderStatus.MANUAL_INTERVENTION_REQUIRED,
-          protectionStatus: ExitProtectionStatus.PROTECTION_FAILED,
-          filledQuantity: filledQty,
-          averagePrice: fillPrice,
-          message: 'CRITICAL: Protective exit limit order remained UNFILLED. Kill switch engaged; manual close required.',
-        };
-      }
-
-      // Validate GTT Parameters
-      const gttValidation = validateGTTExitParameters({
-        fillPrice,
-        stopLossPrice: proposal.suggestedStopPrice,
-        targetPrice: proposal.suggestedTargetPrice,
-        quantity: filledQty,
-      });
-
-      if (!gttValidation.isValid) {
-        this.logger.error(`[SupervisedExecution] GTT parameter validation failed: ${gttValidation.error}`);
-        currentStatus = transitionOrderState(currentStatus, OrderStatus.PROTECTION_FAILED);
-        this.riskReservationManager.setKillSwitch(true);
-
-        return {
-          orderId: ack.orderId,
-          intentId,
-          orderStatus: OrderStatus.PROTECTION_FAILED,
-          protectionStatus: ExitProtectionStatus.PROTECTION_FAILED,
-          filledQuantity: filledQty,
-          averagePrice: fillPrice,
-          message: `Protection failed: ${gttValidation.error}. Engine frozen.`,
-        };
-      }
-
-      // Broker Multi-Leg GTT Exit Protection Dispatch
-      let gttOrderId = `gtt_${Date.now()}`;
-      if (typeof broker.placeProtectiveExit === 'function') {
-        const protResult = await broker.placeProtectiveExit({
-          instrumentKey: proposal.instrumentKey,
-          stopLossPrice: proposal.suggestedStopPrice,
-          targetPrice: proposal.suggestedTargetPrice,
-          quantity: filledQty,
-          product: proposal.product,
-        });
-
-        if (!protResult.success) {
-          currentStatus = transitionOrderState(currentStatus, OrderStatus.PROTECTION_FAILED);
-          this.riskReservationManager.setKillSwitch(true);
-          return {
-            orderId: ack.orderId,
-            intentId,
-            orderStatus: OrderStatus.PROTECTION_FAILED,
-            protectionStatus: ExitProtectionStatus.PROTECTION_FAILED,
-            filledQuantity: filledQty,
-            averagePrice: fillPrice,
-            message: `CRITICAL: ${protResult.message}. Kill switch engaged.`,
-          };
+      confirmed = this.router ? await this.router.confirmFill(ack, proposal.quantity) : await this.confirmPaperFill(ack, proposal.quantity);
+      if (live && confirmed.filledQuantity > 0 && !confirmed.terminal) {
+        // Cancel the remainder before attaching a stop sized for the confirmed partial fill.
+        const orders = await broker.getOrders();
+        for (const id of confirmed.orderIds) {
+          const order = orders.find((item) => item.id === id);
+          if (order && ![OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED].includes(order.status)) await broker.cancelOrder(id);
         }
-        if (protResult.gttOrderId) {
-          gttOrderId = protResult.gttOrderId;
-        }
+        confirmed = await this.upstoxBroker.confirmFill(ack, proposal.quantity);
       }
-
-      // Successfully Attached Protective Exit
-      currentStatus = transitionOrderState(currentStatus, OrderStatus.PROTECTED);
-
-      this.gateway.broadcast('order.protected', {
-        orderId: ack.orderId,
-        gttOrderId,
-        stopLossPrice: proposal.suggestedStopPrice,
-        targetPrice: proposal.suggestedTargetPrice,
-        quantity: filledQty,
-      });
-
-      return {
-        orderId: ack.orderId,
-        intentId,
-        orderStatus: OrderStatus.PROTECTED,
-        protectionStatus: ExitProtectionStatus.PROTECTED_GTT,
-        filledQuantity: filledQty,
-        averagePrice: fillPrice,
-        gttOrderId,
-        message: `Order filled at ₹${fillPrice.toFixed(2)} and protected with GTT Stop (₹${proposal.suggestedStopPrice}) and Target (₹${proposal.suggestedTargetPrice}). Note: Triggers submit limit orders; not a guaranteed stop.`,
-      };
-    } catch (err: any) {
-      this.logger.error(`[SupervisedExecution] Execution exception: ${err.message}`);
-      this.riskReservationManager.releaseReservation(reservation.id, err.message);
-      throw new BadRequestException(`Supervised execution failed: ${err.message}`);
+      if (confirmed.filledQuantity === 0 && confirmed.terminal) {
+        this.riskReservationManager.releaseReservation(reservation.id, 'Broker confirmed terminal order with no fill.');
+        return result(confirmed.status as OrderStatus, ExitProtectionStatus.UNPROTECTED, 0, 0, 'Broker confirmed no execution; capital released.', ack.orderId);
+      }
+      if (confirmed.filledQuantity === 0 || !confirmed.terminal) {
+        this.riskReservationManager.setKillSwitch(true);
+        return result(confirmed.status as OrderStatus, ExitProtectionStatus.UNPROTECTED, confirmed.filledQuantity, confirmed.averagePrice, 'Fill is pending or partial remainder is unresolved. Reservation retained; entries frozen for reconciliation.', ack.orderId);
+      }
+      const quantity = confirmed.filledQuantity; const price = confirmed.averagePrice;
+      this.riskReservationManager.commitReservationToPosition(reservation.id, price * quantity);
+      const validation = validateGTTExitParameters({ fillPrice: price, stopLossPrice: proposal.suggestedStopPrice, targetPrice: proposal.suggestedTargetPrice, quantity });
+      if (!validation.isValid || req.simulateProtectionFailure || req.simulateUncoveredPosition || req.simulateExitLimitUnfilled) throw new Error(validation.error || (req.simulateProtectionFailure ? 'Protective exit placement failed in paper drill.' : req.simulateUncoveredPosition ? 'Uncovered position detected in paper drill.' : 'Exit limit unfilled in paper drill; Manual intervention required.'));
+      const protection = await broker.placeProtectiveExit({ instrumentKey: proposal.instrumentKey, quantity, product: proposal.product, stopLossPrice: proposal.suggestedStopPrice, targetPrice: proposal.suggestedTargetPrice });
+      if (!protection.success || !protection.gttOrderId || protection.confirmedQty !== quantity) throw new Error(protection.message || 'Protective exit quantity or identifier could not be confirmed.');
+      this.gateway.broadcast('order.protected', { orderId: ack.orderId, intentId, gttOrderId: protection.gttOrderId, quantity, averagePrice: price });
+      return result(quantity === proposal.quantity ? OrderStatus.PROTECTED : OrderStatus.PARTIALLY_FILLED, protection.protectionStatus, quantity, price,
+        live ? `Confirmed ${quantity} units at ₹${price.toFixed(2)}. Broker stop verified; target is managed by the server. Trigger execution is not guaranteed.` : `Confirmed paper fill at ₹${price.toFixed(2)}, protected with GTT Stop and Target in simulation; not a guaranteed stop.`, ack.orderId, protection.gttOrderId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Execution failed.';
+      if (!dispatched || (error instanceof BrokerRequestError && error.definiteRejection && !confirmed?.filledQuantity)) {
+        this.riskReservationManager.releaseReservation(reservation.id, message);
+        throw new BadRequestException(`Supervised execution rejected: ${message}`);
+      }
+      this.riskReservationManager.setKillSwitch(true);
+      const quantity = confirmed?.filledQuantity || 0;
+      const status = quantity > 0 ? OrderStatus.PROTECTION_FAILED : OrderStatus.UNKNOWN_BROKER_STATE;
+      if (live && this.ledger!.getIntent(intentId)) this.ledger!.update(intentId, { state: status, message });
+      return result(status, quantity > 0 ? ExitProtectionStatus.PROTECTION_FAILED : ExitProtectionStatus.UNPROTECTED, quantity, confirmed?.averagePrice || 0,
+        `${message} Account entries frozen. Position or ambiguous dispatch remains reserved; broker reconciliation is required.`, ack?.orderId || intentId);
     }
+  }
+  private async confirmPaperFill(ack: OrderAcknowledgement, quantity: number): Promise<ConfirmedOrderFill> {
+    const order = (await this.paperBroker.getOrders()).find((item) => item.id === ack.orderId);
+    return { status: order?.status || OrderStatus.UNKNOWN_BROKER_STATE, filledQuantity: order?.filledQuantity || 0, averagePrice: order?.averageFillPrice || 0,
+      orderIds: [ack.orderId], complete: order?.filledQuantity === quantity && order.status === OrderStatus.FILLED,
+      terminal: order !== undefined && [OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED].includes(order.status) };
   }
 }

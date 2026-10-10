@@ -1,169 +1,79 @@
-import { Injectable, Logger, Inject } from '@nestjs/common';
+import { Injectable, Inject, Optional, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
 import { TokenStorageService } from '../broker/token-storage.service';
-import {
-  GoLiveChecklist,
-  GoLiveChecklistItem,
-} from '@trading-bot/contracts';
+import { GoLiveChecklist, GoLiveChecklistItem } from '@trading-bot/contracts';
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 @Injectable()
 export class GoLiveChecklistService {
-  private readonly logger = new Logger(GoLiveChecklistService.name);
-  private items: Map<string, GoLiveChecklistItem> = new Map();
+  private items: GoLiveChecklistItem[];
   private signedOffBy: string | null = null;
   private signedOffAt: string | null = null;
-
+  private readonly storagePath: string | null;
   constructor(
     @Inject(EnvService) private readonly envService: EnvService,
     @Inject(TokenStorageService) private readonly tokenStorage: TokenStorageService,
+    @Optional() @Inject('GO_LIVE_STORAGE_PATH') storagePath?: string,
   ) {
-    this.initializeChecklist();
-  }
-
-  private initializeChecklist(): void {
-    const defaultItems: GoLiveChecklistItem[] = [
-      {
-        id: 'chk_01_reg',
-        category: 'REGULATORY',
-        title: 'SEBI & Exchange Algorithmic Framework Compliance',
-        description: 'Verified system operates strictly under personal supervised execution with human authorization.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'Owner single-tenant deployment architecture verified.',
-      },
-      {
-        id: 'chk_02_ip',
-        category: 'INFRASTRUCTURE',
-        title: 'Static Egress IP Binding Verified',
-        description: `Server outbound IP matches registered Upstox static IP (${this.envService.config.UPSTOX_EGRESS_IP}).`,
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: `Egress IP binding ${this.envService.config.UPSTOX_EGRESS_IP} verified.`,
-      },
-      {
-        id: 'chk_03_caps',
-        category: 'RISK_CAPS',
-        title: 'Deterministic Hard Risk Caps Enforced',
-        description: 'Hard limits locked: Max ₹10,000 capital, ₹500 all-in trade loss cap, ₹1,500 daily drawdown cap.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'RiskReservationManager hard bounds verified.',
-      },
-      {
-        id: 'chk_04_auth',
-        category: 'BROKER_OAUTH',
-        title: 'Upstox OAuth 2.0 Encrypted at Rest',
-        description: 'Active bearer token secured using AES-256-GCM with SHA-256 derived key.',
-        passed: this.tokenStorage.hasValidToken(),
-        verifiedAt: this.tokenStorage.hasValidToken() ? new Date().toISOString() : null,
-        evidence: 'TokenStorageService AES-256-GCM cipher verified.',
-      },
-      {
-        id: 'chk_05_feed',
-        category: 'MARKET_DATA',
-        title: 'Streaming Market Data Feed V3 & Stale Detector',
-        description: 'Protobuf V3 WebSocket latency < 50ms, monotonic tick sequencing, and > 3,000ms stale quote block active.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'UpstoxMarketFeedService stale gate test verified.',
-      },
-      {
-        id: 'chk_06_reconcile',
-        category: 'INFRASTRUCTURE',
-        title: 'Startup Broker Reconciliation Clean',
-        description: '0 discrepancies between broker positions and platform ledger.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'BrokerReconciliationService audit passed.',
-      },
-      {
-        id: 'chk_07_gtt',
-        category: 'PROTECTION_MECHANISM',
-        title: 'Multi-Leg GTT Exit Protection Ready',
-        description: 'Stop-loss and profit target limit triggers tested; never advertised as guaranteed stop.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'GTT limit trigger rules and quantity sync verified.',
-      },
-      {
-        id: 'chk_08_kill',
-        category: 'PROTECTION_MECHANISM',
-        title: 'Kill Switch & Emergency Stop Tested',
-        description: 'Emergency stop halts new entries and freezes orchestrator pipelines instantaneously.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'Emergency stop unit and integration tests passed.',
-      },
-      {
-        id: 'chk_09_supervision',
-        category: 'CONSENT',
-        title: 'Supervised Owner Approval Mode Active',
-        description: 'Trades require explicit owner sign-off with 180s countdown window and pre-trade revalidation.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'Owner approval requirement verified.',
-      },
-      {
-        id: 'chk_10_consent',
-        category: 'CONSENT',
-        title: 'Owner Risk Disclosure & Execution Consent',
-        description: 'Owner acknowledges options market risks, lack of fill guarantees on GTT limits, and capital limits.',
-        passed: true,
-        verifiedAt: new Date().toISOString(),
-        evidence: 'Manual acknowledgement signed.',
-      },
+    this.storagePath = storagePath ? path.resolve(storagePath) : process.env.VITEST ? null : path.resolve(this.envService.config.STATE_DIRECTORY || '.data', 'go-live-checklist.json');
+    const definitions: Array<[string, GoLiveChecklistItem['category'], string, string]> = [
+      ['chk_01_reg', 'REGULATORY', 'Broker and exchange requirements reviewed', 'Owner records applicable broker permissions and current exchange requirements; software does not certify regulatory compliance.'],
+      ['chk_02_ip', 'INFRASTRUCTURE', 'Registered static IP verified', 'Owner records actual registered egress verification from the broker and deployment. Configuration alone is not a measurement.'],
+      ['chk_03_caps', 'RISK_CAPS', 'Personal account risk limits reviewed', 'Owner confirms configured capital, trade loss, daily loss and position limits.'],
+      ['chk_04_auth', 'BROKER_OAUTH', 'Genuine OAuth token locally valid', 'A genuine unexpired token is present. Each live entry additionally verifies broker funds.'],
+      ['chk_05_feed', 'MARKET_DATA', 'Genuine executable feed verified', 'Record tested live quote provenance, exchange timestamps and bid/ask depth; entries repeat these checks.'],
+      ['chk_06_reconcile', 'INFRASTRUCTURE', 'Broker reconciliation verified', 'Record a successful full broker order/position reconciliation and recovery drill.'],
+      ['chk_07_gtt', 'PROTECTION_MECHANISM', 'Broker stop protection verified', 'Record a broker test of stop placement, lookup and cancellation. Trigger execution is not guaranteed.'],
+      ['chk_08_kill', 'PROTECTION_MECHANISM', 'Kill switch and emergency exit verified', 'Record drills confirming entry freeze and confirmed exit fills; an accepted exit is not a closed position.'],
+      ['chk_09_supervision', 'CONSENT', 'Owner supervision and recovery reviewed', 'Confirm authenticated supervision, bounded arming and handling of pending/partial/unknown order states.'],
+      ['chk_10_consent', 'CONSENT', 'Owner risk consent', 'Owner accepts options risk, estimated charges, gap/slippage risk and lack of guaranteed exit fills.'],
     ];
-
-    for (const item of defaultItems) {
-      this.items.set(item.id, item);
+    this.items = definitions.map(([id, category, title, description]) => ({ id, category, title, description, passed: false, verifiedAt: null }));
+    if (this.storagePath) {
+      try {
+        const saved = JSON.parse(fs.readFileSync(this.storagePath, 'utf8')) as GoLiveChecklist;
+        if (!Array.isArray(saved.items) || saved.items.length !== this.items.length || saved.items.some((item) => !this.items.some((known) => known.id === item.id) || typeof item.passed !== 'boolean' || (item.passed && (!item.evidence || !item.verifiedAt)))) throw new Error('Invalid checklist evidence.');
+        this.items = this.items.map((item) => ({ ...item, ...saved.items.find((savedItem) => savedItem.id === item.id) }));
+        this.signedOffBy = saved.signedOffBy; this.signedOffAt = saved.signedOffAt;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new ServiceUnavailableException('Go-live evidence cannot be validated; live execution is blocked.'); }
     }
   }
-
   public getChecklist(): GoLiveChecklist {
-    // Refresh dynamic checks
-    const authItem = this.items.get('chk_04_auth');
-    if (authItem) {
-      authItem.passed = this.tokenStorage.hasValidToken();
-      if (authItem.passed && !authItem.verifiedAt) {
-        authItem.verifiedAt = new Date().toISOString();
-      }
-    }
-
-    const itemsList = Array.from(this.items.values());
-    const allPassed = itemsList.every((item) => item.passed);
-
-    return {
-      allPassed,
-      items: itemsList,
-      signedOffBy: this.signedOffBy,
-      signedOffAt: this.signedOffAt,
-      liveExecutionPermitted: allPassed && Boolean(this.signedOffAt) && this.envService.config.LIVE_EXECUTION_ENABLED,
-    };
+    const auth = this.items.find((item) => item.id === 'chk_04_auth')!;
+    const token = this.tokenStorage.hasValidToken() ? this.tokenStorage.getToken()?.accessToken : undefined;
+    auth.passed = typeof token === 'string' && !!token && !/^(mock_|test_|upstox_sand_|upstox_ref_)/i.test(token);
+    auth.verifiedAt = auth.passed ? new Date().toISOString() : null;
+    auth.evidence = auth.passed ? 'Genuine-format token locally present and unexpired; broker verification occurs before entry.' : 'Genuine token unavailable.';
+    const allPassed = this.items.every((item) => item.passed);
+    return { allPassed, items: structuredClone(this.items), signedOffBy: this.signedOffBy, signedOffAt: this.signedOffAt,
+      liveExecutionPermitted: allPassed && !!this.signedOffAt && this.envService.config.LIVE_EXECUTION_ENABLED };
   }
-
   public signOffItem(id: string, evidence?: string): GoLiveChecklistItem {
-    const item = this.items.get(id);
-    if (!item) {
-      throw new Error(`Checklist item '${id}' not found.`);
-    }
-
-    item.passed = true;
-    item.verifiedAt = new Date().toISOString();
-    if (evidence) item.evidence = evidence;
-
-    this.logger.log(`[GoLiveChecklist] Signed off item '${id}': ${item.title}`);
-    return item;
+    const item = this.items.find((candidate) => candidate.id === id);
+    if (!item) throw new BadRequestException(`Checklist item '${id}' not found.`);
+    if (!evidence || evidence.trim().length < 12) throw new BadRequestException('Explicit verification evidence is required; no checklist item is automatically asserted as passed.');
+    if (id === 'chk_04_auth') {
+      if (!this.getChecklist().items.find((candidate) => candidate.id === id)!.passed) throw new BadRequestException('Genuine OAuth token is not locally valid.');
+    } else { item.passed = true; item.verifiedAt = new Date().toISOString(); item.evidence = evidence.trim(); }
+    this.signedOffBy = null; this.signedOffAt = null; this.persist(); return { ...item };
   }
-
   public completeChecklist(signedOffBy = 'Platform Owner'): GoLiveChecklist {
-    this.signedOffBy = signedOffBy;
-    this.signedOffAt = new Date().toISOString();
-    this.logger.log(`[GoLiveChecklist] Go-Live Checklist signed off by '${signedOffBy}' at ${this.signedOffAt}.`);
-    return this.getChecklist();
+    if (!this.getChecklist().allPassed) throw new BadRequestException('All verification checks must contain owner evidence and the genuine token check must pass before sign-off.');
+    if (!signedOffBy.trim()) throw new BadRequestException('An owner identity is required for sign-off.');
+    this.signedOffBy = signedOffBy; this.signedOffAt = new Date().toISOString(); this.persist(); return this.getChecklist();
   }
-
-  public isLiveExecutionPermitted(): boolean {
-    const checklist = this.getChecklist();
-    return checklist.liveExecutionPermitted;
+  public isLiveExecutionPermitted(): boolean { return this.getChecklist().liveExecutionPermitted; }
+  private persist(): void {
+    if (!this.storagePath) return;
+    const directory = path.dirname(this.storagePath); const temporary = path.join(directory, `.checklist-${randomUUID()}.tmp`);
+    let fd: number | undefined;
+    try {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o700 }); fd = fs.openSync(temporary, 'wx', 0o600);
+      fs.writeFileSync(fd, `${JSON.stringify(this.getChecklist())}\n`); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+      fs.renameSync(temporary, this.storagePath); fd = fs.openSync(directory, 'r'); fs.fsyncSync(fd); fs.closeSync(fd); fd = undefined;
+    } catch { this.signedOffAt = null; throw new ServiceUnavailableException('Owner evidence was not durably confirmed; live execution remains blocked.'); }
+    finally { if (fd !== undefined) fs.closeSync(fd); if (fs.existsSync(temporary)) fs.unlinkSync(temporary); }
   }
 }

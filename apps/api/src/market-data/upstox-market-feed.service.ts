@@ -1,6 +1,5 @@
 import { Injectable, Inject, Optional, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { QuoteSnapshot, FeedStatus, FeedSubscriptionMode } from '@trading-bot/contracts';
-import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { EnvService } from '../config/env.service';
 import { ProtobufDecoderService, DecodedFeedResponse } from './protobuf-decoder.service';
 import { EventsGateway } from '../websocket/events.gateway';
@@ -9,6 +8,7 @@ import WebSocket from 'ws';
 
 export interface FeedHealthDetails {
   status: FeedStatus;
+  provenance: 'LIVE' | 'DELAYED' | 'SIMULATED' | 'UNAVAILABLE';
   feedLatencyMs: number;
   activeSubscriptions: number;
   staleCount: number;
@@ -23,493 +23,250 @@ export interface FeedHealthDetails {
 export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
   private ws: WebSocket | null = null;
   private status: FeedStatus = FeedStatus.DISCONNECTED;
-  private subscribedKeys: Set<string> = new Set();
-  private quotes: Map<string, QuoteSnapshot> = new Map();
+  private readonly subscriptions = new Map<string, FeedSubscriptionMode>();
+  private readonly quotes = new Map<string, QuoteSnapshot>();
   private readonly quoteListeners = new Set<(quote: QuoteSnapshot) => void>();
-  private lastTickTimestamps: Map<string, number> = new Map(); // Monotonic tick checking
-
+  private readonly lastEventTimestamps = new Map<string, number>();
   private staleCheckTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
-
+  private stopped = false;
+  private connecting = false;
   private reconnectAttempts = 0;
-  private readonly maxReconnectDelayMs = 30000;
-  private readonly baseReconnectDelayMs = 1000;
-  private readonly staleThresholdMs = 3000; // 3 seconds per Blueprint
-
-  // Health and Telemetry Counters
+  private readonly staleThresholdMs = 3000;
   private totalTicksReceived = 0;
   private duplicateTicksIgnored = 0;
   private quoteGapsDetected = 0;
   private lastTickReceivedAt: string | null = null;
-  private lastFeedLatencyMs = 15;
+  private lastFeedLatencyMs = 0;
+  private authorizationToken: string | null = null;
 
   constructor(
-    @Inject(EnvService) private readonly envService: EnvService,
+    @Inject(EnvService) _envService: EnvService,
     @Inject(ProtobufDecoderService) private readonly decoder: ProtobufDecoderService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
     @Optional() @Inject(TokenStorageService) private readonly tokenStorage?: TokenStorageService,
   ) {}
 
-  async onModuleInit() {
-    // Pre-subscribe default high-liquidity instruments
-    this.subscribe([
-      'NSE_INDEX|Nifty 50',
-      'NSE_INDEX|Nifty Bank',
-      'NSE_INDEX|Nifty Fin Service',
-      'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      'NSE_FO|NIFTY_2026-10-15_25100_PE',
-    ]);
-
-    // Seed initial quotes
-    this.seedInitialQuotes();
-
-    // Start background stale-feed detector
-    this.staleCheckTimer = setInterval(() => {
-      this.checkStaleFeed();
-    }, 1000);
-
-    // Sync live market close prices immediately
-    void this.syncRealMarketPrices();
-
-    // Attempt connecting to market feed
-    this.initiateConnection();
+  async onModuleInit(): Promise<void> {
+    this.stopped = false;
+    this.subscribe(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank', 'NSE_INDEX|Nifty Fin Service']);
+    this.staleCheckTimer = setInterval(() => this.checkStaleFeed(), 1000);
+    await this.initiateConnection();
   }
 
-  onModuleDestroy() {
+  onModuleDestroy(): void {
+    this.stopped = true;
     if (this.staleCheckTimer) clearInterval(this.staleCheckTimer);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    if (this.ws) {
-      this.ws.close();
-      this.ws = null;
-    }
+    this.ws?.close();
+    this.ws = null;
+    this.setStatus(FeedStatus.DISCONNECTED);
   }
 
-  private seedInitialQuotes() {
-    // ⚠️  These are PLACEHOLDER values used before a live broker token is available.
-    // They are marked isStale: true so the UI and any downstream logic treats them as
-    // unavailable data — NOT as live market prices.
-    const now = new Date().toISOString();
-    const defaults = [
-      {
-        instrumentKey: 'NSE_INDEX|Nifty 50',
-        lastPrice: 22520.45,
-        bidPrice: 22520.1,
-        askPrice: 22520.8,
-        bidQty: 500,
-        askQty: 625,
-        volume: 8452000,
-        openInterest: 0,
-        netChange: 288.65,
-        netChangePct: 1.3,
-        timestamp: now,
-        isStale: true,  // PLACEHOLDER — not real market data
-      },
-      {
-        instrumentKey: 'NSE_INDEX|Nifty Bank',
-        lastPrice: 55256.65,
-        bidPrice: 55255.5,
-        askPrice: 55257.5,
-        bidQty: 300,
-        askQty: 450,
-        volume: 4120000,
-        openInterest: 0,
-        netChange: 741.6,
-        netChangePct: 1.36,
-        timestamp: now,
-        isStale: true,  // PLACEHOLDER — not real market data
-      },
-      {
-        instrumentKey: 'NSE_INDEX|Nifty Fin Service',
-        lastPrice: 24150.0,
-        bidPrice: 24148.5,
-        askPrice: 24151.0,
-        bidQty: 250,
-        askQty: 275,
-        volume: 1250000,
-        openInterest: 0,
-        netChange: 62.1,
-        netChangePct: 0.26,
-        timestamp: now,
-        isStale: true,  // PLACEHOLDER — not real market data
-      },
-      {
-        instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-        lastPrice: 122.5,
-        bidPrice: 122.2,
-        askPrice: 122.8,
-        bidQty: 125,
-        askQty: 150,
-        volume: 98500,
-        openInterest: 142000,
-        netChange: 14.5,
-        netChangePct: 13.4,
-        timestamp: now,
-        isStale: true,  // PLACEHOLDER — not real market data
-      },
-      {
-        instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_PE',
-        lastPrice: 98.2,
-        bidPrice: 97.9,
-        askPrice: 98.5,
-        bidQty: 100,
-        askQty: 125,
-        volume: 76000,
-        openInterest: 110500,
-        netChange: -12.4,
-        netChangePct: -11.2,
-        timestamp: now,
-        isStale: true,  // PLACEHOLDER — not real market data
-      },
-    ];
-
-    for (const q of defaults) {
-      this.quotes.set(q.instrumentKey, q);
-      this.lastTickTimestamps.set(q.instrumentKey, Date.now());
+  private setStatus(status: FeedStatus): void {
+    const changed = this.status !== status;
+    this.status = status;
+    if (status === FeedStatus.DISCONNECTED || status === FeedStatus.AUTH_FAILED) {
+      for (const [key, quote] of this.quotes) {
+        if (quote.provenance === 'LIVE') this.quotes.set(key, { ...quote, isStale: true, provenance: 'DELAYED' });
+      }
     }
+    if (changed) this.gateway.broadcast('feed.status', { status, provenance: this.getFeedHealth().provenance });
   }
-
 
   public async initiateConnection(): Promise<void> {
-    const tokenRecord = this.tokenStorage?.getToken();
-    const token =
-      tokenRecord?.accessToken ||
-      (this.envService.config.UPSTOX_API_KEY !== 'mock_key' ? this.envService.config.UPSTOX_API_KEY : null);
-
-    if (!token) {
-      // No broker token — feed is disconnected. Do NOT claim CONNECTED status;
-      // doing so would mislead the UI and downstream checks into thinking live data is available.
-      this.status = FeedStatus.DISCONNECTED;
-      console.warn('[MarketFeedService] No broker token. Feed is DISCONNECTED. Seeded placeholder quotes are marked stale.');
+    if (this.stopped || this.connecting || this.ws?.readyState === WebSocket.OPEN) return;
+    // An application key is not an OAuth access token.
+    const record = this.tokenStorage?.getToken();
+    if (!record?.accessToken || !Number.isFinite(Date.parse(record.expiresAt)) || Date.parse(record.expiresAt) <= Date.now()) {
+      this.setStatus(FeedStatus.DISCONNECTED);
       return;
     }
-
-    this.status = FeedStatus.CONNECTING;
-    let wsUrl = 'wss://api.upstox.com/v3/feed/market-data-feed';
-
-    // Request authorized WebSocket redirect URI from Upstox Market Data Feed V3
+    if (this.status === FeedStatus.AUTH_FAILED && this.authorizationToken === record.accessToken) return;
+    this.authorizationToken = record.accessToken;
+    this.connecting = true;
+    this.setStatus(FeedStatus.CONNECTING);
     try {
-      const authRes = await fetch('https://api.upstox.com/v3/feed/market-data-feed/authorize', {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: 'application/json',
-        },
+      const response = await fetch('https://api.upstox.com/v3/feed/market-data-feed/authorize', {
+        headers: { Authorization: `Bearer ${record.accessToken}`, Accept: 'application/json' },
+        signal: AbortSignal.timeout(10000),
       });
-      if (authRes.ok) {
-        const body = (await authRes.json()) as any;
-        if (body?.data?.authorizedRedirectUri) {
-          wsUrl = body.data.authorizedRedirectUri;
-        }
+      if (response.status === 401 || response.status === 403) {
+        this.setStatus(FeedStatus.AUTH_FAILED);
+        this.gateway.broadcast('broker.auth_expired', { message: 'Broker market feed authentication failed.' });
+        return;
       }
-    } catch {
-      // Fallback to standard wsUrl if authorize endpoint is unreachable
-    }
-
-    try {
-      this.ws = new WebSocket(wsUrl, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      this.ws.binaryType = 'nodebuffer';
-
-      this.ws.on('open', () => {
-        console.log('[MarketFeedService] Upstox Market Data Feed V3 WebSocket connected.');
-        this.status = FeedStatus.CONNECTED;
+      if (!response.ok) throw new Error(`Feed authorization returned HTTP ${response.status}`);
+      const body = await response.json() as any;
+      const wsUrl = body?.data?.authorized_redirect_uri || body?.data?.authorizedRedirectUri;
+      if (typeof wsUrl !== 'string' || !wsUrl.startsWith('wss://')) throw new Error('Authorized feed URL unavailable.');
+      if (this.stopped) return;
+      const socket = new WebSocket(wsUrl, { handshakeTimeout: 10000 });
+      this.ws = socket;
+      socket.binaryType = 'nodebuffer';
+      socket.on('open', () => {
+        if (this.stopped || this.ws !== socket) { socket.close(); return; }
+        this.setStatus(FeedStatus.CONNECTED);
         this.reconnectAttempts = 0;
-        this.sendSubscriptionMessage(Array.from(this.subscribedKeys));
-        this.gateway.broadcast('feed.status', { status: this.status });
+        for (const [key, mode] of this.subscriptions) this.sendSubscriptionMessage([key], mode);
       });
-
-      this.ws.on('message', (data: WebSocket.RawData) => {
-        if (Buffer.isBuffer(data) || data instanceof Uint8Array) {
-          this.handleBinaryMessage(data as Buffer);
+      socket.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+        if (!isBinary || this.ws !== socket) return;
+        try {
+          const buffer = Array.isArray(data) ? Buffer.concat(data) : data instanceof ArrayBuffer ? Buffer.from(data) : data;
+          this.handleBinaryMessage(buffer);
+        } catch {
+          this.setStatus(FeedStatus.STALE);
+          this.gateway.broadcast('feed.stale', { message: 'Invalid market data packet rejected.', timestamp: new Date().toISOString() });
         }
       });
-
-      this.ws.on('close', (code, reason) => {
-        console.warn(`[MarketFeedService] Feed WebSocket disconnected (code: ${code}, reason: ${reason}).`);
-        if (code === 4401 || code === 401 || this.status === FeedStatus.AUTH_FAILED) {
-          this.status = FeedStatus.AUTH_FAILED;
-          console.error('[MarketFeedService] Critical: Upstox access token expired. Re-authentication required.');
-          this.gateway.broadcast('broker.auth_expired', { message: 'Upstox OAuth session expired.' });
-          return;
-        }
-        this.status = FeedStatus.DISCONNECTED;
+      socket.on('close', (code) => {
+        if (this.ws !== socket) return;
+        this.ws = null;
+        this.setStatus(code === 4401 || code === 401 ? FeedStatus.AUTH_FAILED : FeedStatus.DISCONNECTED);
+        if (!this.stopped) this.scheduleReconnect();
+      });
+      socket.on('error', () => {
+        if (this.ws !== socket) return;
+        this.setStatus(FeedStatus.DISCONNECTED);
+        socket.close();
         this.scheduleReconnect();
       });
-
-      this.ws.on('error', (err) => {
-        console.error('[MarketFeedService] WebSocket error:', err.message);
-        if (err.message.includes('401')) {
-          this.status = FeedStatus.AUTH_FAILED;
-          console.error('[MarketFeedService] Critical: Upstox access token unauthorized/expired (401). Re-authentication required.');
-          this.gateway.broadcast('broker.auth_expired', { message: 'Upstox OAuth session unauthorized or expired.' });
-          return;
-        }
-        this.status = FeedStatus.DISCONNECTED;
-      });
-    } catch (err: any) {
-      console.error('[MarketFeedService] Failed to initialize WebSocket:', err.message);
+    } catch {
+      this.setStatus(FeedStatus.DISCONNECTED);
       this.scheduleReconnect();
-    }
+    } finally { this.connecting = false; }
   }
 
   public scheduleReconnect(): void {
-    if (this.status === FeedStatus.AUTH_FAILED) {
-      return; // Do not reconnect on expired token
-    }
-
+    if (this.stopped || this.reconnectTimer || this.status === FeedStatus.AUTH_FAILED) return;
     this.reconnectAttempts++;
-    // Exponential backoff with ±20% jitter
-    const delay = Math.min(
-      this.maxReconnectDelayMs,
-      this.baseReconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1),
-    );
-    const jitter = delay * (0.8 + Math.random() * 0.4);
-
-    console.log(`[MarketFeedService] Reconnecting in ${Math.round(jitter)}ms (Attempt ${this.reconnectAttempts})...`);
+    const delay = Math.min(30000, 1000 * Math.pow(2, this.reconnectAttempts - 1));
     this.reconnectTimer = setTimeout(() => {
-      this.initiateConnection();
-    }, jitter);
+      this.reconnectTimer = null;
+      void this.initiateConnection();
+    }, delay * (0.8 + Math.random() * 0.4));
   }
 
   public handleBinaryMessage(buffer: Uint8Array | Buffer): DecodedFeedResponse {
     const decoded = this.decoder.decodeMarketFeed(buffer);
+    const receivedAt = new Date().toISOString();
     const now = Date.now();
-    this.lastTickReceivedAt = new Date().toISOString();
+    this.lastTickReceivedAt = receivedAt;
     this.totalTicksReceived++;
-
-    if (decoded.currentTs) {
-      this.lastFeedLatencyMs = Math.max(0, now - decoded.currentTs);
-    }
-
-    const updatedSnapshots: QuoteSnapshot[] = [];
-
+    if (decoded.currentTs > 0) this.lastFeedLatencyMs = Math.max(0, now - decoded.currentTs);
+    const updates: QuoteSnapshot[] = [];
     for (const [key, item] of Object.entries(decoded.feeds)) {
-      const prevTimestamp = this.lastTickTimestamps.get(key) || 0;
-
-      // 1. Duplicate check: Ignore tick if timestamp is identical or backwards
-      if (item.lastTradeTime > 0 && item.lastTradeTime <= prevTimestamp) {
-        this.duplicateTicksIgnored++;
-        continue;
-      }
-
-      // 2. Quote gap check: Log if time gap exceeds 15 seconds during continuous market
-      if (prevTimestamp > 0 && item.lastTradeTime - prevTimestamp > 15000) {
-        this.quoteGapsDetected++;
-      }
-
-      this.lastTickTimestamps.set(key, item.lastTradeTime || now);
-
-      const snapshot = this.decoder.normalizeToQuoteSnapshot(item, false);
+      const sourceTime = item.eventTime || item.lastTradeTime;
+      const previous = this.lastEventTimestamps.get(key) || 0;
+      if (sourceTime > 0 && sourceTime <= previous) { this.duplicateTicksIgnored++; continue; }
+      if (previous > 0 && sourceTime - previous > 15000) this.quoteGapsDetected++;
+      if (sourceTime > 0) this.lastEventTimestamps.set(key, sourceTime);
+      const snapshot = this.decoder.normalizeToQuoteSnapshot(item, false, 'LIVE', receivedAt);
       this.quotes.set(key, snapshot);
       for (const listener of this.quoteListeners) listener(snapshot);
-      updatedSnapshots.push(snapshot);
+      updates.push(snapshot);
     }
-
-    // Broadcast quote snapshots to connected clients via WebSocket gateway
-    if (updatedSnapshots.length > 0) {
-      this.gateway.broadcast('quotes.snapshot', updatedSnapshots);
-    }
-
+    if (updates.length) this.gateway.broadcast('quotes.snapshot', updates);
     return decoded;
   }
 
   private checkStaleFeed(): void {
-    const isMarketHours = isMarketOpenForTrading();
     const now = Date.now();
-    let newlyStaleFound = false;
-
-    for (const [key, quote] of this.quotes.entries()) {
-      const lastTickTime = this.lastTickTimestamps.get(key) || 0;
-      const isStale = isMarketHours && lastTickTime > 0 && now - lastTickTime > this.staleThresholdMs;
-
-      if (quote.isStale !== isStale) {
-        quote.isStale = isStale;
-        this.quotes.set(key, { ...quote, isStale });
-        if (isStale) newlyStaleFound = true;
-      }
+    const record = this.tokenStorage?.getToken();
+    const authenticated = !!record?.accessToken && Number.isFinite(Date.parse(record.expiresAt)) && Date.parse(record.expiresAt) > now;
+    if (this.ws && (!authenticated || record!.accessToken !== this.authorizationToken)) {
+      const socket = this.ws;
+      this.ws = null;
+      socket.close();
+      this.setStatus(FeedStatus.DISCONNECTED);
     }
-
-    if (newlyStaleFound) {
-      this.status = FeedStatus.STALE;
-      this.gateway.broadcast('feed.stale', {
-        message: 'Market data feed latency detected. Subscriptions marked stale.',
-        timestamp: new Date().toISOString(),
-      });
-    } else if (this.status === FeedStatus.STALE) {
-      this.status = FeedStatus.CONNECTED;
+    // OAuth may be completed after startup, or replaced after expiry.
+    if (!this.stopped && authenticated && !this.ws && !this.connecting && !this.reconnectTimer &&
+      !(this.status === FeedStatus.AUTH_FAILED && record!.accessToken === this.authorizationToken)) void this.initiateConnection();
+    let changed = false;
+    let anyStale = false;
+    for (const [key, quote] of this.quotes) {
+      const sourceAge = now - Date.parse(quote.timestamp);
+      const receiptAge = quote.receivedAt ? now - Date.parse(quote.receivedAt) : Infinity;
+      const stale = quote.isStale || quote.provenance === 'UNAVAILABLE' || quote.provenance === 'DELAYED' ||
+        !Number.isFinite(sourceAge) || sourceAge < -1000 || sourceAge > this.staleThresholdMs || receiptAge > this.staleThresholdMs;
+      if (stale && quote.provenance === 'LIVE') {
+        this.quotes.set(key, { ...quote, isStale: true, provenance: 'DELAYED' });
+        changed = true;
+      } else if (stale !== quote.isStale) { this.quotes.set(key, { ...quote, isStale: stale }); changed = true; }
+      anyStale ||= stale;
     }
+    // Transport status can recover only when a real open socket receives fresh data.
+    if (this.ws?.readyState === WebSocket.OPEN) this.setStatus(anyStale ? FeedStatus.STALE : FeedStatus.CONNECTED);
+    if (changed) this.gateway.broadcast('quotes.snapshot', this.getAllQuotes());
   }
 
   public subscribe(keys: string[], mode: FeedSubscriptionMode = FeedSubscriptionMode.FULL): void {
-    for (const key of keys) {
-      this.subscribedKeys.add(key);
-    }
-    this.sendSubscriptionMessage(keys, mode);
+    const valid = keys.filter((key) => typeof key === 'string' && /^NSE_(?:INDEX\|[^|]+|FO\|\d+)$/.test(key));
+    if (valid.length !== keys.length) throw new Error('Subscriptions require broker-issued instrument keys.');
+    if (new Set([...this.subscriptions.keys(), ...valid]).size > 1500) throw new Error('Market feed subscription limit exceeded.');
+    for (const key of valid) this.subscriptions.set(key, mode);
+    this.sendSubscriptionMessage(valid, mode);
   }
 
   public unsubscribe(keys: string[]): void {
-    for (const key of keys) {
-      this.subscribedKeys.delete(key);
-      this.quotes.delete(key);
-      this.lastTickTimestamps.delete(key);
-    }
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(
-        JSON.stringify({
-          guid: `unsub_${Date.now()}`,
-          method: 'unsub',
-          data: { instrumentKeys: keys },
-        }),
-      );
-    }
+    for (const key of keys) { this.subscriptions.delete(key); this.quotes.delete(key); this.lastEventTimestamps.delete(key); }
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(Buffer.from(JSON.stringify({ guid: `unsub_${Date.now()}`, method: 'unsub', data: { instrumentKeys: keys } })), { binary: true });
   }
 
-  private sendSubscriptionMessage(keys: string[], mode: FeedSubscriptionMode = FeedSubscriptionMode.FULL): void {
-    if (this.ws && this.ws.readyState === WebSocket.OPEN && keys.length > 0) {
-      this.ws.send(
-        JSON.stringify({
-          guid: `sub_${Date.now()}`,
-          method: 'sub',
-          data: {
-            mode,
-            instrumentKeys: keys,
-          },
-        }),
-      );
-    }
+  private sendSubscriptionMessage(keys: string[], mode: FeedSubscriptionMode): void {
+    if (this.ws?.readyState === WebSocket.OPEN && keys.length) this.ws.send(Buffer.from(JSON.stringify({ guid: `sub_${Date.now()}`, method: 'sub', data: { mode, instrumentKeys: keys } })), { binary: true });
   }
 
+  /** REST snapshots are explicitly delayed; no Yahoo fallback or fabricated depth. */
   public async syncRealMarketPrices(): Promise<void> {
-    try {
-      // 1. If Upstox broker token is available, query Upstox v2 market quote
-      const tokenRecord = this.tokenStorage?.getToken();
-      if (tokenRecord?.accessToken) {
-        const upstoxRes = await fetch(
-          'https://api.upstox.com/v2/market-quote/quotes?instrument_key=NSE_INDEX|Nifty 50,NSE_INDEX|Nifty Bank',
-          {
-            headers: {
-              Authorization: `Bearer ${tokenRecord.accessToken}`,
-              Accept: 'application/json',
-              'Api-Version': '2.0',
-            },
-          },
-        );
-        if (upstoxRes.ok) {
-          const body = (await upstoxRes.json()) as any;
-          const data = body?.data;
-          if (data) {
-            const niftyQuote = data['NSE_INDEX:Nifty 50'];
-            if (niftyQuote?.last_price) {
-              this.updateQuotePrice('NSE_INDEX|Nifty 50', niftyQuote.last_price, niftyQuote.net_change ?? 0);
-            }
-            const bankQuote = data['NSE_INDEX:Nifty Bank'];
-            if (bankQuote?.last_price) {
-              this.updateQuotePrice('NSE_INDEX|Nifty Bank', bankQuote.last_price, bankQuote.net_change ?? 0);
-            }
-            return;
-          }
-        }
-      }
-
-      // 2. Fetch live/closing prices from NSE via Yahoo Finance chart API
-      const [niftyRes, bankRes] = await Promise.all([
-        fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=1d&range=1d', {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        }).catch(() => null),
-        fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEBANK?interval=1d&range=1d', {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-        }).catch(() => null),
-      ]);
-
-      if (niftyRes && niftyRes.ok) {
-        const niftyData = (await niftyRes.json()) as any;
-        const meta = niftyData?.chart?.result?.[0]?.meta;
-        if (meta?.regularMarketPrice) {
-          this.updateQuotePrice(
-            'NSE_INDEX|Nifty 50',
-            Number(meta.regularMarketPrice),
-            Number(meta.fulldayChange ?? 0),
-            Number(meta.regularMarketChangePercent ?? 0),
-          );
-        }
-      }
-
-      if (bankRes && bankRes.ok) {
-        const bankData = (await bankRes.json()) as any;
-        const meta = bankData?.chart?.result?.[0]?.meta;
-        if (meta?.regularMarketPrice) {
-          this.updateQuotePrice(
-            'NSE_INDEX|Nifty Bank',
-            Number(meta.regularMarketPrice),
-            Number(meta.fulldayChange ?? 0),
-            Number(meta.regularMarketChangePercent ?? 0),
-          );
-        }
-      }
-    } catch {
-      // Retain existing quotes on network failure
+    const record = this.tokenStorage?.getToken();
+    if (!record?.accessToken || !Number.isFinite(Date.parse(record.expiresAt)) || Date.parse(record.expiresAt) <= Date.now() || !this.subscriptions.size) return;
+    const query = new URLSearchParams({ instrument_key: [...this.subscriptions.keys()].join(',') });
+    const response = await fetch(`https://api.upstox.com/v2/market-quote/quotes?${query}`, {
+      headers: { Authorization: `Bearer ${record.accessToken}`, Accept: 'application/json' }, signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`Quote snapshot returned HTTP ${response.status}`);
+    const body = await response.json() as any;
+    const receivedAt = new Date().toISOString();
+    for (const row of Object.values<any>(body.data || {})) {
+      const key = row.instrument_token;
+      const lastTradeTime = Number(row.last_trade_time);
+      if (typeof key !== 'string' || !this.subscriptions.has(key) || !Number.isFinite(row.last_price) || row.last_price <= 0) continue;
+      const bids = (row.depth?.buy || []).filter((level: any) => level.price > 0 && level.quantity > 0).slice(0, 5).map((level: any) => ({ price: level.price, quantity: level.quantity }));
+      const asks = (row.depth?.sell || []).filter((level: any) => level.price > 0 && level.quantity > 0).slice(0, 5).map((level: any) => ({ price: level.price, quantity: level.quantity }));
+      const snapshot = this.decoder.normalizeToQuoteSnapshot({
+        instrumentKey: key, lastPrice: row.last_price, closePrice: Number(row.ohlc?.close) || 0,
+        lastTradeTime: Number.isFinite(lastTradeTime) ? lastTradeTime : 0, eventTime: 0, lastTradeQty: Number(row.last_trade_quantity) || 0,
+        netChange: Number(row.net_change) || 0, netChangePct: 0, volume: Number(row.volume) || 0, openInterest: Number(row.oi) || 0, depth: { bids, asks },
+      }, true, 'DELAYED', receivedAt);
+      this.quotes.set(key, snapshot);
     }
+    this.gateway.broadcast('quotes.snapshot', this.getAllQuotes());
   }
 
-  private updateQuotePrice(instrumentKey: string, price: number, netChange = 0, netChangePct = 0) {
-    const existing = this.quotes.get(instrumentKey);
-    const now = new Date().toISOString();
-    const updated: QuoteSnapshot = {
-      instrumentKey,
-      lastPrice: Number(price.toFixed(2)),
-      bidPrice: Number((price - 0.25).toFixed(2)),
-      askPrice: Number((price + 0.25).toFixed(2)),
-      bidQty: existing?.bidQty ?? 500,
-      askQty: existing?.askQty ?? 625,
-      volume: existing?.volume ?? 8452000,
-      openInterest: existing?.openInterest ?? 0,
-      netChange: Number(netChange.toFixed(2)),
-      netChangePct: Number(netChangePct.toFixed(2)),
-      timestamp: now,
-      isStale: false,
-    };
-    this.quotes.set(instrumentKey, updated);
-    this.lastTickTimestamps.set(instrumentKey, Date.now());
-    this.gateway.broadcast('quotes.snapshot', [updated]);
-  }
-
-  public getQuote(key: string): QuoteSnapshot | undefined {
-    return this.quotes.get(key);
-  }
-
-  /** Observers receive actual feed/test ticks; bootstrap display quotes are excluded. */
-  public observeQuotes(listener: (quote: QuoteSnapshot) => void): () => void {
-    this.quoteListeners.add(listener);
-    return () => this.quoteListeners.delete(listener);
-  }
-
-  public getAllQuotes(): QuoteSnapshot[] {
-    return Array.from(this.quotes.values());
-  }
-
+  public getQuote(key: string): QuoteSnapshot | undefined { return this.quotes.get(key); }
+  public observeQuotes(listener: (quote: QuoteSnapshot) => void): () => void { this.quoteListeners.add(listener); return () => this.quoteListeners.delete(listener); }
+  public getAllQuotes(): QuoteSnapshot[] { return [...this.quotes.values()]; }
   public getFeedHealth(): FeedHealthDetails {
-    const staleCount = Array.from(this.quotes.values()).filter((q) => q.isStale).length;
+    const live = [...this.quotes.values()].some((quote) => quote.provenance === 'LIVE' && !quote.isStale && Date.now() - Date.parse(quote.receivedAt || '') <= this.staleThresholdMs);
+    const simulated = [...this.quotes.values()].some((quote) => quote.provenance === 'SIMULATED');
     return {
-      status: this.status,
-      feedLatencyMs: this.lastFeedLatencyMs,
-      activeSubscriptions: this.subscribedKeys.size,
-      staleCount,
-      totalTicksReceived: this.totalTicksReceived,
-      duplicateTicksIgnored: this.duplicateTicksIgnored,
-      quoteGapsDetected: this.quoteGapsDetected,
-      lastTickReceivedAt: this.lastTickReceivedAt,
-      reconnectAttempts: this.reconnectAttempts,
+      status: this.status, provenance: live ? 'LIVE' : simulated ? 'SIMULATED' : [...this.quotes.values()].some((quote) => quote.provenance === 'DELAYED') ? 'DELAYED' : 'UNAVAILABLE',
+      feedLatencyMs: this.lastFeedLatencyMs, activeSubscriptions: this.subscriptions.size,
+      staleCount: [...this.quotes.values()].filter((quote) => quote.isStale).length,
+      totalTicksReceived: this.totalTicksReceived, duplicateTicksIgnored: this.duplicateTicksIgnored,
+      quoteGapsDetected: this.quoteGapsDetected, lastTickReceivedAt: this.lastTickReceivedAt, reconnectAttempts: this.reconnectAttempts,
     };
   }
 
-  // Simulator helper: inject custom tick for testing
+  /** Explicit test-only injection cannot be promoted to LIVE provenance. */
   public injectSimulatedTick(snapshot: QuoteSnapshot): void {
-    this.quotes.set(snapshot.instrumentKey, snapshot);
-    for (const listener of this.quoteListeners) listener(snapshot);
-    this.lastTickTimestamps.set(snapshot.instrumentKey, Date.now());
-    this.gateway.broadcast('quotes.snapshot', [snapshot]);
+    if (process.env.NODE_ENV !== 'test') throw new Error('Simulated tick injection is available only to tests.');
+    const quote = { ...snapshot, provenance: 'SIMULATED' as const, receivedAt: new Date().toISOString(), depthKnown: snapshot.bidPrice > 0 && snapshot.askPrice >= snapshot.bidPrice && snapshot.bidQty > 0 && snapshot.askQty > 0 };
+    this.quotes.set(quote.instrumentKey, quote);
+    for (const listener of this.quoteListeners) listener(quote);
+    this.gateway.broadcast('quotes.snapshot', [quote]);
   }
 }

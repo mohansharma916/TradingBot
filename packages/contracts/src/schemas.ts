@@ -33,6 +33,11 @@ export const EnvSchema = z.object({
   WORKER_PORT: z.coerce.number().default(4001),
   CORS_ORIGIN: z.string().default('http://localhost:8081,http://localhost:3000'),
   JWT_SECRET: z.string().min(16).default('super_secret_dev_key_change_in_production_min_32_chars'),
+  OWNER_USERNAME: z.string().min(1).default('owner'),
+  OWNER_PASSWORD: z.string().min(12).optional(),
+  API_HOST: z.string().default('127.0.0.1'),
+  STATE_DIRECTORY: z.string().min(1).default('.data'),
+  UPSTOX_ALGO_NAME: z.string().optional(),
   // Safe boolean parser: only 'true'/'1'/true → true. Prevents the Zod z.coerce.boolean() trap
   // where the STRING "false" evaluates to truthy and inadvertently enables live execution/MFA.
   MFA_ENABLED: z.preprocess(
@@ -113,6 +118,9 @@ export const QuoteSnapshotSchema = z.object({
   lowPrice: z.number().nonnegative().optional(),
   closePrice: z.number().nonnegative().optional(),
   depth: MarketDepthSchema.optional(),
+  provenance: z.enum(['LIVE', 'DELAYED', 'SIMULATED', 'UNAVAILABLE']).optional(),
+  receivedAt: z.string().datetime().optional(),
+  depthKnown: z.boolean().optional(),
 });
 
 export type QuoteSnapshot = z.infer<typeof QuoteSnapshotSchema>;
@@ -145,6 +153,8 @@ export const OptionChainStrikeSchema = z.object({
     openInterest: z.number().int().nonnegative(),
     netChangePct: z.number(),
     isStale: z.boolean().default(false),
+    provenance: z.enum(['LIVE', 'DELAYED', 'SIMULATED', 'UNAVAILABLE']).optional(),
+    depthKnown: z.boolean().optional(),
   }).optional(),
   put: z.object({
     instrumentKey: z.string(),
@@ -156,17 +166,20 @@ export const OptionChainStrikeSchema = z.object({
     openInterest: z.number().int().nonnegative(),
     netChangePct: z.number(),
     isStale: z.boolean().default(false),
+    provenance: z.enum(['LIVE', 'DELAYED', 'SIMULATED', 'UNAVAILABLE']).optional(),
+    depthKnown: z.boolean().optional(),
   }).optional(),
 });
 
 export const OptionChainResultSchema = z.object({
   underlying: z.string(),
-  spotPrice: z.number().positive(),
+  spotPrice: z.number().nonnegative(),
   expiryDate: z.string(),
   availableExpiries: z.array(z.string()),
-  lotSize: z.number().int().positive(),
+  lotSize: z.number().int().nonnegative(),
   strikes: z.array(OptionChainStrikeSchema),
   timestamp: z.string().datetime(),
+  provenance: z.enum(['LIVE', 'DELAYED', 'SIMULATED', 'UNAVAILABLE']).optional(),
 });
 
 export type OptionChainResult = z.infer<typeof OptionChainResultSchema>;
@@ -518,7 +531,8 @@ export const BacktestResultSchema = z.object({
   timeframe: z.string().default('5m'),
   fromDate: z.string(),
   toDate: z.string(),
-  dataSource: z.string().default('REAL_MARKET_DATA'),
+  dataSource: z.string().default('UNAVAILABLE'),
+  modelAssumptions: z.array(z.string()).optional(),
   initialCapital: z.number(),
   finalCapital: z.number(),
   totalTrades: z.number(),
@@ -563,7 +577,7 @@ export type ScannedInstrumentCandidate = z.infer<typeof ScannedInstrumentCandida
 
 export const ToolScanUniverseOutputSchema = z.object({
   underlying: z.string(),
-  spotPrice: z.number().positive(),
+  spotPrice: z.number().nonnegative(),
   candidates: z.array(ScannedInstrumentCandidateSchema),
   timestamp: z.string().datetime(),
 });
@@ -761,6 +775,8 @@ export const RiskStatusSchema = z.object({
   armedUntil: z.string().datetime().nullable(),
   killSwitchActive: z.boolean(),
   egressIpVerified: z.boolean(),
+  fundsSource: z.enum(['LIVE_BROKER', 'PAPER_SIMULATION', 'UNAVAILABLE']).optional(),
+  fundsVerifiedAt: z.string().datetime().nullable().optional(),
 });
 
 export type RiskStatus = z.infer<typeof RiskStatusSchema>;
@@ -795,6 +811,9 @@ export const DailyReportSchema = z.object({
   losingTrades: z.number().int().nonnegative(),
   maxDrawdown: z.number().nonnegative(),
   capitalDeployed: z.number().nonnegative(),
+  chargesSource: z.enum(['ESTIMATED', 'SIMULATED', 'BROKER_CONFIRMED']).optional(),
+  dataSource: z.enum(['LIVE_BROKER', 'PAPER_SIMULATION']).optional(),
+  unmatchedSellQuantity: z.number().nonnegative().optional(),
 });
 
 export type DailyReport = z.infer<typeof DailyReportSchema>;
@@ -814,8 +833,8 @@ export type ChargeBreakdown = z.infer<typeof ChargeBreakdownSchema>;
 
 // Order Fill Event Schema
 export const OrderFillEventSchema = z.object({
-  id: z.string().uuid(),
-  orderId: z.string().uuid(),
+  id: z.string().min(1),
+  orderId: z.string().min(1),
   instrumentKey: z.string(),
   side: z.nativeEnum(OrderSide),
   fillQty: z.number().int().positive(),
@@ -824,6 +843,7 @@ export const OrderFillEventSchema = z.object({
   timestamp: z.string().datetime(),
   estimatedCharges: z.number().nonnegative(),
   actualCharges: z.number().nonnegative(),
+  chargesSource: z.enum(['ESTIMATED', 'SIMULATED', 'BROKER_CONFIRMED']).optional(),
 });
 
 export type OrderFillEvent = z.infer<typeof OrderFillEventSchema>;
@@ -1039,8 +1059,8 @@ export const DiagnosticsReportSchema = z.object({
   }),
   brokerConnection: z.object({
     authenticated: z.boolean(),
-    rateLimiterTokensRemaining: z.number().nonnegative(),
-    egressIpMatch: z.boolean(),
+    rateLimiterTokensRemaining: z.number().nonnegative().nullable(),
+    egressIpMatch: z.boolean().nullable(),
     registeredIp: z.string(),
     tokenExpiresInSeconds: z.number().nullable(),
   }),

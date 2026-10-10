@@ -5,6 +5,7 @@ import {
   ForbiddenException,
   NotFoundException,
   BadRequestException,
+  Optional,
 } from '@nestjs/common';
 import {
   AutonomousReadinessReport,
@@ -29,6 +30,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
 import crypto from 'node:crypto';
+import { TradingModeService } from '../trading/trading-mode.service';
 
 @Injectable()
 export class AutonomousExecutionService {
@@ -60,6 +62,7 @@ export class AutonomousExecutionService {
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
     @Inject(NotificationsService) private readonly notifications: NotificationsService,
     @Inject(PaperBrokerAdapter) private readonly paperBroker?: PaperBrokerAdapter,
+    @Optional() @Inject(TradingModeService) private readonly mode?: TradingModeService,
   ) {}
 
   /**
@@ -71,16 +74,20 @@ export class AutonomousExecutionService {
     const now = new Date().toISOString();
     const tokenMeta = this.tokenStorage.getTokenMetadata();
     const feedHealth = this.marketFeed.getFeedHealth();
+    const live = this.mode?.isLive() ?? false;
+    const checklist = this.checklistService.getChecklist();
+    const paperFills = this.paperBroker?.getFills() ?? [];
+    const completedPaperDays = new Set(paperFills.filter(fill => fill.side === 'SELL' && paperFills.some(buy => buy.side === 'BUY' && buy.instrumentKey === fill.instrumentKey && Date.parse(buy.timestamp) < Date.parse(fill.timestamp))).map(fill => new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Kolkata'}).format(new Date(fill.timestamp))));
     const isLivePermitted = this.checklistService.isLiveExecutionPermitted();
 
     // 1. Regulatory: Personal algorithmic trading compliance with bounded session window
     const regCheck = {
       id: 'auto_01',
-      title: 'SEBI Personal Algorithmic Framework Compliance',
+      title: 'Owner broker requirements review',
       description: 'Supervised personal execution with time-bound session windows and hard risk caps.',
       category: 'REGULATORY' as const,
-      passed: true,
-      details: 'Personal retail API access under SEBI Feb 2025 guidelines. Multi-tenant public auto disabled.',
+      passed: !live || checklist.items.some(item => item.id === 'chk_01_reg' && item.passed && Boolean(item.evidence)) && Boolean(checklist.signedOffAt),
+      details: live ? 'Requires recorded owner review; software does not certify regulatory compliance.' : 'Testing executes virtual funds; live broker permissions are reviewed before Live use.',
       verifiedAt: now,
     };
 
@@ -90,8 +97,8 @@ export class AutonomousExecutionService {
       title: 'Multi-Day Paper Proof Verification',
       description: 'Verified minimum clean paper simulation runs without unhandled exceptions.',
       category: 'PAPER_PROOF' as const,
-      passed: true,
-      details: 'Paper broker ledger verified with 0 discrepancies and full statutory fee tracking.',
+      passed: !live || completedPaperDays.size >= 2,
+      details: `${completedPaperDays.size} distinct days contain matched paper entry/exit records. Paper fees are modeled; these records do not establish profitability.`,
       verifiedAt: now,
     };
 
@@ -101,7 +108,7 @@ export class AutonomousExecutionService {
       title: '10-Point Pre-Flight Go-Live Verification',
       description: 'Owner signed-off pre-flight checklist covering risk caps, static IP, and disclosure.',
       category: 'GO_LIVE' as const,
-      passed: isLivePermitted,
+      passed: !live || isLivePermitted,
       details: isLivePermitted
         ? 'Go-Live checklist 10/10 verified and signed off by platform owner.'
         : 'Go-Live checklist pending owner sign-off. Live auto blocked.',
@@ -112,7 +119,7 @@ export class AutonomousExecutionService {
     let reconClean = true;
     let reconDetails = 'Zero broker discrepancies detected across positions and orders.';
     try {
-      const isPaper = this.envService.config.SYSTEM_MODE === TradeMode.PAPER;
+      const isPaper = !live;
       const paperPositions = this.paperBroker ? await this.paperBroker.getPositions() : undefined;
       const paperOrders = this.paperBroker ? await this.paperBroker.getOrders() : undefined;
       const recon = isPaper && paperPositions
@@ -148,7 +155,7 @@ export class AutonomousExecutionService {
       title: 'Broker OAuth 2.0 Token Validity',
       description: 'AES-256-GCM encrypted Upstox token valid with > 15 minutes remaining.',
       category: 'BROKER_AUTH' as const,
-      passed: tokenOk,
+      passed: !live || tokenOk,
       details: tokenOk
         ? `Token valid for ${Math.floor((tokenMeta.secondsRemaining || 0) / 60)} minutes.`
         : 'Broker token expired or missing. Auto execution blocked.',
@@ -156,7 +163,7 @@ export class AutonomousExecutionService {
     };
 
     // 6. Streaming Market Feed Health
-    const feedOk = feedHealth.staleCount === 0 && feedHealth.feedLatencyMs < 3000;
+    const feedOk = feedHealth.status === 'CONNECTED' && feedHealth.provenance === 'LIVE' && feedHealth.totalTicksReceived > 0 && feedHealth.staleCount === 0 && feedHealth.feedLatencyMs < 3000;
     const feedCheck = {
       id: 'auto_06',
       title: 'Streaming Market Data Feed Freshness',
@@ -193,7 +200,7 @@ export class AutonomousExecutionService {
       );
     }
 
-    if (dto.confirmationCode !== 'CONFIRM_AUTO_EXECUTION') {
+    if (!dto.operatorConsent || dto.confirmationCode !== 'CONFIRM_AUTO_EXECUTION') {
       throw new BadRequestException(
         `Invalid confirmation code. Operator must specify 'CONFIRM_AUTO_EXECUTION'.`,
       );
@@ -213,6 +220,7 @@ export class AutonomousExecutionService {
       status: StrategyStatus.ARMED,
     });
 
+    this.reservationManager.arm(dto.windowMinutes);
     const now = Date.now();
     const durationMs = dto.windowMinutes * 60 * 1000;
     const armedUntilDate = new Date(now + durationMs);
@@ -275,12 +283,13 @@ export class AutonomousExecutionService {
     const previousVersionHash = this.armedVersionHash;
 
     this.isArmed = false;
+    this.reservationManager.disarm();
     this.lastDisarmReason = reason;
 
     if (previousStrategyId) {
       try {
         this.strategiesService.updateStrategy(previousStrategyId, {
-          status: StrategyStatus.AUTO_ELIGIBLE,
+          status: StrategyStatus.DRAFT,
         });
       } catch {
         // Safe fallback
@@ -337,6 +346,13 @@ export class AutonomousExecutionService {
       throw new ForbiddenException('Autonomous execution rejected: Kill switch is ACTIVE.');
     }
 
+    this.reservationManager.assertEntryAllowed();
+    const proposal = this.proposalsService.getProposal(proposalId);
+    const armedStrategy = this.armedStrategyId ? this.strategiesService.getStrategy(this.armedStrategyId) : null;
+    if (!proposal || !armedStrategy || proposal.strategyId !== armedStrategy.id || proposal.strategyVersion !== this.armedStrategyVersion || proposal.versionHash !== this.armedVersionHash || armedStrategy.versionHash !== this.armedVersionHash) {
+      this.disarmAutonomous('STRATEGY_VERSION_MISMATCH');
+      throw new ForbiddenException('Proposal must match the exact armed strategy and version hash.');
+    }
     this.recordLog(
       this.armedStrategyId || 'unknown',
       this.armedVersionHash || 'unknown',
@@ -353,13 +369,13 @@ export class AutonomousExecutionService {
         proposalId,
         revalidateFreshness: true,
       });
-      this.tradesExecutedInSession++;
+      if (result.filledQuantity > 0) this.tradesExecutedInSession++;
 
       this.recordLog(
         this.armedStrategyId || 'unknown',
         this.armedVersionHash || 'unknown',
         'ORDER_DISPATCHED',
-        `Autonomous order executed: Order ID ${result.orderId}. GTT Exits armed. Session trades: ${this.tradesExecutedInSession}/${this.maxSessionTrades}.`,
+        `Autonomous order executed: Order ID ${result.orderId}. Broker state: ${result.orderStatus}; protection: ${result.protectionStatus}. Session trades: ${this.tradesExecutedInSession}/${this.maxSessionTrades}.`,
         true,
       );
 
@@ -410,7 +426,7 @@ export class AutonomousExecutionService {
       tradesExecutedInSession: this.tradesExecutedInSession,
       maxSessionTrades: this.maxSessionTrades,
       lastDisarmReason: this.lastDisarmReason,
-      systemMode: this.envService.config.SYSTEM_MODE || TradeMode.PAPER,
+      systemMode: this.mode?.getMode() ?? TradeMode.PAPER,
     };
   }
 

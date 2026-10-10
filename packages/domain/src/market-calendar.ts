@@ -48,16 +48,15 @@ export function getIstDateTime(date: Date = new Date()): {
 } {
   // IST offset is +5.5 hours (+330 minutes)
   const istOffsetMs = 5.5 * 60 * 60 * 1000;
-  const utcTime = date.getTime() + date.getTimezoneOffset() * 60 * 1000;
-  const istDate = new Date(utcTime + istOffsetMs);
+  const istDate = new Date(date.getTime() + istOffsetMs);
 
-  const year = istDate.getFullYear();
-  const month = istDate.getMonth() + 1;
-  const day = istDate.getDate();
-  const hours = istDate.getHours();
-  const minutes = istDate.getMinutes();
-  const seconds = istDate.getSeconds();
-  const dayOfWeek = istDate.getDay();
+  const year = istDate.getUTCFullYear();
+  const month = istDate.getUTCMonth() + 1;
+  const day = istDate.getUTCDate();
+  const hours = istDate.getUTCHours();
+  const minutes = istDate.getUTCMinutes();
+  const seconds = istDate.getUTCSeconds();
+  const dayOfWeek = istDate.getUTCDay();
 
   const pad = (n: number) => n.toString().padStart(2, '0');
   const dateString = `${year}-${pad(month)}-${pad(day)}`;

@@ -1,3 +1,4 @@
 export * from './enums';
 export * from './schemas';
 export * from './daily-bot';
+export * from './trading';

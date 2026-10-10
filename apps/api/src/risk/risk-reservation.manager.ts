@@ -1,4 +1,8 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
+import { TradeMode } from '@trading-bot/contracts';
+import fs from 'node:fs';
+import path from 'node:path';
+import { TradingModeService } from '../trading/trading-mode.service';
 import { EnvService } from '../config/env.service';
 import { EventsGateway } from '../websocket/events.gateway';
 
@@ -50,7 +54,7 @@ export interface ReservationRecord {
 export class RiskReservationManager {
   private readonly logger = new Logger(RiskReservationManager.name);
 
-  private readonly totalAccountCapital: number;
+  private totalAccountCapital: number;
   private readonly dailyDrawdownCap: number;
   private readonly maxTradeRiskCap: number;
   private readonly maxOpenPositions = 1;
@@ -64,16 +68,54 @@ export class RiskReservationManager {
   private openPositionsCount = 0;
   private killSwitchActive = false;
   private ledgerTradingDate = this.currentTradingDate();
+  private armedUntil: number | null = null;
+  private mode = TradeMode.PAPER;
+  private readonly stateDirectory: string | null;
 
   constructor(
     @Inject(EnvService) private readonly envService: EnvService,
     @Inject(EventsGateway) private readonly gateway: EventsGateway,
+    @Optional() @Inject(TradingModeService) mode?: TradingModeService,
   ) {
-    this.totalAccountCapital = this.envService.config.MAX_ACCOUNT_CAPITAL_INR || 10000;
-    this.dailyDrawdownCap = this.envService.config.MAX_DAILY_DRAWDOWN_INR || 1500;
-    this.maxTradeRiskCap = this.envService.config.MAX_ALL_IN_TRADE_RISK_INR || 500;
+    this.totalAccountCapital = this.envService.config.MAX_ACCOUNT_CAPITAL_INR ?? 10000;
+    this.dailyDrawdownCap = this.envService.config.MAX_DAILY_DRAWDOWN_INR ?? 1500;
+    this.maxTradeRiskCap = this.envService.config.MAX_ALL_IN_TRADE_RISK_INR ?? 500;
     this.availableCash = this.totalAccountCapital;
+    this.mode = mode?.getMode() ?? TradeMode.PAPER;
+    this.stateDirectory = process.env.VITEST && (!this.envService.config.STATE_DIRECTORY || this.envService.config.STATE_DIRECTORY === '.data') ? null : path.resolve(this.envService.config.STATE_DIRECTORY ?? '.data');
+    this.loadState();
   }
+
+  public arm(durationMinutes: number): void {
+    if (!Number.isFinite(durationMinutes) || durationMinutes <= 0 || durationMinutes > 480) throw new RiskGateViolationError('Arm duration must be between 1 and 480 minutes.');
+    if (this.killSwitchActive) throw new RiskGateViolationError('Reset the kill switch after resolving exposure before arming.');
+    this.armedUntil = Date.now() + durationMinutes * 60000;
+  }
+  public disarm(): void { this.armedUntil = null; }
+  public isArmed(): boolean { return this.armedUntil !== null && this.armedUntil > Date.now() && !this.killSwitchActive; }
+  public getArmedUntil(): string | null { return this.isArmed() ? new Date(this.armedUntil!).toISOString() : null; }
+  public assertEntryAllowed(): void {
+    if (!this.isArmed()) throw new RiskGateViolationError('Account is disarmed, expired or frozen. Arm it before opening a position.');
+  }
+  public configureMode(mode: TradeMode): void {
+    if (this.getActiveReservations().length || this.openPositionsCount) throw new RiskGateViolationError('Cannot switch modes with unresolved exposure.');
+    this.persistState();
+    this.mode = mode;
+    this.armedUntil = null;
+    this.reservations.clear(); this.activeSignalKeys.clear(); this.openPositionsCount = 0;
+    this.realizedNetDailyGain = 0; this.realizedNetDailyLoss = 0; this.killSwitchActive = false;
+    this.totalAccountCapital = this.envService.config.MAX_ACCOUNT_CAPITAL_INR;
+    this.availableCash = mode === TradeMode.PAPER ? this.totalAccountCapital : 0;
+    this.ledgerTradingDate = this.currentTradingDate();
+    this.loadState(); this.persistState();
+  }
+  public synchronizeFunds(availableCash: number): void {
+    if (!Number.isFinite(availableCash) || availableCash < 0) throw new RiskGateViolationError('Live funds are unavailable.');
+    const held = this.getHeldReservations().reduce((sum, record) => sum + record.reservedCapital, 0);
+    this.availableCash = Math.max(0, Number((availableCash - held).toFixed(2)));
+    this.persistState();
+  }
+  public getTotalAccountCapital(): number { return this.totalAccountCapital; }
 
   /**
    * Evaluates policy and acquires an atomic capital & risk reservation.
@@ -81,6 +123,7 @@ export class RiskReservationManager {
    */
   public acquireReservation(request: ReservationRequest): ReservationRecord {
     this.ensureTradingDay();
+    this.assertEntryAllowed();
     if (![request.capitalRequired, request.allInRisk].every((value) => Number.isFinite(value) && value > 0)) {
       throw new RiskGateViolationError('Capital and all-in risk must be positive finite amounts.');
     }
@@ -153,6 +196,7 @@ export class RiskReservationManager {
     this.availableCash = Number((this.availableCash - request.capitalRequired).toFixed(2));
     this.reservations.set(reservationId, record);
     this.activeSignalKeys.add(request.signalKey);
+    this.persistState();
 
     this.logger.log(
       `[RiskReservationManager] Reservation ${reservationId} ACQUIRED: Capital ₹${request.capitalRequired}, Risk ₹${request.allInRisk}. Remaining Cash: ₹${this.availableCash}.`,
@@ -180,6 +224,8 @@ export class RiskReservationManager {
     this.availableCash = Number((this.availableCash + record.reservedCapital).toFixed(2));
     this.activeSignalKeys.delete(record.signalKey);
     this.reservations.set(reservationId, record);
+
+    this.persistState();
 
     this.logger.log(
       `[RiskReservationManager] Reservation ${reservationId} RELEASED (${reason}). Restored ₹${record.reservedCapital} to cash. Available Cash: ₹${this.availableCash}.`,
@@ -212,6 +258,7 @@ export class RiskReservationManager {
     record.reservedCapital = actualFilledCapital;
 
     this.reservations.set(reservationId, record);
+    this.persistState();
     this.logger.log(
       `[RiskReservationManager] Reservation ${reservationId} COMMITTED to open position. Active positions: ${this.openPositionsCount}.`,
     );
@@ -225,6 +272,9 @@ export class RiskReservationManager {
     initialCapital: number,
     realizedNetPnl: number,
   ): void {
+    const owned = this.getActiveReservations().find(record => record.signalKey === signalKey);
+    if (!owned) return;
+    if (!Number.isFinite(realizedNetPnl) || !Number.isFinite(initialCapital) || Math.abs(initialCapital - owned.reservedCapital) > 0.01) throw new RiskGateViolationError('Settlement must match confirmed owned capital and finite P&L.');
     if (this.openPositionsCount > 0) {
       this.openPositionsCount--;
     }
@@ -246,6 +296,7 @@ export class RiskReservationManager {
     } else {
       this.realizedNetDailyGain += realizedNetPnl;
     }
+    this.persistState();
 
     this.logger.log(
       `[RiskReservationManager] Position closed for ${signalKey}. Net P&L: ₹${realizedNetPnl}. Available Cash: ₹${this.availableCash}. Total Daily Loss: ₹${this.realizedNetDailyLoss}.`,
@@ -295,8 +346,9 @@ export class RiskReservationManager {
     if (Array.from(unique.values()).some((value) => !Number.isFinite(value))) throw new RiskGateViolationError('Confirmed daily results must be finite.');
     this.realizedNetDailyLoss = Array.from(unique.values()).reduce((total, pnl) => total + Math.max(0, -pnl), 0);
     this.realizedNetDailyGain = Array.from(unique.values()).reduce((total, pnl) => total + Math.max(0, pnl), 0);
-    this.availableCash = Number((this.totalAccountCapital + this.realizedNetDailyGain - this.realizedNetDailyLoss).toFixed(2));
+    if (this.mode === TradeMode.PAPER) this.availableCash = Number((this.totalAccountCapital + this.realizedNetDailyGain - this.realizedNetDailyLoss).toFixed(2));
     this.ledgerTradingDate = tradingDate;
+    this.persistState();
   }
 
   public restoreConfirmedPosition(record: ReservationRecord): void {
@@ -307,6 +359,7 @@ export class RiskReservationManager {
     this.activeSignalKeys.add(record.signalKey);
     this.availableCash = Number((this.availableCash - record.reservedCapital).toFixed(2));
     this.openPositionsCount = 1;
+    this.persistState();
     this.gateway.broadcast('risk.restored', { reservationId: record.id, availableCash: this.availableCash });
   }
 
@@ -357,7 +410,10 @@ export class RiskReservationManager {
   }
 
   public setKillSwitch(active: boolean): void {
+    if (!active && this.getHeldReservationsCount() > 0) throw new RiskGateViolationError('Resolve pending or unknown broker intents before resetting the kill switch.');
     this.killSwitchActive = active;
+    this.armedUntil = null;
+    this.persistState();
   }
 
   public isKillSwitchActive(): boolean {
@@ -373,8 +429,43 @@ export class RiskReservationManager {
     this.reservations.clear();
     this.activeSignalKeys.clear();
     this.openPositionsCount = 0;
-    this.availableCash = this.totalAccountCapital;
+    this.availableCash = this.mode === TradeMode.PAPER ? this.totalAccountCapital : 0;
     this.ledgerTradingDate = this.currentTradingDate();
+    this.persistState();
+  }
+
+  private stateFile(): string | null { return this.stateDirectory ? path.join(this.stateDirectory, `risk-${this.mode}.json`) : null; }
+  private loadState(): void {
+    const filename = this.stateFile();
+    if (!filename || !fs.existsSync(filename)) return;
+    try {
+      const saved = JSON.parse(fs.readFileSync(filename, 'utf8'));
+      if (saved.mode !== this.mode || !Array.isArray(saved.reservations) || !Number.isFinite(saved.availableCash) || saved.availableCash < 0) throw new Error('Invalid ledger');
+      this.availableCash = saved.availableCash;
+      this.realizedNetDailyLoss = saved.realizedNetDailyLoss;
+      this.realizedNetDailyGain = saved.realizedNetDailyGain;
+      this.ledgerTradingDate = saved.ledgerTradingDate;
+      this.reservations = new Map(saved.reservations.map((record: ReservationRecord) => {
+        if (!record.id || !record.signalKey || !['HELD','COMMITTED','RELEASED'].includes(record.status) || !(record.reservedCapital > 0) || !(record.reservedRisk > 0)) throw new Error('Invalid reservation');
+        return [record.id, record];
+      }));
+      this.activeSignalKeys = new Set(this.getActiveReservations().map(record => record.signalKey));
+      this.openPositionsCount = this.getActiveReservations().filter(record => record.status === 'COMMITTED').length;
+      this.killSwitchActive = Boolean(saved.killSwitchActive) || this.getHeldReservationsCount() > 0;
+      if (![this.realizedNetDailyLoss,this.realizedNetDailyGain].every(value => Number.isFinite(value) && value >= 0)) throw new Error('Invalid daily results');
+    } catch { throw new Error('Risk ledger is invalid. Resolve persisted account state before trading.'); }
+  }
+  private persistState(): void {
+    const filename = this.stateFile();
+    if (!filename) return;
+    try {
+      fs.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+      const temporary = `${filename}.${process.pid}.tmp`;
+      const descriptor = fs.openSync(temporary, 'w', 0o600);
+      try { fs.writeFileSync(descriptor, JSON.stringify({ mode: this.mode, availableCash: this.availableCash, realizedNetDailyLoss: this.realizedNetDailyLoss, realizedNetDailyGain: this.realizedNetDailyGain, ledgerTradingDate: this.ledgerTradingDate, killSwitchActive: this.killSwitchActive, reservations: Array.from(this.reservations.values()) })); fs.fsyncSync(descriptor); }
+      finally { fs.closeSync(descriptor); }
+      fs.renameSync(temporary, filename);
+    } catch { this.killSwitchActive = true; this.armedUntil = null; throw new RiskGateViolationError('Risk persistence failed; new orders are blocked.'); }
   }
 
   private ensureTradingDay(): void {
