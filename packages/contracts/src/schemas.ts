@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import {
   AgentType,
+  AgentToolName,
+  AgentTaskStatus,
+  AllowedOptionType,
+  MoneynessType,
   BrokerHealthStatus,
   InstrumentType,
   OrderSide,
@@ -154,18 +158,69 @@ export const SearchInstrumentsQuerySchema = z.object({
 
 export type SearchInstrumentsQuery = z.infer<typeof SearchInstrumentsQuerySchema>;
 
+// Strategy Sub-Schemas
+export const StrategySessionSchema = z.object({
+  start: z.string().default('09:25'),
+  lastEntry: z.string().default('14:45'),
+  timezone: z.literal('Asia/Kolkata').default('Asia/Kolkata'),
+});
+export type StrategySession = z.infer<typeof StrategySessionSchema>;
+
+export const StrategyEntryRuleSchema = z.object({
+  emaPeriod: z.number().int().positive().default(20),
+  rsiPeriod: z.number().int().positive().default(14),
+  rsiThreshold: z.number().min(0).max(100).default(55),
+  maxBidAskSpreadPct: z.number().positive().default(1.0),
+  minVolume: z.number().int().nonnegative().default(1000),
+});
+export type StrategyEntryRule = z.infer<typeof StrategyEntryRuleSchema>;
+
+export const StrategySelectionSchema = z.object({
+  expiry: z.enum(['NEAREST_ELIGIBLE', 'MONTHLY']).default('NEAREST_ELIGIBLE'),
+  moneyness: z.nativeEnum(MoneynessType).default(MoneynessType.ATM),
+  minVolume: z.number().int().nonnegative().default(1000),
+});
+export type StrategySelection = z.infer<typeof StrategySelectionSchema>;
+
+export const StrategyRiskRulesSchema = z.object({
+  maxCapitalInr: z.number().positive().max(10000).default(10000),
+  maxAllInTradeLossInr: z.number().positive().max(500).default(200),
+  maxAllInDailyLossInr: z.number().positive().max(1500).default(600),
+  maxOpenPositions: z.number().int().positive().default(1),
+  maxTradesPerDay: z.number().int().positive().default(3),
+  targetNetProfitInr: z.number().positive().default(300),
+  maxRoundTripCostBudgetInr: z.number().positive().default(60),
+});
+export type StrategyRiskRules = z.infer<typeof StrategyRiskRulesSchema>;
+
+export const StrategyExitRulesSchema = z.object({
+  stopBasis: z.enum(['OPTION_PREMIUM', 'UNDERLYING_LEVEL']).default('OPTION_PREMIUM'),
+  stopLossPoints: z.number().positive().optional(),
+  targetPoints: z.number().positive().optional(),
+  marketCutoff: z.string().default('15:10'),
+});
+export type StrategyExitRules = z.infer<typeof StrategyExitRulesSchema>;
+
 // Strategy Config Schema
 export const StrategyConfigSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1),
-  version: z.number().int().positive(),
+  version: z.number().int().positive().default(1),
+  versionHash: z.string().optional(),
   status: z.nativeEnum(StrategyStatus).default(StrategyStatus.DRAFT),
   tradeMode: z.nativeEnum(TradeMode).default(TradeMode.PAPER),
-  underlying: z.string(), // "NIFTY", "BANKNIFTY"
-  timeframe: z.string(), // "1m", "5m", "15m"
-  maxCapitalInr: z.number().positive().max(10000), // Account hard cap
-  maxAllInTradeLossInr: z.number().positive().max(500),
-  maxAllInDailyLossInr: z.number().positive().max(1500),
+  market: z.string().default('NSE_FO'),
+  underlying: z.string().default('NIFTY'), // "NIFTY", "BANKNIFTY"
+  allowedInstruments: z.array(z.nativeEnum(AllowedOptionType)).default([AllowedOptionType.LONG_CALL]),
+  timeframe: z.string().default('5m'), // "1m", "5m", "15m"
+  session: StrategySessionSchema.default({}),
+  entry: StrategyEntryRuleSchema.default({}),
+  selection: StrategySelectionSchema.default({}),
+  risk: StrategyRiskRulesSchema.default({}),
+  exit: StrategyExitRulesSchema.default({}),
+  maxCapitalInr: z.number().positive().max(10000).default(10000), // Account hard cap
+  maxAllInTradeLossInr: z.number().positive().max(500).default(200),
+  maxAllInDailyLossInr: z.number().positive().max(1500).default(600),
   targetNetProfitInr: z.number().positive().default(300),
   maxRoundTripCostBudgetInr: z.number().positive().default(60),
   maxOpenPositions: z.number().int().positive().default(1),
@@ -173,6 +228,112 @@ export const StrategyConfigSchema = z.object({
 });
 
 export type StrategyConfig = z.infer<typeof StrategyConfigSchema>;
+
+// Agent Read-Only Tool Schemas
+export const ToolScanUniverseInputSchema = z.object({
+  underlying: z.string().default('NIFTY'),
+  minVolume: z.number().int().nonnegative().default(1000),
+  maxSpreadPct: z.number().positive().default(1.0),
+  expiry: z.string().optional(),
+});
+export type ToolScanUniverseInput = z.infer<typeof ToolScanUniverseInputSchema>;
+
+export const ScannedInstrumentCandidateSchema = z.object({
+  instrumentKey: z.string(),
+  symbol: z.string(),
+  strikePrice: z.number().positive(),
+  instrumentType: z.nativeEnum(InstrumentType),
+  lastPrice: z.number().nonnegative(),
+  bidPrice: z.number().nonnegative(),
+  askPrice: z.number().nonnegative(),
+  spreadPct: z.number().nonnegative(),
+  volume: z.number().int().nonnegative(),
+  openInterest: z.number().int().nonnegative(),
+  lotSize: z.number().int().positive(),
+  liquidityScore: z.number().min(0).max(100),
+});
+export type ScannedInstrumentCandidate = z.infer<typeof ScannedInstrumentCandidateSchema>;
+
+export const ToolScanUniverseOutputSchema = z.object({
+  underlying: z.string(),
+  spotPrice: z.number().positive(),
+  candidates: z.array(ScannedInstrumentCandidateSchema),
+  timestamp: z.string().datetime(),
+});
+export type ToolScanUniverseOutput = z.infer<typeof ToolScanUniverseOutputSchema>;
+
+export const ToolCalculateIndicatorsInputSchema = z.object({
+  instrumentKey: z.string(),
+  timeframe: z.string().default('5m'),
+  emaPeriod: z.number().int().positive().default(20),
+  rsiPeriod: z.number().int().positive().default(14),
+  candleCount: z.number().int().positive().default(50),
+});
+export type ToolCalculateIndicatorsInput = z.infer<typeof ToolCalculateIndicatorsInputSchema>;
+
+export const ToolCalculateIndicatorsOutputSchema = z.object({
+  instrumentKey: z.string(),
+  timeframe: z.string(),
+  totalClosedCandles: z.number().int().nonnegative(),
+  isWarmedUp: z.boolean(),
+  missingWarmupCandles: z.number().int().nonnegative().default(0),
+  lastClosedCandleTime: z.string().optional(),
+  ema: z.number().optional(),
+  previousEma: z.number().optional(),
+  rsi: z.number().optional(),
+  previousRsi: z.number().optional(),
+  vwap: z.number().optional(),
+  closePrice: z.number().optional(),
+});
+export type ToolCalculateIndicatorsOutput = z.infer<typeof ToolCalculateIndicatorsOutputSchema>;
+
+export const ToolEvaluateStrategyInputSchema = z.object({
+  strategyId: z.string().uuid(),
+  instrumentKey: z.string(),
+  symbol: z.string(),
+  spotPrice: z.number().positive(),
+  underlyingEma: z.number(),
+  previousUnderlyingEma: z.number(),
+  underlyingClose: z.number(),
+  previousUnderlyingClose: z.number(),
+  rsi: z.number(),
+  bidPrice: z.number().nonnegative(),
+  askPrice: z.number().nonnegative(),
+  volume: z.number().int().nonnegative(),
+  timestamp: z.string().datetime(),
+});
+export type ToolEvaluateStrategyInput = z.infer<typeof ToolEvaluateStrategyInputSchema>;
+
+export const ToolEvaluateStrategyOutputSchema = z.object({
+  passed: z.boolean(),
+  reasons: z.array(z.string()),
+  signal: z.enum(['BUY_CALL', 'BUY_PUT', 'NONE']),
+  confidence: z.number().min(0).max(1),
+  metrics: z.record(z.string(), z.union([z.number(), z.string(), z.boolean()])),
+});
+export type ToolEvaluateStrategyOutput = z.infer<typeof ToolEvaluateStrategyOutputSchema>;
+
+export const AgentToolInvocationSchema = z.object({
+  tool: z.nativeEnum(AgentToolName),
+  timestamp: z.string().datetime(),
+  input: z.record(z.string(), z.any()),
+  output: z.record(z.string(), z.any()),
+});
+export type AgentToolInvocation = z.infer<typeof AgentToolInvocationSchema>;
+
+export const AgentTaskSchema = z.object({
+  id: z.string().min(1),
+  agentType: z.nativeEnum(AgentType),
+  status: z.nativeEnum(AgentTaskStatus),
+  objective: z.string().min(1),
+  toolsInvoked: z.array(AgentToolInvocationSchema).default([]),
+  resultSummary: z.string().default(''),
+  proposalGenerated: z.any().optional(),
+  startedAt: z.string().datetime(),
+  completedAt: z.string().datetime().optional(),
+  error: z.string().optional(),
+});
+export type AgentTask = z.infer<typeof AgentTaskSchema>;
 
 // Trade Proposal Schema
 export const TradeProposalSchema = z.object({

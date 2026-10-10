@@ -128,6 +128,11 @@ export class InstrumentCatalogService implements OnModuleInit {
     return this.instruments.get(key);
   }
 
+  public getUnderlyingInstruments(underlying: string): Instrument[] {
+    const keys = this.underlyingIndex.get(underlying.toUpperCase()) || [];
+    return keys.map((k) => this.instruments.get(k)).filter(Boolean) as Instrument[];
+  }
+
   public searchInstruments(params: SearchInstrumentsQuery): Instrument[] {
     const { query, underlying, instrumentType, limit = 20 } = params;
     const q = query.trim().toUpperCase();

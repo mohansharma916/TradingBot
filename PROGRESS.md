@@ -65,11 +65,52 @@
 
 ---
 
-## Next Steps: Phase 2 — Strategy Engine & Tool-Restricted Agents
+## Phase 2: Agent Workspace & Deterministic Strategies (Completed)
 
-**Phase 2 Objectives:**
-- Implement versioned `StrategyConfig` with strict Zod validation (5m EMA, RSI momentum filter, spread check, moneyness).
-- Build `MarketScanner` and `StrategyAnalyst` agents restricted to read-only tools.
-- Implement generation of expiring `TradeProposal` objects with objective rationale and evidence.
-- Build Strategy Editor, Agent Task Board, and Proposal Inspector in the universal app.
-- Write unit tests for candle-close semantics, indicator warm-up buffers, and look-ahead bias prevention.
+**Implemented Deliverables:**
+
+1. **Contracts & Strict Schemas (`packages/contracts`)**:
+   - `StrategyConfigSchema` and sub-schemas (`StrategySessionSchema`, `StrategyEntryRuleSchema`, `StrategySelectionSchema`, `StrategyRiskRulesSchema`, `StrategyExitRulesSchema`).
+   - Hard account caps strictly enforced in schema: `maxCapitalInr <= 10,000`, `maxAllInTradeLossInr <= 500`, `maxAllInDailyLossInr <= 1,500`.
+   - Read-only agent tool schemas: `scan_universe`, `calculate_indicators`, `evaluate_strategy`, `draft_trade_proposal`.
+   - `AgentToolName` enum restricting agent tool execution. Write/order actions strictly prohibited.
+   - `AgentTaskSchema` capturing complete audit logs of tools invoked, timestamps, inputs, outputs, and proposal links.
+
+2. **Deterministic Domain Rules Engine (`packages/domain`)**:
+   - `candle-manager.ts`: 5-minute candle aggregation from ticks, confirmed candle-close event trigger, intra-bar flickering prevention (forming candles isolated), and out-of-order tick rejection to prevent look-ahead bias.
+   - `indicators.ts`: `validateWarmup()` helper ensuring indicators (EMA-20, RSI-14) require at least 20 closed bars before generating signals.
+   - `strategy-evaluator.ts`: Evaluates entry rules strictly on closed bars (EMA cross above, RSI momentum >= 55, Bid/Ask spread <= 1.0%, contract volume >= 1,000, session time window). Generates expiring `TradeProposal` with sizing, roundtrip fees, slippage buffer, and risk cap checks.
+   - `strategy-version.ts`: Recursive canonical FNV-1a SHA-256 hash generator and automatic version bump detection (`requiresVersionBump()`).
+
+3. **Backend Multi-Agent Subsystem & Strategy Service (`apps/api`)**:
+   - `agent-tools.service.ts`: Tool execution router with hard security gate (`AgentSecurityViolationError`) rejecting any broker mutation attempts.
+   - `market-scanner.agent.ts`: Scans F&O universe, calculates live spread %, and ranks candidate contracts.
+   - `strategy-analyst.agent.ts`: Evaluates closed bars, computes indicators, and produces expiring `TradeProposal`.
+   - `agent-coordinator.service.ts`: Coordinates multi-agent tasks, logs execution history, and broadcasts real-time WebSocket events.
+   - `strategies.service.ts` & `strategies.controller.ts`: Versioned strategy CRUD with automatic version incrementing on parameter modifications.
+   - `proposals.service.ts` & `proposals.controller.ts`: Manages trade proposals, handles 3-minute TTL expiration, and supports owner authorization/rejection.
+
+4. **Universal Client Workstation (`apps/trader`)**:
+   - `app/strategies.tsx`: Interactive Strategy Workspace & Builder with rule editing modal, real-time risk checks, "Trigger Agent Scan" button, and immutable version audit ledger.
+   - `app/proposals.tsx`: Proposals Inspector with live countdown timer (`Expires in MM:SS`), objective agent evidence breakdown (EMA, RSI, VWAP, Spread %, Volume), authorize/reject actions, and dedicated "Agent Task Board" tab with tool invocation audit trails.
+
+### Verification & Test Matrix
+
+- **Unit & Integration Tests**: 54 passed / 54 total (Vitest across 13 test files).
+  - Domain tests: Warm-up verification, candle-close semantics (no intra-bar signal), look-ahead bias rejection, spread & volume filters, deterministic version hashing.
+  - Contracts tests: Hard risk caps rejection, read-only tool boundaries, prohibited write tool rejection.
+  - API tests: Agent tool security bounds, multi-agent scan execution, proposal lifecycle and expiration.
+  - Trader client tests: Strategy version hashing and proposal inspector contracts.
+- **TypeScript Typecheck**: Passed across all 8 workspace projects with 0 errors (`pnpm run typecheck`).
+- **Monorepo Build**: Passed across all packages and services (`pnpm run build`).
+
+---
+
+## Next Steps: Phase 3 — Risk Engine & Paper Broker
+
+**Phase 3 Objectives:**
+- Pure deterministic account-wide `RiskPolicy` evaluation: budget, per-trade all-in risk, daily drawdown, open positions, trade count, slippage buffer, fees estimate, margin, lot-size and liquidity limits.
+- Central transactional cash/risk reservations and unique signal intent (`signalKey`).
+- Paper broker adapter with simulated fills, slippage, partial fills, and order state machine.
+- Position ledger and trades/orders journal screens in the universal app.
+- Proof that two agents cannot double-spend capital, stale quotes block orders, and all P&L has correct estimated-vs-actual cost labels.

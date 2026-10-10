@@ -8,6 +8,8 @@ import {
   Instrument,
   OptionChainResult,
   MarketCalendar,
+  StrategyConfig,
+  AgentTask,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -169,6 +171,48 @@ export class TradingPlatformClient {
       method: 'POST',
       body: JSON.stringify({ reason }),
     });
+  }
+
+  // Strategies
+  public async getStrategies(): Promise<StrategyConfig[]> {
+    return this.request('/strategies');
+  }
+
+  public async getStrategy(id: string): Promise<StrategyConfig> {
+    return this.request(`/strategies/${id}`);
+  }
+
+  public async getStrategyVersions(id: string): Promise<StrategyConfig[]> {
+    return this.request(`/strategies/${id}/versions`);
+  }
+
+  public async createStrategy(dto: any): Promise<StrategyConfig> {
+    return this.request('/strategies', {
+      method: 'POST',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  public async updateStrategy(id: string, dto: any): Promise<StrategyConfig> {
+    return this.request(`/strategies/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(dto),
+    });
+  }
+
+  public async runStrategyScan(id: string): Promise<any> {
+    return this.request(`/strategies/${id}/scan`, {
+      method: 'POST',
+    });
+  }
+
+  // Agents
+  public async getAgentTasks(): Promise<AgentTask[]> {
+    return this.request('/agents/tasks');
+  }
+
+  public async getAgentTools(): Promise<any> {
+    return this.request('/agents/tools');
   }
 
   // Reports

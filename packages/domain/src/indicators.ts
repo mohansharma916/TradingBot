@@ -97,3 +97,36 @@ export function calculateVWAP(candles: Candle[]): number[] {
 
   return vwapValues;
 }
+
+export interface WarmupValidation {
+  isWarmedUp: boolean;
+  requiredCandles: number;
+  availableCandles: number;
+  missingCandles: number;
+  reason?: string;
+}
+
+/**
+ * Validates whether sufficient closed historical bars exist to warm up indicators.
+ * Prevents cold-start false positives and indicator distortion.
+ */
+export function validateWarmup(
+  candles: Candle[],
+  emaPeriod = 20,
+  rsiPeriod = 14
+): WarmupValidation {
+  const requiredCandles = Math.max(emaPeriod, rsiPeriod + 1);
+  const availableCandles = candles.length;
+  const isWarmedUp = availableCandles >= requiredCandles;
+  const missingCandles = Math.max(0, requiredCandles - availableCandles);
+
+  return {
+    isWarmedUp,
+    requiredCandles,
+    availableCandles,
+    missingCandles,
+    reason: isWarmedUp
+      ? undefined
+      : `Insufficient warm-up candles: ${availableCandles} available, minimum ${requiredCandles} required (EMA-${emaPeriod}, RSI-${rsiPeriod}).`,
+  };
+}

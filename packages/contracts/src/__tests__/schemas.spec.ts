@@ -10,6 +10,7 @@ import {
   AgentType,
   OrderSide,
   ProductType,
+  AgentTaskSchema,
 } from '../index.ts';
 
 describe('Contracts & Schemas', () => {
@@ -80,4 +81,72 @@ describe('Contracts & Schemas', () => {
     const parsed = RiskStatusSchema.safeParse(status);
     expect(parsed.success).toBe(true);
   });
+
+  it('rejects StrategyConfig that violates account hard risk caps', () => {
+    const excessiveCapitalStrategy = {
+      id: '550e8400-e29b-41d4-a716-446655440099',
+      name: 'Unsafe Capital Strategy',
+      version: 1,
+      maxCapitalInr: 25000, // VIOLATION: Exceeds 10,000 hard cap
+      maxAllInTradeLossInr: 500,
+      maxAllInDailyLossInr: 1500,
+    };
+    expect(StrategyConfigSchema.safeParse(excessiveCapitalStrategy).success).toBe(false);
+
+    const excessiveTradeRiskStrategy = {
+      id: '550e8400-e29b-41d4-a716-446655440099',
+      name: 'Unsafe Loss Strategy',
+      version: 1,
+      maxCapitalInr: 10000,
+      maxAllInTradeLossInr: 800, // VIOLATION: Exceeds 500 hard cap
+      maxAllInDailyLossInr: 1500,
+    };
+    expect(StrategyConfigSchema.safeParse(excessiveTradeRiskStrategy).success).toBe(false);
+
+    const excessiveDailyLossStrategy = {
+      id: '550e8400-e29b-41d4-a716-446655440099',
+      name: 'Unsafe Drawdown Strategy',
+      version: 1,
+      maxCapitalInr: 10000,
+      maxAllInTradeLossInr: 500,
+      maxAllInDailyLossInr: 2500, // VIOLATION: Exceeds 1500 hard cap
+    };
+    expect(StrategyConfigSchema.safeParse(excessiveDailyLossStrategy).success).toBe(false);
+  });
+
+  it('validates AgentTaskSchema and rejects prohibited order tools', () => {
+    // Valid read-only tool invocation
+    const validTask = {
+      id: '550e8400-e29b-41d4-a716-446655440088',
+      agentType: AgentType.STRATEGY_ANALYST,
+      status: 'COMPLETED',
+      objective: 'Scan liquid ATM call options and evaluate 5m EMA cross',
+      toolsInvoked: [
+        {
+          tool: 'scan_universe',
+          timestamp: new Date().toISOString(),
+          input: { underlying: 'NIFTY' },
+          output: { candidatesCount: 4 },
+        },
+      ],
+      resultSummary: '1 valid trade proposal identified',
+      startedAt: new Date().toISOString(),
+    };
+    expect(AgentTaskSchema.safeParse(validTask).success).toBe(true);
+
+    // Forbidden write tool in agent task
+    const dangerousTask = {
+      ...validTask,
+      toolsInvoked: [
+        {
+          tool: 'place_order', // FORBIDDEN: Write tools are not in AgentToolName
+          timestamp: new Date().toISOString(),
+          input: { quantity: 25 },
+          output: {},
+        },
+      ],
+    };
+    expect(AgentTaskSchema.safeParse(dangerousTask).success).toBe(false);
+  });
 });
+

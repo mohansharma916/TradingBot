@@ -8,8 +8,16 @@ import { RiskService } from './risk/risk.service';
 import { MarketsController } from './markets/markets.controller';
 import { InstrumentsController } from './instruments/instruments.controller';
 import { ProposalsController } from './proposals/proposals.controller';
+import { ProposalsService } from './proposals/proposals.service';
 import { OrdersController } from './orders/orders.controller';
 import { ReportsController } from './reports/reports.controller';
+import { StrategiesController } from './strategies/strategies.controller';
+import { StrategiesService } from './strategies/strategies.service';
+import { AgentsController } from './agents/agents.controller';
+import { AgentToolsService } from './agents/agent-tools.service';
+import { MarketScannerAgent } from './agents/market-scanner.agent';
+import { StrategyAnalystAgent } from './agents/strategy-analyst.agent';
+import { AgentCoordinatorService } from './agents/agent-coordinator.service';
 import { EventsGateway } from './websocket/events.gateway';
 import { ProtobufDecoderService } from './market-data/protobuf-decoder.service';
 import { InstrumentCatalogService } from './instruments/instrument-catalog.service';
@@ -27,6 +35,8 @@ import { UpstoxMarketFeedService } from './market-data/upstox-market-feed.servic
     MarketsController,
     InstrumentsController,
     ProposalsController,
+    StrategiesController,
+    AgentsController,
     OrdersController,
     ReportsController,
   ],
@@ -39,6 +49,12 @@ import { UpstoxMarketFeedService } from './market-data/upstox-market-feed.servic
     PaperBrokerAdapter,
     UpstoxBrokerAdapter,
     UpstoxMarketFeedService,
+    ProposalsService,
+    AgentToolsService,
+    MarketScannerAgent,
+    StrategyAnalystAgent,
+    AgentCoordinatorService,
+    StrategiesService,
   ],
   exports: [
     EnvService,
@@ -49,6 +65,12 @@ import { UpstoxMarketFeedService } from './market-data/upstox-market-feed.servic
     PaperBrokerAdapter,
     UpstoxBrokerAdapter,
     UpstoxMarketFeedService,
+    ProposalsService,
+    AgentToolsService,
+    MarketScannerAgent,
+    StrategyAnalystAgent,
+    AgentCoordinatorService,
+    StrategiesService,
   ],
 })
 export class AppModule {}

@@ -120,3 +120,28 @@ export enum FeedStatus {
   STALE = 'STALE',
   AUTH_FAILED = 'AUTH_FAILED',
 }
+
+export enum AgentToolName {
+  SCAN_UNIVERSE = 'scan_universe',
+  CALCULATE_INDICATORS = 'calculate_indicators',
+  EVALUATE_STRATEGY = 'evaluate_strategy',
+  DRAFT_TRADE_PROPOSAL = 'draft_trade_proposal',
+}
+
+export enum AgentTaskStatus {
+  PENDING = 'PENDING',
+  RUNNING = 'RUNNING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+}
+
+export enum AllowedOptionType {
+  LONG_CALL = 'LONG_CALL',
+  LONG_PUT = 'LONG_PUT',
+}
+
+export enum MoneynessType {
+  ATM = 'ATM',
+  ITM_1 = 'ITM_1',
+  OTM_1 = 'OTM_1',
+}
