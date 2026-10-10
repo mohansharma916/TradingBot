@@ -297,7 +297,7 @@ export function generateHistoricalMarketCandles(
   timeframeMinutes = 5,
 ): Candle[] {
   const candles: Candle[] = [];
-  const basePrice = underlying === 'BANKNIFTY' ? 52000.0 : 25000.0;
+  const basePrice = underlying === 'BANKNIFTY' ? 55256.65 : 22520.45;
   let runningPrice = basePrice;
 
   const now = new Date();

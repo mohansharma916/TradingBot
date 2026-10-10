@@ -68,6 +68,9 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
       this.checkStaleFeed();
     }, 1000);
 
+    // Sync live market close prices immediately
+    void this.syncRealMarketPrices();
+
     // Attempt connecting to market feed
     this.initiateConnection();
   }
@@ -86,29 +89,29 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     const defaults = [
       {
         instrumentKey: 'NSE_INDEX|Nifty 50',
-        lastPrice: 25120.45,
-        bidPrice: 25120.1,
-        askPrice: 25120.8,
+        lastPrice: 22520.45,
+        bidPrice: 22520.1,
+        askPrice: 22520.8,
         bidQty: 500,
         askQty: 625,
         volume: 8452000,
         openInterest: 0,
-        netChange: 145.2,
-        netChangePct: 0.58,
+        netChange: 288.65,
+        netChangePct: 1.3,
         timestamp: now,
         isStale: false,
       },
       {
         instrumentKey: 'NSE_INDEX|Nifty Bank',
-        lastPrice: 52450.8,
-        bidPrice: 52449.5,
-        askPrice: 52451.2,
+        lastPrice: 55256.65,
+        bidPrice: 55255.5,
+        askPrice: 55257.5,
         bidQty: 300,
         askQty: 450,
         volume: 4120000,
         openInterest: 0,
-        netChange: -85.4,
-        netChangePct: -0.16,
+        netChange: 741.6,
+        netChangePct: 1.36,
         timestamp: now,
         isStale: false,
       },
@@ -372,6 +375,100 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
         }),
       );
     }
+  }
+
+  public async syncRealMarketPrices(): Promise<void> {
+    try {
+      // 1. If Upstox broker token is available, query Upstox v2 market quote
+      const tokenRecord = this.tokenStorage?.getToken();
+      if (tokenRecord?.accessToken) {
+        const upstoxRes = await fetch(
+          'https://api.upstox.com/v2/market-quote/quotes?instrument_key=NSE_INDEX|Nifty 50,NSE_INDEX|Nifty Bank',
+          {
+            headers: {
+              Authorization: `Bearer ${tokenRecord.accessToken}`,
+              Accept: 'application/json',
+              'Api-Version': '2.0',
+            },
+          },
+        );
+        if (upstoxRes.ok) {
+          const body = (await upstoxRes.json()) as any;
+          const data = body?.data;
+          if (data) {
+            const niftyQuote = data['NSE_INDEX:Nifty 50'];
+            if (niftyQuote?.last_price) {
+              this.updateQuotePrice('NSE_INDEX|Nifty 50', niftyQuote.last_price, niftyQuote.net_change ?? 0);
+            }
+            const bankQuote = data['NSE_INDEX:Nifty Bank'];
+            if (bankQuote?.last_price) {
+              this.updateQuotePrice('NSE_INDEX|Nifty Bank', bankQuote.last_price, bankQuote.net_change ?? 0);
+            }
+            return;
+          }
+        }
+      }
+
+      // 2. Fetch live/closing prices from NSE via Yahoo Finance chart API
+      const [niftyRes, bankRes] = await Promise.all([
+        fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEI?interval=1d&range=1d', {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        }).catch(() => null),
+        fetch('https://query1.finance.yahoo.com/v8/finance/chart/%5ENSEBANK?interval=1d&range=1d', {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+        }).catch(() => null),
+      ]);
+
+      if (niftyRes && niftyRes.ok) {
+        const niftyData = (await niftyRes.json()) as any;
+        const meta = niftyData?.chart?.result?.[0]?.meta;
+        if (meta?.regularMarketPrice) {
+          this.updateQuotePrice(
+            'NSE_INDEX|Nifty 50',
+            Number(meta.regularMarketPrice),
+            Number(meta.fulldayChange ?? 0),
+            Number(meta.regularMarketChangePercent ?? 0),
+          );
+        }
+      }
+
+      if (bankRes && bankRes.ok) {
+        const bankData = (await bankRes.json()) as any;
+        const meta = bankData?.chart?.result?.[0]?.meta;
+        if (meta?.regularMarketPrice) {
+          this.updateQuotePrice(
+            'NSE_INDEX|Nifty Bank',
+            Number(meta.regularMarketPrice),
+            Number(meta.fulldayChange ?? 0),
+            Number(meta.regularMarketChangePercent ?? 0),
+          );
+        }
+      }
+    } catch {
+      // Retain existing quotes on network failure
+    }
+  }
+
+  private updateQuotePrice(instrumentKey: string, price: number, netChange = 0, netChangePct = 0) {
+    const existing = this.quotes.get(instrumentKey);
+    const now = new Date().toISOString();
+    const updated: QuoteSnapshot = {
+      instrumentKey,
+      lastPrice: Number(price.toFixed(2)),
+      bidPrice: Number((price - 0.25).toFixed(2)),
+      askPrice: Number((price + 0.25).toFixed(2)),
+      bidQty: existing?.bidQty ?? 500,
+      askQty: existing?.askQty ?? 625,
+      volume: existing?.volume ?? 8452000,
+      openInterest: existing?.openInterest ?? 0,
+      netChange: Number(netChange.toFixed(2)),
+      netChangePct: Number(netChangePct.toFixed(2)),
+      timestamp: now,
+      isStale: false,
+    };
+    this.quotes.set(instrumentKey, updated);
+    this.lastTickTimestamps.set(instrumentKey, Date.now());
+    this.gateway.broadcast('quotes.snapshot', [updated]);
   }
 
   public getQuote(key: string): QuoteSnapshot | undefined {

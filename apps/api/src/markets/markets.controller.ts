@@ -23,7 +23,7 @@ export class MarketsController {
   ): OptionChainResult {
     const spotKey = underlying.toUpperCase() === 'BANKNIFTY' ? 'NSE_INDEX|Nifty Bank' : 'NSE_INDEX|Nifty 50';
     const spotQuote = this.feedService.getQuote(spotKey);
-    const spotPrice = spotQuote ? spotQuote.lastPrice : underlying.toUpperCase() === 'BANKNIFTY' ? 52450.8 : 25120.45;
+    const spotPrice = spotQuote ? spotQuote.lastPrice : underlying.toUpperCase() === 'BANKNIFTY' ? 55256.65 : 22520.45;
 
     return this.catalog.buildOptionChain(
       underlying,

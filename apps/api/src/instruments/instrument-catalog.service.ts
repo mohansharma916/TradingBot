@@ -46,8 +46,11 @@ export class InstrumentCatalogService implements OnModuleInit {
       tickSize: 0.05,
     });
 
-    // 2. Index F&O Option Contracts for NIFTY (Strikes 24800 to 25400)
-    const niftyStrikes = [24800, 24850, 24900, 24950, 25000, 25050, 25100, 25150, 25200, 25250, 25300, 25350, 25400];
+    // 2. Index F&O Option Contracts for NIFTY (Strikes covering current spot ~22500 and legacy test range ~25100)
+    const niftyStrikes = [
+      22200, 22300, 22400, 22450, 22500, 22550, 22600, 22650, 22700, 22800,
+      24800, 24850, 24900, 24950, 25000, 25050, 25100, 25150, 25200, 25250, 25300, 25350, 25400,
+    ];
     for (const expiry of expiries) {
       for (const strike of niftyStrikes) {
         // CE
@@ -80,8 +83,11 @@ export class InstrumentCatalogService implements OnModuleInit {
       }
     }
 
-    // 3. Index F&O Option Contracts for BANKNIFTY (Strikes 51800 to 53000)
-    const bankNiftyStrikes = [51800, 52000, 52200, 52400, 52600, 52800, 53000];
+    // 3. Index F&O Option Contracts for BANKNIFTY (Strikes covering current spot ~55200 and legacy range ~52400)
+    const bankNiftyStrikes = [
+      51800, 52000, 52200, 52400, 52600, 52800, 53000,
+      54800, 55000, 55100, 55200, 55300, 55400, 55500, 55600, 55800,
+    ];
     for (const expiry of expiries) {
       for (const strike of bankNiftyStrikes) {
         // CE

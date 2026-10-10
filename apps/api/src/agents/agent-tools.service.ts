@@ -81,7 +81,7 @@ export class AgentToolsService {
     // Get spot price
     const spotKey = underlying === 'NIFTY' ? 'NSE_INDEX|Nifty 50' : 'NSE_INDEX|Nifty Bank';
     const spotQuote = this.feed.getQuote(spotKey);
-    const spotPrice = spotQuote?.lastPrice ?? (underlying === 'NIFTY' ? 25120.0 : 52350.0);
+    const spotPrice = spotQuote?.lastPrice ?? (underlying === 'NIFTY' ? 22520.45 : 55256.65);
 
     const instruments = this.catalog.getUnderlyingInstruments(underlying);
     const candidates: ScannedInstrumentCandidate[] = [];
