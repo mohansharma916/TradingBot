@@ -25,6 +25,7 @@ export enum StrategyStatus {
   ARMED = 'ARMED',
   PAUSED = 'PAUSED',
   RETIRED = 'RETIRED',
+  ARCHIVED = 'ARCHIVED',
 }
 
 export enum ProposalStatus {
@@ -160,3 +161,76 @@ export enum AlertSeverity {
   CRITICAL = 'CRITICAL',
   EMERGENCY = 'EMERGENCY',
 }
+
+export enum IndicatorType {
+  SMA = 'SMA',
+  EMA = 'EMA',
+  RSI = 'RSI',
+  MACD = 'MACD',
+  VWAP = 'VWAP',
+  BOLLINGER_BANDS = 'BOLLINGER_BANDS',
+  ATR = 'ATR',
+  ADX = 'ADX',
+  VOLUME = 'VOLUME',
+  OPEN_INTEREST = 'OPEN_INTEREST',
+  PRICE = 'PRICE',
+  HIGH = 'HIGH',
+  LOW = 'LOW',
+  OPEN = 'OPEN',
+  CLOSE = 'CLOSE',
+  PREV_HIGH = 'PREV_HIGH',
+  PREV_LOW = 'PREV_LOW',
+  HIGHEST_HIGH = 'HIGHEST_HIGH',
+  LOWEST_LOW = 'LOWEST_LOW',
+  OPENING_RANGE_HIGH = 'OPENING_RANGE_HIGH',
+  OPENING_RANGE_LOW = 'OPENING_RANGE_LOW',
+}
+
+export enum ComparisonOperator {
+  GT = 'GT',
+  LT = 'LT',
+  GTE = 'GTE',
+  LTE = 'LTE',
+  EQ = 'EQ',
+  NEQ = 'NEQ',
+  CROSSES_ABOVE = 'CROSSES_ABOVE',
+  CROSSES_BELOW = 'CROSSES_BELOW',
+  BETWEEN = 'BETWEEN',
+  INCREASING = 'INCREASING',
+  DECREASING = 'DECREASING',
+  PCT_CHANGE_ABOVE = 'PCT_CHANGE_ABOVE',
+  PCT_CHANGE_BELOW = 'PCT_CHANGE_BELOW',
+}
+
+export enum LogicalOperator {
+  AND = 'AND',
+  OR = 'OR',
+  NOT = 'NOT',
+}
+
+export enum TrailingProfitMode {
+  FIXED_STEP = 'FIXED_STEP',
+  PERCENTAGE = 'PERCENTAGE',
+  ATR_BASED = 'ATR_BASED',
+  PRICE_STRUCTURE = 'PRICE_STRUCTURE',
+}
+
+export enum StrikeSelection {
+  ATM = 'ATM',
+  ITM = 'ITM',
+  OTM = 'OTM',
+}
+
+export enum ExpirySelection {
+  CURRENT_WEEK = 'CURRENT_WEEK',
+  NEXT_WEEK = 'NEXT_WEEK',
+  MONTHLY = 'MONTHLY',
+  NEAREST_ELIGIBLE = 'NEAREST_ELIGIBLE',
+}
+
+export enum TradeDirection {
+  BULLISH = 'BULLISH',
+  BEARISH = 'BEARISH',
+  BOTH = 'BOTH',
+}
+

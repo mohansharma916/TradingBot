@@ -8,3 +8,6 @@ export * from './strategy-evaluator';
 export * from './strategy-version';
 export * from './order-state-machine';
 export * from './backtest-engine';
+export * from './strategy-rule-evaluator';
+export * from './strategy-templates';
+

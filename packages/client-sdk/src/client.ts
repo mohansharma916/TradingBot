@@ -37,6 +37,7 @@ import {
   DailyBotToday,
   BacktestRequest,
   BacktestResult,
+  StrategyAstConfig,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -341,6 +342,36 @@ export class TradingPlatformClient {
 
   public async runStrategyScan(id: string): Promise<any> {
     return this.request(`/strategies/${id}/scan`, {
+      method: 'POST',
+    });
+  }
+
+  public async getStrategyTemplates(): Promise<any[]> {
+    return this.request('/strategies/templates');
+  }
+
+  public async validateStrategyRules(astConfig: StrategyAstConfig): Promise<{ valid: boolean; errors: string[]; warnings: string[] }> {
+    return this.request('/strategies/validate', {
+      method: 'POST',
+      body: JSON.stringify(astConfig),
+    });
+  }
+
+  public async createStrategyFromTemplate(templateId: string, overrides?: any): Promise<StrategyConfig> {
+    return this.request(`/strategies/from-template/${templateId}`, {
+      method: 'POST',
+      body: JSON.stringify(overrides ?? {}),
+    });
+  }
+
+  public async duplicateStrategy(id: string): Promise<StrategyConfig> {
+    return this.request(`/strategies/${id}/duplicate`, {
+      method: 'POST',
+    });
+  }
+
+  public async archiveStrategy(id: string): Promise<StrategyConfig> {
+    return this.request(`/strategies/${id}/archive`, {
       method: 'POST',
     });
   }

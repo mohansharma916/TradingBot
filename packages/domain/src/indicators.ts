@@ -130,3 +130,236 @@ export function validateWarmup(
       : `Insufficient warm-up candles: ${availableCandles} available, minimum ${requiredCandles} required (EMA-${emaPeriod}, RSI-${rsiPeriod}).`,
   };
 }
+
+/**
+ * Simple Moving Average (SMA)
+ */
+export function calculateSMA(values: number[], period: number): number[] {
+  if (values.length < period || period <= 0) {
+    return [];
+  }
+  const result: number[] = [];
+  let sum = 0;
+  for (let i = 0; i < period; i++) {
+    sum += values[i]!;
+  }
+  result.push(Number((sum / period).toFixed(4)));
+
+  for (let i = period; i < values.length; i++) {
+    sum += values[i]! - values[i - period]!;
+    result.push(Number((sum / period).toFixed(4)));
+  }
+  return result;
+}
+
+/**
+ * Bollinger Bands
+ */
+export function calculateBollingerBands(
+  closes: number[],
+  period = 20,
+  multiplier = 2,
+): { upper: number[]; middle: number[]; lower: number[] } {
+  if (closes.length < period || period <= 0) {
+    return { upper: [], middle: [], lower: [] };
+  }
+
+  const upper: number[] = [];
+  const middle: number[] = [];
+  const lower: number[] = [];
+
+  for (let i = period - 1; i < closes.length; i++) {
+    const window = closes.slice(i - period + 1, i + 1);
+    const mean = window.reduce((a, b) => a + b, 0) / period;
+    const variance = window.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / period;
+    const stdDev = Math.sqrt(variance);
+
+    middle.push(Number(mean.toFixed(2)));
+    upper.push(Number((mean + multiplier * stdDev).toFixed(2)));
+    lower.push(Number((mean - multiplier * stdDev).toFixed(2)));
+  }
+
+  return { upper, middle, lower };
+}
+
+/**
+ * Moving Average Convergence Divergence (MACD)
+ */
+export function calculateMACD(
+  closes: number[],
+  fastPeriod = 12,
+  slowPeriod = 26,
+  signalPeriod = 9,
+): { macd: number[]; signal: number[]; histogram: number[] } {
+  if (closes.length < slowPeriod + signalPeriod) {
+    return { macd: [], signal: [], histogram: [] };
+  }
+
+  const fastEma = calculateEMA(closes, fastPeriod);
+  const slowEma = calculateEMA(closes, slowPeriod);
+
+  // Align fast EMA with slow EMA (slow EMA starts at slowPeriod - 1)
+  const offset = slowPeriod - fastPeriod;
+  const macdLine: number[] = [];
+  for (let i = 0; i < slowEma.length; i++) {
+    const fastVal = fastEma[i + offset]!;
+    const slowVal = slowEma[i]!;
+    macdLine.push(Number((fastVal - slowVal).toFixed(4)));
+  }
+
+  const signalLine = calculateEMA(macdLine, signalPeriod);
+  const macdAligned = macdLine.slice(signalPeriod - 1);
+  const histogram: number[] = [];
+
+  for (let i = 0; i < signalLine.length; i++) {
+    histogram.push(Number((macdAligned[i]! - signalLine[i]!).toFixed(4)));
+  }
+
+  return {
+    macd: macdAligned,
+    signal: signalLine,
+    histogram,
+  };
+}
+
+/**
+ * Average True Range (ATR)
+ */
+export function calculateATR(candles: Candle[], period = 14): number[] {
+  if (candles.length <= period || period <= 0) {
+    return [];
+  }
+
+  const trs: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const curr = candles[i]!;
+    const prev = candles[i - 1]!;
+    const tr = Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close),
+    );
+    trs.push(tr);
+  }
+
+  const atrValues: number[] = [];
+  let currentAtr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  atrValues.push(Number(currentAtr.toFixed(2)));
+
+  for (let i = period; i < trs.length; i++) {
+    currentAtr = (currentAtr * (period - 1) + trs[i]!) / period;
+    atrValues.push(Number(currentAtr.toFixed(2)));
+  }
+
+  return atrValues;
+}
+
+/**
+ * Average Directional Index (ADX)
+ */
+export function calculateADX(
+  candles: Candle[],
+  period = 14,
+): { adx: number[]; plusDI: number[]; minusDI: number[] } {
+  if (candles.length <= period * 2 || period <= 0) {
+    return { adx: [], plusDI: [], minusDI: [] };
+  }
+
+  const trs: number[] = [];
+  const plusDMs: number[] = [];
+  const minusDMs: number[] = [];
+
+  for (let i = 1; i < candles.length; i++) {
+    const curr = candles[i]!;
+    const prev = candles[i - 1]!;
+
+    const tr = Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close),
+    );
+    trs.push(tr);
+
+    const upMove = curr.high - prev.high;
+    const downMove = prev.low - curr.low;
+
+    plusDMs.push(upMove > downMove && upMove > 0 ? upMove : 0);
+    minusDMs.push(downMove > upMove && downMove > 0 ? downMove : 0);
+  }
+
+  let smoothedTr = trs.slice(0, period).reduce((a, b) => a + b, 0);
+  let smoothedPlusDM = plusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+  let smoothedMinusDM = minusDMs.slice(0, period).reduce((a, b) => a + b, 0);
+
+  const dxValues: number[] = [];
+  const plusDIValues: number[] = [];
+  const minusDIValues: number[] = [];
+
+  for (let i = period; i < trs.length; i++) {
+    smoothedTr = smoothedTr - smoothedTr / period + trs[i]!;
+    smoothedPlusDM = smoothedPlusDM - smoothedPlusDM / period + plusDMs[i]!;
+    smoothedMinusDM = smoothedMinusDM - smoothedMinusDM / period + minusDMs[i]!;
+
+    const plusDI = smoothedTr === 0 ? 0 : (smoothedPlusDM / smoothedTr) * 100;
+    const minusDI = smoothedTr === 0 ? 0 : (smoothedMinusDM / smoothedTr) * 100;
+    const diDiff = Math.abs(plusDI - minusDI);
+    const diSum = plusDI + minusDI;
+    const dx = diSum === 0 ? 0 : (diDiff / diSum) * 100;
+
+    plusDIValues.push(Number(plusDI.toFixed(2)));
+    minusDIValues.push(Number(minusDI.toFixed(2)));
+    dxValues.push(dx);
+  }
+
+  if (dxValues.length < period) {
+    return { adx: [], plusDI: plusDIValues, minusDI: minusDIValues };
+  }
+
+  const adxValues: number[] = [];
+  let currentAdx = dxValues.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  adxValues.push(Number(currentAdx.toFixed(2)));
+
+  for (let i = period; i < dxValues.length; i++) {
+    currentAdx = (currentAdx * (period - 1) + dxValues[i]!) / period;
+    adxValues.push(Number(currentAdx.toFixed(2)));
+  }
+
+  return {
+    adx: adxValues,
+    plusDI: plusDIValues.slice(plusDIValues.length - adxValues.length),
+    minusDI: minusDIValues.slice(minusDIValues.length - adxValues.length),
+  };
+}
+
+/**
+ * Rolling Highest High over N candles
+ */
+export function calculateHighestHigh(candles: Candle[], period: number): number[] {
+  if (candles.length < period || period <= 0) return [];
+  const result: number[] = [];
+  for (let i = period - 1; i < candles.length; i++) {
+    let max = -Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (candles[j]!.high > max) max = candles[j]!.high;
+    }
+    result.push(Number(max.toFixed(2)));
+  }
+  return result;
+}
+
+/**
+ * Rolling Lowest Low over N candles
+ */
+export function calculateLowestLow(candles: Candle[], period: number): number[] {
+  if (candles.length < period || period <= 0) return [];
+  const result: number[] = [];
+  for (let i = period - 1; i < candles.length; i++) {
+    let min = Infinity;
+    for (let j = i - period + 1; j <= i; j++) {
+      if (candles[j]!.low < min) min = candles[j]!.low;
+    }
+    result.push(Number(min.toFixed(2)));
+  }
+  return result;
+}
+

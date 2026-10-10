@@ -9,6 +9,7 @@ import {
   MoneynessType,
   BacktestResult,
 } from '@trading-bot/contracts';
+import { PREDEFINED_STRATEGY_TEMPLATES, StrategyTemplateItem } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
 import {
   loadSavedDraft,
@@ -17,6 +18,12 @@ import {
   tradingDateInIst,
   StoredDailyBotDraft,
 } from '../src/features/daily-bot/config';
+import { StrategyLabTab } from '../src/features/strategy-lab/types';
+import { StrategyCard } from '../src/features/strategy-lab/StrategyCard';
+import { CreateChoiceModal } from '../src/features/strategy-lab/CreateChoiceModal';
+import { TemplateGalleryModal } from '../src/features/strategy-lab/TemplateGalleryModal';
+import { TemplateCustomizerModal } from '../src/features/strategy-lab/TemplateCustomizerModal';
+import { NoCodeRuleBuilderModal } from '../src/features/strategy-lab/NoCodeRuleBuilderModal';
 
 export default function StrategiesScreen() {
   const router = useRouter();
@@ -30,6 +37,19 @@ export default function StrategiesScreen() {
   const [selectedStrategyId, setSelectedStrategyId] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [feedback, setFeedback] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(null);
+
+  // Strategy Lab Filters & Tabs
+  const [currentTab, setCurrentTab] = useState<StrategyLabTab>('MY_STRATEGIES');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [underlyingFilter, setUnderlyingFilter] = useState<'ALL' | 'NIFTY' | 'BANKNIFTY'>('ALL');
+
+  // Strategy Lab Modals
+  const [isChoiceModalOpen, setIsChoiceModalOpen] = useState<boolean>(false);
+  const [isGalleryModalOpen, setIsGalleryModalOpen] = useState<boolean>(false);
+  const [isCustomizerModalOpen, setIsCustomizerModalOpen] = useState<boolean>(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<StrategyTemplateItem | null>(null);
+  const [isNoCodeModalOpen, setIsNoCodeModalOpen] = useState<boolean>(false);
+  const [editingStrategy, setEditingStrategy] = useState<StrategyConfig | null>(null);
 
   // Backtest state
   const [backtestDays, setBacktestDays] = useState<number>(14);
@@ -45,7 +65,7 @@ export default function StrategiesScreen() {
   const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
 
-  // Modals state
+  // Legacy Modals state
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState<boolean>(false);
@@ -208,9 +228,14 @@ export default function StrategiesScreen() {
     }
   };
 
-  // Quick edit strategy
+  // Open editor for a strategy (No-Code if astConfig present, else legacy form)
   const handleOpenEdit = (strat: StrategyConfig) => {
     setSelectedStrategyId(strat.id);
+    if (strat.astConfig) {
+      setEditingStrategy(strat);
+      setIsNoCodeModalOpen(true);
+      return;
+    }
     setEditForm({
       name: strat.name,
       emaPeriod: strat.entry?.emaPeriod ?? 20,
@@ -222,6 +247,87 @@ export default function StrategiesScreen() {
       maxTradesPerDay: strat.risk?.maxTradesPerDay ?? 3,
     });
     setIsEditModalOpen(true);
+  };
+
+  // Duplicate an existing strategy
+  const handleDuplicateStrategy = async (strat: StrategyConfig) => {
+    try {
+      const dup = await apiClient.duplicateStrategy(strat.id);
+      await loadStrategies();
+      setSelectedStrategyId(dup.id);
+      showFeedback(`Strategy duplicated as "${dup.name}"!`, 'success');
+    } catch (err: any) {
+      showFeedback(`Failed to duplicate strategy: ${err.message}`, 'error');
+    }
+  };
+
+  // Toggle Archive status on a strategy
+  const handleArchiveStrategy = async (strat: StrategyConfig) => {
+    try {
+      const updated = await apiClient.archiveStrategy(strat.id);
+      await loadStrategies();
+      showFeedback(
+        updated.isArchived
+          ? `Strategy "${updated.name}" moved to Archived.`
+          : `Strategy "${updated.name}" restored to Active.`,
+        'info'
+      );
+    } catch (err: any) {
+      showFeedback(`Failed to archive strategy: ${err.message}`, 'error');
+    }
+  };
+
+  // Save customized strategy from Template Customizer
+  const handleSaveCustomizer = async (config: Partial<StrategyConfig>, isDraft?: boolean) => {
+    try {
+      const created = await apiClient.createStrategy(config as any);
+      await loadStrategies();
+      setSelectedStrategyId(created.id);
+      setIsCustomizerModalOpen(false);
+      setSelectedTemplate(null);
+      showFeedback(
+        `Strategy "${created.name}" created from template (${isDraft ? 'Draft' : 'Paper Active'})!`,
+        'success'
+      );
+    } catch (err: any) {
+      showFeedback(`Failed to save template strategy: ${err.message}`, 'error');
+    }
+  };
+
+  // Save strategy from No-Code Rule Builder
+  const handleSaveNoCode = async (config: Partial<StrategyConfig>, isDraft?: boolean) => {
+    try {
+      let saved: StrategyConfig;
+      if (editingStrategy && editingStrategy.id) {
+        saved = await apiClient.updateStrategy(editingStrategy.id, config as any);
+        showFeedback(`Updated "${saved.name}" to revision v${saved.version}!`, 'success');
+      } else {
+        saved = await apiClient.createStrategy(config as any);
+        showFeedback(
+          `Created "${saved.name}" successfully (${isDraft ? 'Draft' : 'Paper Active'})!`,
+          'success'
+        );
+      }
+      await loadStrategies();
+      setSelectedStrategyId(saved.id);
+      setIsNoCodeModalOpen(false);
+      setEditingStrategy(null);
+    } catch (err: any) {
+      showFeedback(`Failed to save strategy: ${err.message}`, 'error');
+    }
+  };
+
+  // Quick clone template without customization
+  const handleQuickCloneTemplate = async (template: StrategyTemplateItem) => {
+    try {
+      const created = await apiClient.createStrategyFromTemplate(template.id);
+      await loadStrategies();
+      setSelectedStrategyId(created.id);
+      showFeedback(`Template "${template.name}" cloned into My Strategies!`, 'success');
+      setCurrentTab('MY_STRATEGIES');
+    } catch (err: any) {
+      showFeedback(`Failed to clone template: ${err.message}`, 'error');
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -416,7 +522,7 @@ export default function StrategiesScreen() {
           )}
 
           <button
-            onClick={() => setIsCreateModalOpen(true)}
+            onClick={() => setIsChoiceModalOpen(true)}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -432,7 +538,27 @@ export default function StrategiesScreen() {
             }}
           >
             <span>➕</span>
-            <span>Create New Strategy</span>
+            <span>Create Strategy</span>
+          </button>
+
+          <button
+            onClick={() => setIsGalleryModalOpen(true)}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: `${spacing.sm}px ${spacing.md}px`,
+              backgroundColor: 'rgba(59, 130, 246, 0.15)',
+              border: `1px solid ${colors.brand}`,
+              color: colors.brand,
+              borderRadius: borderRadius.md,
+              cursor: 'pointer',
+              fontWeight: typography.fontWeight.semibold,
+              fontSize: typography.fontSize.sm,
+            }}
+          >
+            <span>📑</span>
+            <span>Templates Gallery</span>
           </button>
 
           <button
@@ -495,231 +621,390 @@ export default function StrategiesScreen() {
         </div>
       )}
 
-      {/* --- Section 1: Registered Strategies Cards --- */}
+      {/* --- Section 1: Strategy Lab Tabs & Cards --- */}
       <div style={{ marginBottom: spacing.xl }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: spacing.md }}>
-          <h2 style={{ fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold, margin: 0 }}>
-            Available Strategies ({strategies.length})
-          </h2>
-          <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>
-            All strategies strictly enforce statutory SEBI limits & single-position bounds
-          </span>
+        {/* Lab Header & Subtitle */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.sm, marginBottom: spacing.md }}>
+          <div>
+            <h2 style={{ fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold, margin: 0, color: colors.textPrimary }}>
+              Strategy Lab
+            </h2>
+            <p style={{ margin: 0, fontSize: typography.fontSize.xs, color: colors.textSecondary, marginTop: 2 }}>
+              Build and manage quantitative F&O systems via predefined templates or no-code visual rule blocks.
+            </p>
+          </div>
         </div>
 
-        {isLoading && strategies.length === 0 ? (
-          <div style={{ padding: spacing.xl, backgroundColor: colors.surface, borderRadius: borderRadius.lg, textAlign: 'center', color: colors.textSecondary }}>
-            Loading strategies from API...
-          </div>
-        ) : strategies.length === 0 ? (
-          <div style={{ padding: spacing.xl, backgroundColor: colors.surface, borderRadius: borderRadius.lg, textAlign: 'center' }}>
-            <p style={{ color: colors.textSecondary, marginBottom: spacing.md }}>No strategies found.</p>
-            <button
-              onClick={() => setIsCreateModalOpen(true)}
-              style={{
-                padding: `${spacing.sm}px ${spacing.md}px`,
-                backgroundColor: colors.cyan,
-                border: 'none',
-                color: '#082F49',
-                borderRadius: borderRadius.md,
-                cursor: 'pointer',
-                fontWeight: typography.fontWeight.bold,
-              }}
-            >
-              ➕ Create Your First Strategy
-            </button>
-          </div>
-        ) : (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: spacing.md }}>
-            {strategies.map((strat) => {
-              const isSelected = strat.id === selectedStrategyId;
-              const isCall = strat.allowedInstruments?.includes(AllowedOptionType.LONG_CALL);
+        {/* Category Tabs */}
+        <div
+          style={{
+            display: 'flex',
+            gap: spacing.xs,
+            overflowX: 'auto',
+            paddingBottom: spacing.sm,
+            borderBottom: `1px solid ${colors.border}`,
+            marginBottom: spacing.md,
+          }}
+        >
+          {[
+            { id: 'MY_STRATEGIES' as StrategyLabTab, label: 'My Strategies', icon: '🌟', count: strategies.filter((s) => !s.isArchived && s.status !== StrategyStatus.ARCHIVED).length },
+            { id: 'TEMPLATES' as StrategyLabTab, label: 'Predefined Templates', icon: '📑', count: PREDEFINED_STRATEGY_TEMPLATES.length },
+            { id: 'DRAFTS' as StrategyLabTab, label: 'Draft Strategies', icon: '📝', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.DRAFT).length },
+            { id: 'BACKTESTED' as StrategyLabTab, label: 'Backtested', icon: '🧪', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.BACKTESTED).length },
+            { id: 'PAPER' as StrategyLabTab, label: 'Paper-Tested', icon: '📄', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.PAPER_ACTIVE).length },
+            { id: 'LIVE_ELIGIBLE' as StrategyLabTab, label: 'Live-Eligible', icon: '🛡️', count: strategies.filter((s) => !s.isArchived && (s.status === StrategyStatus.APPROVAL_READY || s.status === StrategyStatus.AUTO_ELIGIBLE)).length },
+            { id: 'ARCHIVED' as StrategyLabTab, label: 'Archived', icon: '🗄️', count: strategies.filter((s) => s.isArchived || s.status === StrategyStatus.ARCHIVED).length },
+          ].map((tab) => {
+            const isActive = currentTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setCurrentTab(tab.id)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '6px 12px',
+                  borderRadius: borderRadius.md,
+                  backgroundColor: isActive ? 'rgba(6, 182, 212, 0.15)' : colors.surface,
+                  border: `1px solid ${isActive ? colors.cyan : colors.border}`,
+                  color: isActive ? colors.cyan : colors.textSecondary,
+                  fontWeight: isActive ? typography.fontWeight.bold : typography.fontWeight.normal,
+                  fontSize: typography.fontSize.xs,
+                  cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                  transition: 'all 0.15s ease',
+                }}
+              >
+                <span>{tab.icon}</span>
+                <span>{tab.label}</span>
+                <span
+                  style={{
+                    backgroundColor: isActive ? colors.cyan : colors.surfaceElevated,
+                    color: isActive ? '#082F49' : colors.textMuted,
+                    fontSize: 10,
+                    padding: '1px 6px',
+                    borderRadius: 10,
+                    fontWeight: typography.fontWeight.bold,
+                  }}
+                >
+                  {tab.count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
 
+        {/* Search & Underlying Filter Bar */}
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: spacing.sm,
+            marginBottom: spacing.md,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm, flex: 1, minWidth: 260 }}>
+            <input
+              type="text"
+              placeholder={currentTab === 'TEMPLATES' ? 'Search templates...' : 'Search strategies by name, description, indicator...'}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{
+                flex: 1,
+                maxWidth: 400,
+                backgroundColor: colors.surface,
+                border: `1px solid ${colors.border}`,
+                color: colors.textPrimary,
+                borderRadius: borderRadius.md,
+                padding: '6px 12px',
+                fontSize: typography.fontSize.xs,
+              }}
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                style={{ background: 'none', border: 'none', color: colors.textMuted, cursor: 'pointer', fontSize: 12 }}
+              >
+                ✕ Clear
+              </button>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Underlying:</span>
+            {(['ALL', 'NIFTY', 'BANKNIFTY'] as const).map((u) => (
+              <button
+                key={u}
+                onClick={() => setUnderlyingFilter(u)}
+                style={{
+                  padding: '4px 8px',
+                  borderRadius: borderRadius.sm,
+                  backgroundColor: underlyingFilter === u ? colors.cyan : colors.surfaceElevated,
+                  color: underlyingFilter === u ? '#082F49' : colors.textSecondary,
+                  border: `1px solid ${underlyingFilter === u ? colors.cyan : colors.border}`,
+                  fontSize: 11,
+                  fontWeight: underlyingFilter === u ? typography.fontWeight.bold : typography.fontWeight.normal,
+                  cursor: 'pointer',
+                }}
+              >
+                {u}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* TAB CONTENT: PREDEFINED TEMPLATES */}
+        {currentTab === 'TEMPLATES' && (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: spacing.md }}>
+            {PREDEFINED_STRATEGY_TEMPLATES.filter((tpl) => {
+              if (searchQuery.trim()) {
+                const q = searchQuery.toLowerCase();
+                if (!tpl.name.toLowerCase().includes(q) && !tpl.description.toLowerCase().includes(q)) return false;
+              }
+              if (underlyingFilter !== 'ALL' && tpl.recommendedUnderlying !== underlyingFilter) return false;
+              return true;
+            }).map((tpl) => {
+              const indicators = tpl.astConfig.indicators?.map((i) => `${i.type}${i.period ? ` (${i.period})` : ''}`) || [];
               return (
                 <div
-                  key={strat.id}
+                  key={tpl.id}
                   style={{
                     backgroundColor: colors.surface,
                     borderRadius: borderRadius.lg,
-                    border: `1px solid ${isSelected ? colors.cyan : colors.border}`,
+                    border: `1px solid ${colors.border}`,
                     padding: spacing.md,
                     display: 'flex',
                     flexDirection: 'column',
                     justifyContent: 'space-between',
-                    boxShadow: isSelected ? '0 0 15px rgba(6, 182, 212, 0.15)' : 'none',
-                    transition: 'all 0.2s ease',
+                    gap: spacing.sm,
                   }}
                 >
-                  {/* Card Header */}
                   <div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: spacing.sm }}>
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: spacing.xs, flexWrap: 'wrap' }}>
-                          <span style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.md }}>{strat.name}</span>
-                          <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, backgroundColor: colors.surfaceElevated, padding: '2px 6px', borderRadius: borderRadius.sm }}>
-                            v{strat.version}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, marginTop: 2 }}>
-                          {strat.underlying} · {strat.timeframe} Candlestick · {strat.session?.start}–{strat.session?.lastEntry} IST
-                        </div>
-                      </div>
-                      <Badge
-                        label={strat.status === StrategyStatus.PAPER_ACTIVE ? 'PAPER ACTIVE' : 'LIVE READY'}
-                        variant={strat.status === StrategyStatus.PAPER_ACTIVE ? 'purple' : 'primary'}
-                      />
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                      <span style={{ fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.md, color: colors.textPrimary }}>
+                        {tpl.name}
+                      </span>
+                      <Badge label={tpl.category} variant="primary" />
                     </div>
+                    <p style={{ margin: 0, color: colors.textSecondary, fontSize: typography.fontSize.xs, lineHeight: 1.4 }}>
+                      {tpl.description}
+                    </p>
 
-                    {/* Quick Badges */}
-                    <div style={{ display: 'flex', gap: spacing.xs, flexWrap: 'wrap', marginBottom: spacing.md }}>
-                      <span style={{ fontSize: typography.fontSize.xs, padding: '3px 8px', borderRadius: borderRadius.sm, backgroundColor: isCall ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)', color: isCall ? colors.profit : colors.loss, fontWeight: typography.fontWeight.semibold }}>
-                        {isCall ? '📈 Long Call (CE)' : '📉 Long Put (PE)'}
-                      </span>
-                      <span style={{ fontSize: typography.fontSize.xs, padding: '3px 8px', borderRadius: borderRadius.sm, backgroundColor: colors.surfaceElevated, color: colors.textSecondary }}>
-                        ATM Strikes
-                      </span>
-                      <span style={{ fontSize: typography.fontSize.xs, padding: '3px 8px', borderRadius: borderRadius.sm, backgroundColor: colors.surfaceElevated, color: colors.textSecondary }}>
-                        EMA {strat.entry?.emaPeriod ?? 20} & RSI {strat.entry?.rsiThreshold ?? 55}+
-                      </span>
-                    </div>
-
-                    {/* Rule Metrics Grid */}
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: spacing.sm, backgroundColor: colors.surfaceElevated, padding: spacing.sm, borderRadius: borderRadius.md, marginBottom: spacing.md }}>
-                      <div>
-                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Max Capital</span>
-                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
-                          ₹{strat.risk?.maxCapitalInr?.toLocaleString('en-IN') ?? '10,000'}
+                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: spacing.sm }}>
+                      <Badge label={tpl.recommendedUnderlying} variant="neutral" />
+                      <Badge label={`${tpl.recommendedTimeframe} Candles`} variant="neutral" />
+                      {indicators.map((ind, i) => (
+                        <span
+                          key={i}
+                          style={{
+                            fontSize: 10,
+                            padding: '2px 6px',
+                            borderRadius: borderRadius.sm,
+                            backgroundColor: colors.surfaceElevated,
+                            color: colors.textMuted,
+                            fontWeight: typography.fontWeight.semibold,
+                          }}
+                        >
+                          {ind}
                         </span>
-                      </div>
-                      <div>
-                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Max Loss / Trade</span>
-                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.loss }}>
-                          ₹{strat.risk?.maxAllInTradeLossInr ?? 200}
-                        </span>
-                      </div>
-                      <div>
-                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Target Profit</span>
-                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.profit }}>
-                          ₹{strat.risk?.targetNetProfitInr ?? 300}
-                        </span>
-                      </div>
-                      <div>
-                        <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted, display: 'block' }}>Daily Trades Cap</span>
-                        <span style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
-                          {strat.risk?.maxTradesPerDay ?? 3} trades
-                        </span>
-                      </div>
+                      ))}
                     </div>
                   </div>
 
-                  {/* Actions Bar */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xs, borderTop: `1px solid ${colors.border}`, paddingTop: spacing.sm }}>
-                    <div style={{ display: 'flex', gap: spacing.xs }}>
-                      <button
-                        onClick={() => handleUseInDailyBot(strat)}
-                        style={{
-                          flex: 1,
-                          padding: `${spacing.sm}px ${spacing.sm}px`,
-                          backgroundColor: colors.cyan,
-                          border: 'none',
-                          color: '#082F49',
-                          borderRadius: borderRadius.md,
-                          fontWeight: typography.fontWeight.bold,
-                          fontSize: typography.fontSize.xs,
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: 4,
-                        }}
-                      >
-                        <span>⚡</span>
-                        <span>Use in Daily Bot</span>
-                      </button>
+                  <div style={{ display: 'flex', gap: spacing.xs, borderTop: `1px solid ${colors.border}`, paddingTop: spacing.sm, marginTop: spacing.xs }}>
+                    <button
+                      onClick={() => {
+                        setSelectedTemplate(tpl);
+                        setIsCustomizerModalOpen(true);
+                      }}
+                      style={{
+                        flex: 1,
+                        padding: `${spacing.sm}px ${spacing.sm}px`,
+                        backgroundColor: colors.cyan,
+                        border: 'none',
+                        color: '#082F49',
+                        borderRadius: borderRadius.md,
+                        fontWeight: typography.fontWeight.bold,
+                        fontSize: typography.fontSize.xs,
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 4,
+                      }}
+                    >
+                      <span>⚡</span>
+                      <span>Customize</span>
+                    </button>
 
-                      <button
-                        onClick={() => {
-                          setSelectedStrategyId(strat.id);
-                          setBacktestUnderlying((strat.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
-                          handleRunBacktest(strat);
-                          if (backtestRef.current) {
-                            backtestRef.current.scrollIntoView({ behavior: 'smooth' });
-                          }
-                        }}
-                        style={{
-                          flex: 1,
-                          padding: `${spacing.sm}px ${spacing.sm}px`,
-                          backgroundColor: 'rgba(59, 130, 246, 0.15)',
-                          border: `1px solid ${colors.brand}`,
-                          color: colors.brand,
-                          borderRadius: borderRadius.md,
-                          fontWeight: typography.fontWeight.semibold,
-                          fontSize: typography.fontSize.xs,
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: 4,
-                        }}
-                      >
-                        <span>🧪</span>
-                        <span>Backtest</span>
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => handleQuickCloneTemplate(tpl)}
+                      style={{
+                        flex: 1,
+                        padding: `${spacing.sm}px ${spacing.sm}px`,
+                        backgroundColor: colors.surfaceElevated,
+                        border: `1px solid ${colors.border}`,
+                        color: colors.textPrimary,
+                        borderRadius: borderRadius.md,
+                        fontSize: typography.fontSize.xs,
+                        fontWeight: typography.fontWeight.semibold,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      📋 Quick Clone
+                    </button>
 
-                    <div style={{ display: 'flex', gap: spacing.xs }}>
-                      <button
-                        onClick={() => handleOpenEdit(strat)}
-                        style={{
-                          flex: 1,
-                          padding: '6px 8px',
-                          backgroundColor: colors.surfaceElevated,
-                          border: `1px solid ${colors.border}`,
-                          color: colors.textSecondary,
-                          borderRadius: borderRadius.sm,
-                          fontSize: typography.fontSize.xs,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        ✏️ Edit Rules
-                      </button>
-
-                      <button
-                        onClick={() => handleOpenHistory(strat)}
-                        style={{
-                          flex: 1,
-                          padding: '6px 8px',
-                          backgroundColor: colors.surfaceElevated,
-                          border: `1px solid ${colors.border}`,
-                          color: colors.textSecondary,
-                          borderRadius: borderRadius.sm,
-                          fontSize: typography.fontSize.xs,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        📜 History
-                      </button>
-
-                      <button
-                        onClick={() => handleRunAgentScan(strat)}
-                        style={{
-                          flex: 1,
-                          padding: '6px 8px',
-                          backgroundColor: colors.surfaceElevated,
-                          border: `1px solid ${colors.border}`,
-                          color: colors.textSecondary,
-                          borderRadius: borderRadius.sm,
-                          fontSize: typography.fontSize.xs,
-                          cursor: 'pointer',
-                        }}
-                      >
-                        🔍 Scan
-                      </button>
-                    </div>
+                    <button
+                      onClick={() => {
+                        const tplConfig: StrategyConfig = {
+                          ...(tpl.defaultConfig as any),
+                          id: tpl.id,
+                          name: tpl.name,
+                          underlying: tpl.recommendedUnderlying,
+                          timeframe: tpl.recommendedTimeframe,
+                          astConfig: tpl.astConfig,
+                        };
+                        setSelectedStrategyId(tpl.id);
+                        setBacktestUnderlying(tpl.recommendedUnderlying);
+                        handleRunBacktest(tplConfig);
+                        if (backtestRef.current) {
+                          backtestRef.current.scrollIntoView({ behavior: 'smooth' });
+                        }
+                      }}
+                      style={{
+                        padding: `${spacing.sm}px 10px`,
+                        backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                        border: `1px solid ${colors.brand}`,
+                        color: colors.brand,
+                        borderRadius: borderRadius.md,
+                        fontSize: typography.fontSize.xs,
+                        fontWeight: typography.fontWeight.semibold,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      🧪 Test
+                    </button>
                   </div>
                 </div>
               );
             })}
           </div>
+        )}
+
+        {/* TAB CONTENT: STRATEGY CARDS */}
+        {currentTab !== 'TEMPLATES' && (
+          <>
+            {isLoading && strategies.length === 0 ? (
+              <div style={{ padding: spacing.xl, backgroundColor: colors.surface, borderRadius: borderRadius.lg, textAlign: 'center', color: colors.textSecondary }}>
+                Loading strategies from API...
+              </div>
+            ) : (() => {
+              const filteredList = strategies.filter((s) => {
+                if (searchQuery.trim()) {
+                  const q = searchQuery.toLowerCase();
+                  const matchesName = s.name.toLowerCase().includes(q);
+                  const matchesDesc = s.description?.toLowerCase().includes(q);
+                  const matchesUnderlying = s.underlying.toLowerCase().includes(q);
+                  if (!matchesName && !matchesDesc && !matchesUnderlying) return false;
+                }
+
+                if (underlyingFilter !== 'ALL' && s.underlying !== underlyingFilter) {
+                  return false;
+                }
+
+                const isArch = s.isArchived === true || s.status === StrategyStatus.ARCHIVED;
+                if (currentTab === 'ARCHIVED') return isArch;
+                if (isArch) return false;
+
+                switch (currentTab) {
+                  case 'MY_STRATEGIES':
+                    return true;
+                  case 'DRAFTS':
+                    return s.status === StrategyStatus.DRAFT;
+                  case 'BACKTESTED':
+                    return s.status === StrategyStatus.BACKTESTED;
+                  case 'PAPER':
+                    return s.status === StrategyStatus.PAPER_ACTIVE;
+                  case 'LIVE_ELIGIBLE':
+                    return s.status === StrategyStatus.APPROVAL_READY || s.status === StrategyStatus.AUTO_ELIGIBLE;
+                  default:
+                    return true;
+                }
+              });
+
+              if (filteredList.length === 0) {
+                return (
+                  <div style={{ padding: spacing.xl, backgroundColor: colors.surface, borderRadius: borderRadius.lg, textAlign: 'center' }}>
+                    <p style={{ color: colors.textSecondary, marginBottom: spacing.md }}>
+                      No strategies found in this category.
+                    </p>
+                    <div style={{ display: 'flex', justifyContent: 'center', gap: spacing.sm }}>
+                      <button
+                        onClick={() => setIsChoiceModalOpen(true)}
+                        style={{
+                          padding: `${spacing.sm}px ${spacing.md}px`,
+                          backgroundColor: colors.cyan,
+                          border: 'none',
+                          color: '#082F49',
+                          borderRadius: borderRadius.md,
+                          cursor: 'pointer',
+                          fontWeight: typography.fontWeight.bold,
+                        }}
+                      >
+                        ➕ Create Strategy
+                      </button>
+                      <button
+                        onClick={() => setCurrentTab('TEMPLATES')}
+                        style={{
+                          padding: `${spacing.sm}px ${spacing.md}px`,
+                          backgroundColor: colors.surfaceElevated,
+                          border: `1px solid ${colors.border}`,
+                          color: colors.textPrimary,
+                          borderRadius: borderRadius.md,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        📑 Browse Predefined Templates
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
+
+              return (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: spacing.md }}>
+                  {filteredList.map((strat) => (
+                    <StrategyCard
+                      key={strat.id}
+                      strategy={strat}
+                      isSelected={strat.id === selectedStrategyId}
+                      onSelect={() => {
+                        setSelectedStrategyId(strat.id);
+                        setBacktestUnderlying((strat.underlying as any) || 'NIFTY');
+                      }}
+                      onEdit={() => handleOpenEdit(strat)}
+                      onDuplicate={() => handleDuplicateStrategy(strat)}
+                      onTest={() => {
+                        setSelectedStrategyId(strat.id);
+                        setBacktestUnderlying((strat.underlying as any) || 'NIFTY');
+                        handleRunBacktest(strat);
+                        if (backtestRef.current) {
+                          backtestRef.current.scrollIntoView({ behavior: 'smooth' });
+                        }
+                      }}
+                      onArchive={() => handleArchiveStrategy(strat)}
+                      onUseInDailyBot={() => handleUseInDailyBot(strat)}
+                      onHistory={() => handleOpenHistory(strat)}
+                      onScan={() => handleRunAgentScan(strat)}
+                    />
+                  ))}
+                </div>
+              );
+            })()}
+          </>
         )}
       </div>
 
@@ -1789,6 +2074,69 @@ export default function StrategiesScreen() {
           </div>
         </div>
       )}
+
+      {/* --- Strategy Lab Modal: Creation Choice (Template vs Scratch) --- */}
+      <CreateChoiceModal
+        isOpen={isChoiceModalOpen}
+        onClose={() => setIsChoiceModalOpen(false)}
+        onSelectTemplate={() => {
+          setIsChoiceModalOpen(false);
+          setIsGalleryModalOpen(true);
+        }}
+        onSelectNoCode={() => {
+          setIsChoiceModalOpen(false);
+          setEditingStrategy(null);
+          setIsNoCodeModalOpen(true);
+        }}
+      />
+
+      {/* --- Strategy Lab Modal: Template Gallery --- */}
+      <TemplateGalleryModal
+        isOpen={isGalleryModalOpen}
+        onClose={() => setIsGalleryModalOpen(false)}
+        onSelectCustomize={(tpl: StrategyTemplateItem) => {
+          setIsGalleryModalOpen(false);
+          setSelectedTemplate(tpl);
+          setIsCustomizerModalOpen(true);
+        }}
+        onQuickClone={handleQuickCloneTemplate}
+      />
+
+      {/* --- Strategy Lab Modal: Template Customizer --- */}
+      <TemplateCustomizerModal
+        isOpen={isCustomizerModalOpen}
+        template={selectedTemplate}
+        onClose={() => {
+          setIsCustomizerModalOpen(false);
+          setSelectedTemplate(null);
+        }}
+        onSave={handleSaveCustomizer}
+        onBacktest={(cfg) => {
+          setIsCustomizerModalOpen(false);
+          handleRunBacktest(cfg as any);
+          if (backtestRef.current) {
+            backtestRef.current.scrollIntoView({ behavior: 'smooth' });
+          }
+        }}
+      />
+
+      {/* --- Strategy Lab Modal: Visual No-Code Rule Builder --- */}
+      <NoCodeRuleBuilderModal
+        isOpen={isNoCodeModalOpen}
+        initialStrategy={editingStrategy}
+        onClose={() => {
+          setIsNoCodeModalOpen(false);
+          setEditingStrategy(null);
+        }}
+        onSave={handleSaveNoCode}
+        onBacktest={(cfg) => {
+          setIsNoCodeModalOpen(false);
+          handleRunBacktest(cfg as any);
+          if (backtestRef.current) {
+            backtestRef.current.scrollIntoView({ behavior: 'smooth' });
+          }
+        }}
+      />
 
     </div>
   );

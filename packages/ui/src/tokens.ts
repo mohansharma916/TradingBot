@@ -36,6 +36,14 @@ export const colors = {
   paperMuted: 'rgba(99, 102, 241, 0.15)',
 
   overlay: 'rgba(0, 0, 0, 0.75)',
+
+  // Semantic Aliases
+  primary: '#3B82F6',
+  accent: '#06B6D4',
+  success: '#10B981',
+  error: '#EF4444',
+  text: '#F8FAFC',
+  surfaceHover: '#1F2937',
 };
 
 export const spacing = {
@@ -77,4 +85,11 @@ export const typography = {
     sans: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
     mono: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
   },
+  h1: { fontSize: 28, fontWeight: '700' as const },
+  h2: { fontSize: 24, fontWeight: '700' as const },
+  h3: { fontSize: 20, fontWeight: '700' as const },
+  h4: { fontSize: 16, fontWeight: '700' as const },
+  body: { fontSize: 14, fontWeight: '400' as const },
+  bodySm: { fontSize: 13, fontWeight: '400' as const },
+  caption: { fontSize: 11, fontWeight: '500' as const },
 };

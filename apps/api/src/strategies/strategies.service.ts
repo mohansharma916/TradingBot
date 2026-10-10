@@ -8,12 +8,15 @@ import {
   BacktestRequestSchema,
   BacktestResult,
   MoneynessType,
+  StrategyAstConfigSchema,
   StrategyConfig,
   StrategyConfigSchema,
   StrategyStatus,
   TradeMode,
 } from '@trading-bot/contracts';
 import {
+  PREDEFINED_STRATEGY_TEMPLATES,
+  StrategyTemplateItem,
   calculateStrategyVersionHash,
   fetchRealHistoricalCandles,
   requiresVersionBump,
@@ -150,6 +153,134 @@ export class StrategiesService {
     return parsed;
   }
 
+  public getTemplates(): StrategyTemplateItem[] {
+    return PREDEFINED_STRATEGY_TEMPLATES;
+  }
+
+  public validateStrategyAst(astConfig: any): { valid: boolean; errors: string[]; warnings: string[] } {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    const parsed = StrategyAstConfigSchema.safeParse(astConfig);
+    if (!parsed.success) {
+      for (const issue of parsed.error.issues) {
+        errors.push(`${issue.path.join('.')}: ${issue.message}`);
+      }
+      return { valid: false, errors, warnings };
+    }
+
+    const ast = parsed.data;
+    const indicatorIds = new Set((ast.indicators || []).map((i) => i.id));
+
+    // Check indicator uniqueness
+    const seenIds = new Set<string>();
+    for (const ind of ast.indicators || []) {
+      if (seenIds.has(ind.id)) {
+        errors.push(`Duplicate indicator ID '${ind.id}'. Each indicator must have a unique identifier.`);
+      }
+      seenIds.add(ind.id);
+    }
+
+    // Helper to check conditions
+    const checkGroup = (group: any, name: string) => {
+      if (!group) return;
+      if (!group.conditions || group.conditions.length === 0) {
+        warnings.push(`${name} rule group has no active conditions.`);
+      }
+      for (const c of group.conditions || []) {
+        if ('operator' in c) {
+          checkGroup(c, `${name} -> Nested Group`);
+        } else {
+          if (c.left?.type === 'INDICATOR' && c.left.indicatorId && !indicatorIds.has(c.left.indicatorId)) {
+            errors.push(`Condition in ${name} references undefined indicator '${c.left.indicatorId}'.`);
+          }
+          if (c.right?.type === 'INDICATOR' && c.right.indicatorId && !indicatorIds.has(c.right.indicatorId)) {
+            errors.push(`Condition in ${name} references undefined indicator '${c.right.indicatorId}'.`);
+          }
+        }
+      }
+    };
+
+    checkGroup(ast.bullishEntry, 'Bullish Entry');
+    checkGroup(ast.bearishEntry, 'Bearish Entry');
+
+    // Risk / Exit checks
+    if (!ast.exitRules?.stopLossValue || ast.exitRules.stopLossValue <= 0) {
+      warnings.push('Protective Stop-Loss is not configured or <= 0.');
+    }
+    if (!ast.exitRules?.targetProfitValue || ast.exitRules.targetProfitValue <= 0) {
+      warnings.push('Target Profit is not configured or <= 0.');
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+      warnings,
+    };
+  }
+
+  public createFromTemplate(templateId: string, overrides: any = {}): StrategyConfig {
+    const tpl = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === templateId);
+    if (!tpl) {
+      throw new NotFoundException(`Template '${templateId}' not found.`);
+    }
+
+    const isUuid = typeof overrides.id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(overrides.id);
+    const id = isUuid ? overrides.id : randomUUID();
+
+    const configData: Partial<StrategyConfig> = {
+      ...tpl.defaultConfig,
+      ...overrides,
+      id,
+      name: overrides.name || tpl.name,
+      description: overrides.description || tpl.description,
+      category: tpl.category,
+      templateId: tpl.id,
+      version: 1,
+      status: StrategyStatus.DRAFT,
+      tradeMode: TradeMode.PAPER,
+      astConfig: overrides.astConfig || tpl.astConfig,
+    };
+
+    const parsed = StrategyConfigSchema.parse(configData);
+    parsed.versionHash = calculateStrategyVersionHash(parsed);
+    this.strategies.set(id, parsed);
+    this.strategyVersionHistory.set(id, [parsed]);
+    this.saveToDisk();
+
+    return parsed;
+  }
+
+  public duplicateStrategy(id: string): StrategyConfig {
+    const original = this.getStrategy(id);
+    const newId = randomUUID();
+
+    const clone: StrategyConfig = {
+      ...original,
+      id: newId,
+      name: `${original.name} (Copy)`,
+      version: 1,
+      status: StrategyStatus.DRAFT,
+    };
+
+    clone.versionHash = calculateStrategyVersionHash(clone);
+    this.strategies.set(newId, clone);
+    this.strategyVersionHistory.set(newId, [clone]);
+    this.saveToDisk();
+
+    return clone;
+  }
+
+  public archiveStrategy(id: string): StrategyConfig {
+    const strategy = this.getStrategy(id);
+    strategy.status = StrategyStatus.ARCHIVED;
+    strategy.isArchived = true;
+    strategy.versionHash = calculateStrategyVersionHash(strategy);
+    this.strategies.set(id, strategy);
+    this.saveToDisk();
+    return strategy;
+  }
+
   public updateStrategy(id: string, updates: any): StrategyConfig {
     const existing = this.getStrategy(id);
 
@@ -158,6 +289,10 @@ export class StrategiesService {
       ...existing,
       ...updates,
       id: existing.id,
+      description: updates.description !== undefined ? updates.description : existing.description,
+      category: updates.category !== undefined ? updates.category : existing.category,
+      tags: updates.tags !== undefined ? updates.tags : existing.tags,
+      astConfig: updates.astConfig !== undefined ? updates.astConfig : existing.astConfig,
       entry: { ...existing.entry, ...(updates.entry || {}) },
       risk: { ...existing.risk, ...(updates.risk || {}) },
       session: { ...existing.session, ...(updates.session || {}) },

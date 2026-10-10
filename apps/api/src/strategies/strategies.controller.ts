@@ -10,6 +10,21 @@ export class StrategiesController {
     return this.strategiesService.getAllStrategies();
   }
 
+  @Get('templates')
+  getTemplates() {
+    return this.strategiesService.getTemplates();
+  }
+
+  @Post('validate')
+  validateRules(@Body() body: any) {
+    return this.strategiesService.validateStrategyAst(body);
+  }
+
+  @Post('from-template/:templateId')
+  createFromTemplate(@Param('templateId') templateId: string, @Body() body: any) {
+    return this.strategiesService.createFromTemplate(templateId, body);
+  }
+
   @Get(':id')
   getStrategy(@Param('id') id: string) {
     return this.strategiesService.getStrategy(id);
@@ -30,6 +45,16 @@ export class StrategiesController {
     return this.strategiesService.updateStrategy(id, dto);
   }
 
+  @Post(':id/duplicate')
+  duplicateStrategy(@Param('id') id: string) {
+    return this.strategiesService.duplicateStrategy(id);
+  }
+
+  @Post(':id/archive')
+  archiveStrategy(@Param('id') id: string) {
+    return this.strategiesService.archiveStrategy(id);
+  }
+
   @Post(':id/scan')
   runAgentScan(@Param('id') id: string) {
     return this.strategiesService.runAgentScan(id);
@@ -40,3 +65,4 @@ export class StrategiesController {
     return this.strategiesService.runBacktest(id, body);
   }
 }
+

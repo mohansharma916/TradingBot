@@ -17,6 +17,13 @@ import {
   TradeMode,
   ExitProtectionStatus,
   AlertSeverity,
+  IndicatorType,
+  ComparisonOperator,
+  LogicalOperator,
+  TrailingProfitMode,
+  StrikeSelection,
+  ExpirySelection,
+  TradeDirection,
 } from './enums';
 
 // Environment Schema
@@ -206,10 +213,229 @@ export const StrategyExitRulesSchema = z.object({
 });
 export type StrategyExitRules = z.infer<typeof StrategyExitRulesSchema>;
 
+// Strategy Lab AST Interfaces & Schemas
+export interface StrategyIndicatorConfig {
+  id: string;
+  type: IndicatorType;
+  period?: number;
+  source?: 'close' | 'open' | 'high' | 'low' | 'hl2' | 'hlc3' | 'ohlc4';
+  timeframe?: string;
+  fastPeriod?: number;
+  slowPeriod?: number;
+  signalPeriod?: number;
+  stdDevMultiplier?: number;
+  overbought?: number;
+  oversold?: number;
+  lookback?: number;
+  sessionReset?: boolean;
+}
+
+export const StrategyIndicatorConfigSchema: z.ZodType<StrategyIndicatorConfig, z.ZodTypeDef, any> = z.object({
+  id: z.string().min(1),
+  type: z.nativeEnum(IndicatorType),
+  period: z.number().int().positive().optional(),
+  source: z.enum(['close', 'open', 'high', 'low', 'hl2', 'hlc3', 'ohlc4']).optional().default('close'),
+  timeframe: z.string().optional(),
+  fastPeriod: z.number().int().positive().optional(),
+  slowPeriod: z.number().int().positive().optional(),
+  signalPeriod: z.number().int().positive().optional(),
+  stdDevMultiplier: z.number().positive().optional(),
+  overbought: z.number().optional(),
+  oversold: z.number().optional(),
+  lookback: z.number().int().positive().optional(),
+  sessionReset: z.boolean().optional(),
+});
+
+export interface RuleOperand {
+  type: 'INDICATOR' | 'CANDLE_FIELD' | 'NUMBER' | 'RANGE';
+  indicatorId?: string;
+  field?: string;
+  offset?: number;
+  value?: number;
+  min?: number;
+  max?: number;
+  multiplier?: number;
+}
+
+export const RuleOperandSchema: z.ZodType<RuleOperand, z.ZodTypeDef, any> = z.object({
+  type: z.enum(['INDICATOR', 'CANDLE_FIELD', 'NUMBER', 'RANGE']),
+  indicatorId: z.string().optional(),
+  field: z.string().optional(),
+  offset: z.number().int().min(0).optional().default(0),
+  value: z.number().optional(),
+  min: z.number().optional(),
+  max: z.number().optional(),
+  multiplier: z.number().optional(),
+});
+
+export interface ConditionRule {
+  id: string;
+  left: RuleOperand;
+  comparison: ComparisonOperator;
+  right?: RuleOperand;
+  tolerance?: number;
+  enabled?: boolean;
+  description?: string;
+}
+
+export const ConditionRuleSchema: z.ZodType<ConditionRule, z.ZodTypeDef, any> = z.object({
+  id: z.string().min(1),
+  left: RuleOperandSchema,
+  comparison: z.nativeEnum(ComparisonOperator),
+  right: RuleOperandSchema.optional(),
+  tolerance: z.number().optional(),
+  enabled: z.boolean().optional().default(true),
+  description: z.string().optional(),
+});
+
+export type RuleGroup = {
+  id: string;
+  operator?: LogicalOperator;
+  enabled?: boolean;
+  conditions: Array<ConditionRule | RuleGroup>;
+  description?: string;
+};
+
+export const RuleGroupSchema: z.ZodType<RuleGroup, z.ZodTypeDef, any> = z.lazy(() =>
+  z.object({
+    id: z.string().min(1),
+    operator: z.nativeEnum(LogicalOperator).optional().default(LogicalOperator.AND),
+    enabled: z.boolean().optional().default(true),
+    conditions: z.array(z.union([ConditionRuleSchema, RuleGroupSchema])).optional().default([]),
+    description: z.string().optional(),
+  })
+);
+
+export interface EntryRulesConfig {
+  candleCloseConfirmation?: boolean;
+  confirmingCandles?: number;
+  minSignalStrength?: number;
+  signalExpiryMinutes?: number;
+  cooldownBars?: number;
+  allowReentry?: boolean;
+}
+
+export const EntryRulesConfigSchema: z.ZodType<EntryRulesConfig, z.ZodTypeDef, any> = z.object({
+  candleCloseConfirmation: z.boolean().optional().default(true),
+  confirmingCandles: z.number().int().positive().optional().default(1),
+  minSignalStrength: z.number().min(0).max(100).optional(),
+  signalExpiryMinutes: z.number().int().positive().optional().default(15),
+  cooldownBars: z.number().int().min(0).optional().default(1),
+  allowReentry: z.boolean().optional().default(false),
+});
+
+export interface ContractSelectionConfig {
+  instrumentType?: 'OPTIONS' | 'FUTURES';
+  optionSide?: 'LONG_CE' | 'LONG_PE' | 'BOTH';
+  underlying?: string;
+  expiry?: ExpirySelection;
+  strikeSelection?: StrikeSelection;
+  strikeDistance?: number;
+  minVolume?: number;
+  minOpenInterest?: number;
+  maxBidAskSpreadPct?: number;
+  minPremium?: number;
+  maxPremium?: number;
+  minDaysToExpiry?: number;
+  maxRequiredMarginInr?: number;
+}
+
+export const ContractSelectionConfigSchema: z.ZodType<ContractSelectionConfig, z.ZodTypeDef, any> = z.object({
+  instrumentType: z.enum(['OPTIONS', 'FUTURES']).optional().default('OPTIONS'),
+  optionSide: z.enum(['LONG_CE', 'LONG_PE', 'BOTH']).optional().default('BOTH'),
+  underlying: z.string().optional().default('NIFTY'),
+  expiry: z.nativeEnum(ExpirySelection).optional().default(ExpirySelection.NEAREST_ELIGIBLE),
+  strikeSelection: z.nativeEnum(StrikeSelection).optional().default(StrikeSelection.ATM),
+  strikeDistance: z.number().int().min(0).optional().default(0),
+  minVolume: z.number().min(0).optional().default(1000),
+  minOpenInterest: z.number().min(0).optional().default(5000),
+  maxBidAskSpreadPct: z.number().positive().optional().default(1.5),
+  minPremium: z.number().min(0).optional().default(20),
+  maxPremium: z.number().positive().optional().default(600),
+  minDaysToExpiry: z.number().min(0).optional().default(0),
+  maxRequiredMarginInr: z.number().positive().optional().default(10000),
+});
+
+export interface ExitRulesConfig {
+  stopLossBasis?: 'OPTION_PREMIUM' | 'UNDERLYING_POINTS' | 'PERCENTAGE' | 'ATR_MULTIPLE';
+  stopLossValue?: number;
+  targetProfitBasis?: 'OPTION_PREMIUM' | 'UNDERLYING_POINTS' | 'PERCENTAGE' | 'RISK_REWARD';
+  targetProfitValue?: number;
+  exitOnOppositeSignal?: boolean;
+  exitOnIndicatorReversal?: boolean;
+  marketCutoffTime?: string;
+  maxHoldingBars?: number;
+}
+
+export const ExitRulesConfigSchema: z.ZodType<ExitRulesConfig, z.ZodTypeDef, any> = z.object({
+  stopLossBasis: z.enum(['OPTION_PREMIUM', 'UNDERLYING_POINTS', 'PERCENTAGE', 'ATR_MULTIPLE']).optional().default('OPTION_PREMIUM'),
+  stopLossValue: z.number().positive().optional().default(8),
+  targetProfitBasis: z.enum(['OPTION_PREMIUM', 'UNDERLYING_POINTS', 'PERCENTAGE', 'RISK_REWARD']).optional().default('OPTION_PREMIUM'),
+  targetProfitValue: z.number().positive().optional().default(12),
+  exitOnOppositeSignal: z.boolean().optional().default(true),
+  exitOnIndicatorReversal: z.boolean().optional().default(false),
+  marketCutoffTime: z.string().optional().default('15:10'),
+  maxHoldingBars: z.number().int().positive().optional(),
+});
+
+export interface TrailingProfitConfig {
+  enabled?: boolean;
+  mode?: TrailingProfitMode;
+  activationProfitInr?: number;
+  trailingGapInr?: number;
+  profitLockInr?: number;
+  adjustmentStepInr?: number;
+  adjustmentFrequencyBars?: number;
+  atrPeriod?: number;
+  atrMultiplier?: number;
+}
+
+export const TrailingProfitConfigSchema: z.ZodType<TrailingProfitConfig, z.ZodTypeDef, any> = z.object({
+  enabled: z.boolean().optional().default(false),
+  mode: z.nativeEnum(TrailingProfitMode).optional().default(TrailingProfitMode.FIXED_STEP),
+  activationProfitInr: z.number().positive().optional().default(150),
+  trailingGapInr: z.number().positive().optional().default(50),
+  profitLockInr: z.number().positive().optional(),
+  adjustmentStepInr: z.number().positive().optional().default(50),
+  adjustmentFrequencyBars: z.number().int().positive().optional().default(1),
+  atrPeriod: z.number().int().positive().optional(),
+  atrMultiplier: z.number().positive().optional(),
+});
+
+export interface StrategyAstConfig {
+  templateId?: string;
+  direction?: TradeDirection;
+  category?: string;
+  indicators?: StrategyIndicatorConfig[];
+  bullishEntry?: RuleGroup;
+  bearishEntry?: RuleGroup;
+  entryRules?: EntryRulesConfig;
+  contractSelection?: ContractSelectionConfig;
+  exitRules?: ExitRulesConfig;
+  trailingProfit?: TrailingProfitConfig;
+}
+
+export const StrategyAstConfigSchema: z.ZodType<StrategyAstConfig, z.ZodTypeDef, any> = z.object({
+  templateId: z.string().optional(),
+  direction: z.nativeEnum(TradeDirection).optional().default(TradeDirection.BOTH),
+  category: z.string().optional().default('CUSTOM'),
+  indicators: z.array(StrategyIndicatorConfigSchema).optional().default([]),
+  bullishEntry: RuleGroupSchema.optional(),
+  bearishEntry: RuleGroupSchema.optional(),
+  entryRules: EntryRulesConfigSchema.optional().default({}),
+  contractSelection: ContractSelectionConfigSchema.optional().default({}),
+  exitRules: ExitRulesConfigSchema.optional().default({}),
+  trailingProfit: TrailingProfitConfigSchema.optional().default({}),
+});
+
 // Strategy Config Schema
 export const StrategyConfigSchema = z.object({
   id: z.string().uuid(),
   name: z.string().min(1),
+  description: z.string().optional(),
+  category: z.string().optional(),
+  templateId: z.string().optional(),
+  tags: z.array(z.string()).optional(),
   version: z.number().int().positive().default(1),
   versionHash: z.string().optional(),
   status: z.nativeEnum(StrategyStatus).default(StrategyStatus.DRAFT),
@@ -223,6 +449,8 @@ export const StrategyConfigSchema = z.object({
   selection: StrategySelectionSchema.default({}),
   risk: StrategyRiskRulesSchema.default({}),
   exit: StrategyExitRulesSchema.default({}),
+  astConfig: StrategyAstConfigSchema.optional(),
+  isArchived: z.boolean().optional(),
   maxCapitalInr: z.number().positive().max(10000).default(10000), // Account hard cap
   maxAllInTradeLossInr: z.number().positive().max(500).default(200),
   maxAllInDailyLossInr: z.number().positive().max(1500).default(600),

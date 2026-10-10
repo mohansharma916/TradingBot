@@ -5,8 +5,13 @@ import {
   StrategyConfig,
 } from '@trading-bot/contracts';
 import { calculateOptionCharges } from './charges';
-import { Candle, calculateEMA, calculateRSI } from './indicators';
+import { Candle } from './indicators';
 import { getStandardLotSize } from './lot-size';
+import {
+  buildIndicatorCache,
+  convertLegacyStrategyToAst,
+  evaluateStrategyAst,
+} from './strategy-rule-evaluator';
 
 export interface BacktestOptions {
   strategy: StrategyConfig;
@@ -78,6 +83,9 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
   let maxDrawdown = 0;
   const trades: BacktestTradeRecord[] = [];
 
+  const astConfig = strategy.astConfig || convertLegacyStrategyToAst(strategy);
+  const cache = buildIndicatorCache(sortedCandles, astConfig);
+
   let activeTrade: {
     id: string;
     entryTime: string;
@@ -88,6 +96,7 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
     initialStopPrice: number;
     targetPrice: number;
     symbol: string;
+    optionType: 'CE' | 'PE';
     peakOptionPrice: number;
     trailingActive: boolean;
   } | null = null;
@@ -95,9 +104,6 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
   let dailyTradesCount = 0;
   let lastDayString = '';
 
-  const emaPeriod = strategy.entry?.emaPeriod ?? 20;
-  const rsiPeriod = strategy.entry?.rsiPeriod ?? 14;
-  const rsiThreshold = strategy.entry?.rsiThreshold ?? 55;
   const maxTradesPerDay = strategy.risk?.maxTradesPerDay ?? 3;
   const maxTradeLossInr = strategy.risk?.maxAllInTradeLossInr ?? 200;
   const targetProfitInr = strategy.risk?.targetNetProfitInr ?? 300;
@@ -106,12 +112,13 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
   const marketCutoff = strategy.exit?.marketCutoff ?? '15:10';
 
   // Trailing Stop settings
-  const useTrailing = request?.useTrailingStop ?? true;
-  const trailingActivationProfit = request?.trailingActivationProfitInr ?? 150;
-  const trailingStep = request?.trailingStepInr ?? 50;
+  const useTrailing = request?.useTrailingStop ?? (astConfig.trailingProfit?.enabled ?? true);
+  const trailingActivationProfit = request?.trailingActivationProfitInr ?? (astConfig.trailingProfit?.activationProfitInr ?? 150);
+  const trailingStep = request?.trailingStepInr ?? (astConfig.trailingProfit?.adjustmentStepInr ?? 50);
 
   // Iterate candle-by-candle starting after warmup
-  for (let i = Math.max(emaPeriod, rsiPeriod) + 2; i < sortedCandles.length; i++) {
+  const warmupIndex = Math.max(cache.warmupRequired + 2, 22);
+  for (let i = warmupIndex; i < sortedCandles.length; i++) {
     const curr = sortedCandles[i]!;
     const candleIso = toIso(curr.timestamp);
     const candleDateStr = candleIso.slice(0, 10);
@@ -135,9 +142,10 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
 
     // 1. Evaluate Active Position Exit
     if (activeTrade !== null) {
-      const spotDelta = curr.close - activeTrade.spotAtEntry;
-      const spotHighDelta = curr.high - activeTrade.spotAtEntry;
-      const spotLowDelta = curr.low - activeTrade.spotAtEntry;
+      const isCE = activeTrade.optionType === 'CE';
+      const spotDelta = isCE ? curr.close - activeTrade.spotAtEntry : activeTrade.spotAtEntry - curr.close;
+      const spotHighDelta = isCE ? curr.high - activeTrade.spotAtEntry : activeTrade.spotAtEntry - curr.low;
+      const spotLowDelta = isCE ? curr.low - activeTrade.spotAtEntry : activeTrade.spotAtEntry - curr.high;
 
       // Delta 0.5 for ATM option
       const approxHighOption = Math.max(1, activeTrade.entryPrice + spotHighDelta * 0.5);
@@ -230,63 +238,44 @@ export function runStrategyBacktest(options: BacktestOptions): BacktestResult {
       if (currentTimeIst < sessionStart || currentTimeIst > sessionLastEntry) continue;
 
       // Strictly evaluate confirmed closed candles up to bar i - 1 (no look-ahead)
-      const historicalCloses = sortedCandles.slice(0, i).map((c) => c.close);
-      const emaValues = calculateEMA(historicalCloses, emaPeriod);
-      const rsiValues = calculateRSI(historicalCloses, rsiPeriod);
+      const evalResult = evaluateStrategyAst(astConfig, i - 1, sortedCandles, cache);
 
-      const emaCurr = emaValues[emaValues.length - 1];
-      const emaPrev = emaValues[emaValues.length - 2];
-      const rsiCurr = rsiValues[rsiValues.length - 1];
-      const rsiPrev = rsiValues[rsiValues.length - 2];
+      if (evalResult.bullishSignal || evalResult.bearishSignal) {
+        const isBullish = evalResult.bullishSignal;
+        const optionType: 'CE' | 'PE' = isBullish ? 'CE' : 'PE';
 
-      const prevClose = historicalCloses[historicalCloses.length - 1];
-      const prev2Close = historicalCloses[historicalCloses.length - 2];
+        // Model realistic ATM Option entry
+        // Option premium ~ 0.55% of underlying spot price
+        const estimatedPremium = Math.max(25, Number((curr.open * 0.0055).toFixed(2)));
+        const maxTradeCapital = Math.min(strategy.risk?.maxCapitalInr ?? 10000, runningCapital);
 
-      if (
-        emaCurr !== undefined &&
-        emaPrev !== undefined &&
-        rsiCurr !== undefined &&
-        prevClose !== undefined &&
-        prev2Close !== undefined
-      ) {
-        // Bullish transition: Price crossed above EMA20 or RSI broke above threshold while price is above EMA
-        const isEmaBullCross = prev2Close <= emaPrev && prevClose > emaCurr;
-        const isRsiBreakout = prevClose > emaCurr && rsiPrev !== undefined && rsiPrev < rsiThreshold && rsiCurr >= rsiThreshold;
-        const isBullishSignal = (isEmaBullCross || isRsiBreakout) && rsiCurr >= rsiThreshold;
+        // Standard lot sizing (e.g. 25 units for NIFTY, 15 for BANKNIFTY)
+        const costPerLot = estimatedPremium * lotSize;
+        const allowedLots = Math.max(1, Math.floor(maxTradeCapital / costPerLot));
+        const totalUnits = allowedLots * lotSize;
 
-        if (isBullishSignal) {
-          // Model realistic ATM Call Option entry
-          // Option premium ~ 0.55% of underlying spot price
-          const estimatedPremium = Math.max(25, Number((curr.open * 0.0055).toFixed(2)));
-          const maxTradeCapital = Math.min(strategy.risk?.maxCapitalInr ?? 10000, runningCapital);
+        const pointsStop = Math.max(3, maxTradeLossInr / totalUnits);
+        const pointsTarget = Math.max(5, targetProfitInr / totalUnits);
 
-          // Standard lot sizing (e.g. 25 units for NIFTY, 15 for BANKNIFTY)
-          const costPerLot = estimatedPremium * lotSize;
-          const allowedLots = Math.max(1, Math.floor(maxTradeCapital / costPerLot));
-          const totalUnits = allowedLots * lotSize;
+        const stopPrice = Math.max(1, Number((estimatedPremium - pointsStop).toFixed(2)));
+        const targetPrice = Number((estimatedPremium + pointsTarget).toFixed(2));
 
-          const pointsStop = Math.max(3, maxTradeLossInr / totalUnits);
-          const pointsTarget = Math.max(5, targetProfitInr / totalUnits);
+        activeTrade = {
+          id: `trade_${Date.now()}_${i}`,
+          entryTime: candleIso,
+          entryPrice: estimatedPremium,
+          spotAtEntry: curr.open,
+          quantity: totalUnits,
+          stopPrice,
+          initialStopPrice: stopPrice,
+          targetPrice,
+          symbol: `${strategy.underlying || 'NIFTY'} ATM ${optionType}`,
+          optionType,
+          peakOptionPrice: estimatedPremium,
+          trailingActive: false,
+        };
 
-          const stopPrice = Math.max(1, Number((estimatedPremium - pointsStop).toFixed(2)));
-          const targetPrice = Number((estimatedPremium + pointsTarget).toFixed(2));
-
-          activeTrade = {
-            id: `trade_${Date.now()}_${i}`,
-            entryTime: candleIso,
-            entryPrice: estimatedPremium,
-            spotAtEntry: curr.open,
-            quantity: totalUnits,
-            stopPrice,
-            initialStopPrice: stopPrice,
-            targetPrice,
-            symbol: `${strategy.underlying || 'NIFTY'} ATM CE`,
-            peakOptionPrice: estimatedPremium,
-            trailingActive: false,
-          };
-
-          dailyTradesCount++;
-        }
+        dailyTradesCount++;
       }
     }
   }
