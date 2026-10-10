@@ -26,6 +26,9 @@ import { UpstoxBrokerAdapter } from './broker/upstox-broker.adapter';
 import { UpstoxMarketFeedService } from './market-data/upstox-market-feed.service';
 import { RiskReservationManager } from './risk/risk-reservation.manager';
 import { OrdersService } from './orders/orders.service';
+import { TokenStorageService } from './broker/token-storage.service';
+import { UpstoxOAuthService } from './broker/upstox-oauth.service';
+import { BrokerReconciliationService } from './broker/broker-reconciliation.service';
 
 @Module({
   imports: [],
@@ -59,6 +62,9 @@ import { OrdersService } from './orders/orders.service';
     StrategiesService,
     RiskReservationManager,
     OrdersService,
+    TokenStorageService,
+    UpstoxOAuthService,
+    BrokerReconciliationService,
   ],
   exports: [
     EnvService,
@@ -77,6 +83,9 @@ import { OrdersService } from './orders/orders.service';
     StrategiesService,
     RiskReservationManager,
     OrdersService,
+    TokenStorageService,
+    UpstoxOAuthService,
+    BrokerReconciliationService,
   ],
 })
 export class AppModule {}

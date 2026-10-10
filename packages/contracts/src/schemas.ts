@@ -38,6 +38,7 @@ export const EnvSchema = z.object({
   UPSTOX_EGRESS_IP: z.string().default('127.0.0.1'),
   UPSTOX_BASE_URL: z.string().url().default('https://api.upstox.com/v3'),
   UPSTOX_HFT_URL: z.string().url().default('https://api-hft.upstox.com/v3'),
+  TOKEN_ENCRYPTION_KEY: z.string().min(16).default('32_byte_aes_gcm_token_encryption_key_default'),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;
@@ -520,3 +521,64 @@ export const OrderFillEventSchema = z.object({
 });
 
 export type OrderFillEvent = z.infer<typeof OrderFillEventSchema>;
+
+// Upstox OAuth & Session Schemas
+export const UpstoxOAuthConnectResponseSchema = z.object({
+  authUrl: z.string().url(),
+  state: z.string().min(16),
+  expiresInSeconds: z.number().int().positive(),
+});
+
+export type UpstoxOAuthConnectResponse = z.infer<typeof UpstoxOAuthConnectResponseSchema>;
+
+export const UpstoxOAuthCallbackDtoSchema = z.object({
+  code: z.string().min(1),
+  state: z.string().min(1),
+});
+
+export type UpstoxOAuthCallbackDto = z.infer<typeof UpstoxOAuthCallbackDtoSchema>;
+
+export const UpstoxSessionStatusSchema = z.object({
+  isConnected: z.boolean(),
+  isExpired: z.boolean(),
+  tokenExpiresAt: z.string().datetime().nullable(),
+  secondsRemaining: z.number().int().nonnegative(),
+  egressIpVerified: z.boolean(),
+  registeredEgressIp: z.string(),
+  currentEgressIp: z.string(),
+  rateLimitRemaining: z.number().int().nonnegative(),
+  lastReconciledAt: z.string().datetime().nullable(),
+});
+
+export type UpstoxSessionStatus = z.infer<typeof UpstoxSessionStatusSchema>;
+
+// Reconciliation Schemas
+export const ReconciliationDiscrepancySchema = z.object({
+  type: z.enum([
+    'POSITION_MISMATCH',
+    'ORDER_MISMATCH',
+    'PRICE_MISMATCH',
+    'PHANTOM_BROKER_POSITION',
+    'MISSING_LOCAL_RECORD',
+  ]),
+  instrumentKey: z.string(),
+  brokerValue: z.any(),
+  localValue: z.any(),
+  severity: z.enum(['CRITICAL', 'WARNING', 'INFO']),
+  actionTaken: z.string(),
+});
+
+export type ReconciliationDiscrepancy = z.infer<typeof ReconciliationDiscrepancySchema>;
+
+export const ReconciliationReportSchema = z.object({
+  timestamp: z.string().datetime(),
+  status: z.enum(['CLEAN', 'MISMATCH_DETECTED']),
+  brokerPositionsCount: z.number().int().nonnegative(),
+  localPositionsCount: z.number().int().nonnegative(),
+  brokerOrdersCount: z.number().int().nonnegative(),
+  localOrdersCount: z.number().int().nonnegative(),
+  discrepancies: z.array(ReconciliationDiscrepancySchema),
+  executionFrozen: z.boolean(),
+});
+
+export type ReconciliationReport = z.infer<typeof ReconciliationReportSchema>;

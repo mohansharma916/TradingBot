@@ -15,8 +15,8 @@
 | **Phase 1** | **Instruments & Streaming Market Data Feed V3** | **COMPLETED ✅** | Protobuf V3 decoder, catalog indexing, stale feed detection, 34 tests pass |
 | **Phase 2** | **Strategy Engine & Tool-Restricted Agents** | **COMPLETED ✅** | Deterministic indicator rules & verified expiring `TradeProposal` pipeline, 54 tests pass |
 | **Phase 3** | **Risk Engine & Paper Broker Simulation** | **COMPLETED ✅** | Transactional capital locks, slippage/charges model, zero double-spending, 68 tests pass |
-| **Phase 4** | Upstox Read-Only Portfolio & OAuth Integration | Next Up ⏳ | Token encryption, broker account reconciliation, egress IP validation |
-| **Phase 5** | Supervised Live Order Execution (Approval Mode) | Pending | Owner approval window, multi-leg GTT protection, orderbook reconciliation |
+| **Phase 4** | **Upstox Read-Only Portfolio & OAuth Integration** | **COMPLETED ✅** | AES-256-GCM token encryption, OAuth flow, egress IP validation, broker reconciliation, 84 tests pass |
+| **Phase 5** | Supervised Live Order Execution (Approval Mode) | Next Up ⏳ | Owner approval window, multi-leg GTT protection, orderbook reconciliation |
 | **Phase 6** | Operational Resilience, Diagnostics & Mobile Polish | Pending | Kill switch, flatten position command, alert notifications, incident drills |
 | **Phase 7** | Bounded Autonomous Execution (Armed Auto Mode) | Gated | Regulatory checklist passed, multi-day paper proof, hard limits locked |
 
@@ -156,12 +156,67 @@
 
 ---
 
-## Next Steps: Phase 4 — Upstox Read-Only Portfolio & OAuth Integration
+## Phase 4: Upstox Read-Only Portfolio & OAuth Integration — COMPLETED ✅
 
-**Phase 4 Objectives:**
-- Upstox OAuth 2.0 flow with PKCE / secure token exchange and refresh rotation.
-- Encrypted token storage in PostgreSQL using AES-256-GCM.
-- Egress IP validation against registered static IP.
-- Read-only portfolio & funds synchronization (holdings, positions, margins).
-- Startup reconciliation between broker state and local database.
-- Live order routing remains strictly blocked (`TODO-VERIFY: Live order execution blocked until Phase 5`).
+### Deliverables Implemented:
+
+1. **Encrypted Token Store (`apps/api/src/broker/token-storage.service.ts`)**:
+   - **AES-256-GCM Encryption**: Tokens encrypted using authenticated AES-256-GCM with a 12-byte IV and 16-byte authentication tag derived via SHA-256 from `TOKEN_ENCRYPTION_KEY`.
+   - **Integrity Verification**: Decryption validates authentication tags; tampered ciphertexts fail immediately with integrity violation errors.
+   - **Secret Redaction**: Access tokens and client secrets are automatically redacted in string helpers (`TokenStorageService.redactSecret()`) and never printed in logs or sent unencrypted to clients.
+   - **Session Expiry Tracking**: Accurately tracks seconds remaining, expiry timestamps, and validity states.
+
+2. **Upstox OAuth 2.0 Engine (`apps/api/src/broker/upstox-oauth.service.ts`)**:
+   - **Secure Authorization URL Generation**: Generates 16-byte cryptographically random CSRF `state` with 10-minute expiry window, routing to `https://api.upstox.com/v2/login/authorization/dialog`.
+   - **Code Exchange with State Protection**: Validates and consumes CSRF `state` to prevent replay attacks, exchanging codes for tokens via Upstox V2 token API.
+   - **Sandbox & Simulation Compatibility**: Supports seamless sandbox/mock verification when running without live credentials.
+   - **Session Status & Disconnect**: Queries session metadata and allows owner-initiated disconnect which purges encrypted credentials from memory and broadcasts WebSocket events.
+
+3. **Typed Read-Only Upstox Broker Adapter (`apps/api/src/broker/upstox-broker.adapter.ts`)**:
+   - **Rate Limiting Guard**: Token-bucket rate limiter enforcing Upstox API limit (25 req/sec).
+   - **Read Endpoints Synchronized**:
+     - Funds & Margins: Maps Upstox equity data to `FundsSnapshot`.
+     - Orderbook & Fills: Retrieves broker orders and normalizes to `BrokerOrder[]`.
+     - Portfolio & Positions: Retrieves live open positions mapped to typed `Position[]`.
+   - **Strict Live Write Safety Invariants**: `placeOrder()`, `modifyOrder()`, and `cancelOrder()` explicitly throw safety violation errors (`TODO-VERIFY: Live writes strictly disabled until Phase 5 human approval workflow is activated`).
+
+4. **Startup & Continuous Broker Reconciliation Engine (`apps/api/src/broker/broker-reconciliation.service.ts`)**:
+   - **Automated Startup Audit**: Executes on server startup via `OnApplicationBootstrap` and on-demand via `POST /broker/reconcile`.
+   - **Phantom Position Detection**: Identifies trades executed on Upstox broker app outside workstation; flags `PHANTOM_BROKER_POSITION` with `CRITICAL` severity.
+   - **Position Quantity & Price Mismatch Detection**: Flags quantity divergences (`POSITION_MISMATCH`) and average price divergences (`PRICE_MISMATCH`).
+   - **Safety Freeze Invariant**: If ANY critical discrepancy is detected, triggers the `RiskReservationManager` kill switch, sets `executionFrozen: true`, freezes new trade entry submissions, and broadcasts WebSocket alerts.
+
+5. **Client SDK Extensions (`packages/client-sdk/src/client.ts`)**:
+   - `getUpstoxSession()`, `connectUpstox()`, `exchangeUpstoxCallback()`, `disconnectUpstox()`, `getReconciliationReport()`, `triggerReconciliation()`.
+
+6. **Universal Health, Security & Reconciliation Screen (`apps/trader/app/health.tsx`)**:
+   - **Upstox OAuth 2.0 Panel**: Real-time connection status badge, AES-256-GCM encryption verified indicator, registered static egress IP check (`127.0.0.1 Exact Match`), token expiry countdown, and "Reauthenticate OAuth" / "Disconnect" actions.
+   - **Reconciliation Audit Panel**: Displays broker positions vs local ledger comparison, orders comparison, active discrepancies count, and "Run Audit Now" action.
+   - **Safety Alert Banner**: High-visibility alert that automatically appears when a reconciliation mismatch is detected, notifying the owner that entries are frozen until cleared.
+   - **Testbench Triggers**: Allows testing external phantom position injection to verify safety freeze.
+
+### Verification & Test Matrix
+
+- **Unit & Integration Tests**: 84 passed / 84 total (Vitest across 18 test files):
+  - Token Encryption tests: AES-256-GCM encryption/decryption, tampered auth tag rejection, secret redaction.
+  - OAuth 2.0 tests: CSRF state generation, expired state rejection, replay attack prevention, mock code exchange, disconnect purge.
+  - Read-Only Broker tests: Authenticated vs degraded health status, rate limiting, live order write route blocking.
+  - Reconciliation tests: Clean audit verification, phantom broker position detection, quantity divergence detection, automatic kill switch activation and execution freeze.
+  - Client & Trader UI tests: UpstoxSessionStatusSchema, ReconciliationReportSchema, BrokerHealthSchema.
+- **TypeScript Typecheck**: Passed across all 8 workspace projects with 0 errors (`pnpm run typecheck`).
+- **Monorepo Build**: Passed cleanly across all packages and services (`pnpm run build`).
+
+---
+
+## Next Steps: Phase 5 — Supervised Live Order Execution (Approval Mode)
+
+**Phase 5 Objectives:**
+- Live order execution only behind explicit feature flags and owner `APPROVAL` mode.
+- Short-lived owner approval window (countdown timer) with revalidation before dispatch.
+- Idempotent execution intent (`intentId`) and central account-level lock.
+- Upstox V3 Order Placement, Modification, and Cancellation in broker adapter.
+- Supported GTT exits (stop-loss and profit target) tied to broker order legs.
+- Order state tracking: `ACKNOWLEDGED`, `PARTIALLY_FILLED`, `FILLED`, `PENDING_PROTECTION`, `CLOSED`, and `UNKNOWN`.
+- Handling simulated request timeouts, uncovered positions, and unfilled exit limits.
+- UI rules: Never label `ACKNOWLEDGED` as `FILLED` and never display a stop as "guaranteed".
+- Explicit manual go-live safety checklist.

@@ -12,6 +12,9 @@ import {
   AgentTask,
   BrokerOrder,
   OrderFillEvent,
+  UpstoxOAuthConnectResponse,
+  UpstoxSessionStatus,
+  ReconciliationReport,
 } from '@trading-bot/contracts';
 
 export interface ClientConfig {
@@ -81,6 +84,42 @@ export class TradingPlatformClient {
 
   public async getBrokerFunds(): Promise<any> {
     return this.request('/broker/funds');
+  }
+
+  public async getUpstoxSession(): Promise<UpstoxSessionStatus> {
+    return this.request('/broker/upstox/session');
+  }
+
+  public async connectUpstox(): Promise<UpstoxOAuthConnectResponse> {
+    return this.request('/broker/upstox/connect', {
+      method: 'POST',
+    });
+  }
+
+  public async exchangeUpstoxCallback(
+    code: string,
+    state: string,
+  ): Promise<{ success: boolean; session: UpstoxSessionStatus }> {
+    return this.request('/broker/upstox/callback', {
+      method: 'POST',
+      body: JSON.stringify({ code, state }),
+    });
+  }
+
+  public async disconnectUpstox(): Promise<{ success: boolean; message: string }> {
+    return this.request('/broker/upstox/disconnect', {
+      method: 'POST',
+    });
+  }
+
+  public async getReconciliationReport(): Promise<ReconciliationReport> {
+    return this.request('/broker/reconciliation-status');
+  }
+
+  public async triggerReconciliation(): Promise<ReconciliationReport> {
+    return this.request('/broker/reconcile', {
+      method: 'POST',
+    });
   }
 
   // Risk
