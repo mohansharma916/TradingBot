@@ -46,12 +46,24 @@ export interface ClientConfig {
 export class TradingPlatformClient {
   private baseUrl: string;
   private authToken?: string;
-  private fetch: typeof fetch;
+  private fetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
   constructor(config: ClientConfig) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '');
     this.authToken = config.authToken;
-    this.fetch = config.fetchFn || fetch;
+    const customFetch = config.fetchFn;
+    this.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      if (customFetch) {
+        return customFetch(input, init);
+      }
+      if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
+        return window.fetch(input, init);
+      }
+      if (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function') {
+        return globalThis.fetch(input, init);
+      }
+      return fetch(input, init);
+    };
   }
 
   public setToken(token: string) {

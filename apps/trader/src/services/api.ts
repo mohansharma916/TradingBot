@@ -10,4 +10,5 @@ export const API_BASE_URL =
 
 export const apiClient = new TradingPlatformClient({
   baseUrl: API_BASE_URL,
+  fetchFn: typeof window !== 'undefined' ? window.fetch.bind(window) : undefined,
 });
