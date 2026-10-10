@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AgentSecurityViolationError, AgentToolsService } from '../agents/agent-tools.service';
 import { MarketScannerAgent } from '../agents/market-scanner.agent';
 import { StrategyAnalystAgent } from '../agents/strategy-analyst.agent';
@@ -30,8 +30,9 @@ describe('Agents, Tools & Strategy Engine (Phase 2)', () => {
     decoder = new ProtobufDecoderService();
     gateway = new EventsGateway();
     catalog = new InstrumentCatalogService();
-    catalog.bootstrapCatalog();
+    catalog.bootstrapCatalog([{segment:'NSE_FO',instrument_key:'NSE_FO|52175',instrument_type:'CE',underlying_key:'NSE_INDEX|Nifty 50',underlying_symbol:'NIFTY',trading_symbol:'NIFTY 25100 CE',lot_size:65,tick_size:5,strike_price:25100,expiry:Date.now()+86400000*5}]);
     feed = new UpstoxMarketFeedService(envService, decoder, gateway);
+    for (const instrumentKey of ['NSE_INDEX|Nifty 50','NSE_FO|52175']) feed.injectSimulatedTick({instrumentKey,lastPrice:instrumentKey.startsWith('NSE_INDEX')?25100:100,bidPrice:99.8,askPrice:100.2,bidQty:200,askQty:200,volume:20000,openInterest:100000,timestamp:new Date().toISOString(),isStale:false,netChange:0,netChangePct:0});
     agentTools = new AgentToolsService(catalog, feed);
     scanner = new MarketScannerAgent(agentTools);
     analyst = new StrategyAnalystAgent(agentTools);
@@ -149,7 +150,7 @@ describe('Agents, Tools & Strategy Engine (Phase 2)', () => {
 
       if (result.proposal) {
         expect(result.proposal.strategyId).toBe(defaultStrat.id);
-        expect(result.proposal.lotSize).toBe(25);
+        expect(result.proposal.lotSize).toBe(65);
         expect(result.proposal.allInMaxLoss).toBeLessThanOrEqual(defaultStrat.maxAllInTradeLossInr);
         expect(result.proposal.estimatedCapitalRequired).toBeLessThanOrEqual(defaultStrat.maxCapitalInr);
         expect(result.proposal.evidence.confidence).toBeGreaterThan(0.6);
@@ -157,6 +158,9 @@ describe('Agents, Tools & Strategy Engine (Phase 2)', () => {
     });
 
     it('handles proposal lifecycle: owner authorization and rejection', () => {
+      expect(proposalsService.getPendingProposals()).toEqual([]);
+      const strategy = strategiesService.getAllStrategies()[0]!;
+      proposalsService.addProposal({id:'550e8400-e29b-41d4-a716-446655440010',strategyId:strategy.id,strategyVersion:strategy.version,proposingAgent:'STRATEGY_ANALYST',instrumentKey:'NSE_FO|52175',symbol:'Fixture',side:'BUY',product:'I',suggestedEntryPrice:100,suggestedStopPrice:95,suggestedTargetPrice:110,lotSize:65,quantity:65,estimatedCapitalRequired:6500,estimatedRoundTripCosts:60,allInMaxLoss:385,estimatedNetProfit:590,evidence:{indicators:{closedBars:40},rationale:'Explicit test fixture',confidence:0.6},status:ProposalStatus.PENDING,expiresAt:new Date(Date.now()+180000).toISOString(),createdAt:new Date().toISOString()} as any);
       const pending = proposalsService.getPendingProposals();
       expect(pending.length).toBeGreaterThan(0);
       const proposal = pending[0]!;
@@ -204,18 +208,10 @@ describe('Agents, Tools & Strategy Engine (Phase 2)', () => {
       expect(created.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
       expect(created.name).toBe('BANKNIFTY Scalper');
 
-      const backtest = await strategiesService.runBacktest(created.id, {
-        days: 7,
-        initialCapital: 10000,
-        underlying: 'BANKNIFTY',
-      });
+      vi.stubGlobal('fetch',vi.fn().mockRejectedValue(new Error('Historical provider unavailable')));
+      await expect(strategiesService.runBacktest(created.id,{days:7,initialCapital:10000,underlying:'BANKNIFTY'})).rejects.toThrow('No synthetic data was substituted');
+      vi.unstubAllGlobals();
 
-      expect(backtest.strategyId).toBe(created.id);
-      expect(backtest.periodDays).toBe(7);
-      expect(backtest.initialCapital).toBe(10000);
-      expect(backtest.winRatePct).toBeGreaterThanOrEqual(0);
-      expect(backtest.winRatePct).toBeLessThanOrEqual(100);
-      expect(backtest.netPnl).toBe(Number((backtest.grossPnl - backtest.totalCharges).toFixed(2)));
     });
   });
 });

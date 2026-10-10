@@ -34,8 +34,8 @@ export class RiskService {
     @Optional() @Inject(TradingModeService) private readonly tradingMode?: TradingModeService,
     @Optional() @Inject(OrdersService) private readonly ordersService?: OrdersService,
   ) {
-    this.currentState = this.envService.config.DEFAULT_RISK_STATE;
-    this.currentMode = this.envService.config.SYSTEM_MODE;
+    this.currentState = RiskState.DISARMED;
+    this.currentMode = this.tradingMode?.getMode() ?? TradeMode.PAPER;
   }
 
   private getBroker() {

@@ -57,33 +57,27 @@ export class AgentCoordinatorService {
         return { task };
       }
 
-      const candidate = scanResult.topCandidates[0]!;
-
-      // 2. Dispatch Strategy Analyst on top liquid candidate
-      const analysisResult = await this.analyst.analyzeCandidate(strategy, candidate, options.strictMarketData);
-      for (const invocation of analysisResult.toolInvocations) {
-        task.toolsInvoked.push(invocation);
+      const failures: string[] = [];
+      for (const candidate of scanResult.topCandidates) {
+        const analysisResult = await this.analyst.analyzeCandidate(strategy, candidate, options.strictMarketData);
+        task.toolsInvoked.push(...analysisResult.toolInvocations);
+        if (analysisResult.evaluation.passed && analysisResult.proposal) {
+          task.status = AgentTaskStatus.COMPLETED;
+          task.proposalGenerated = analysisResult.proposal;
+          task.resultSummary = `Signal confirmed for ${candidate.symbol}: ${analysisResult.proposal.evidence.rationale}. Trade proposal requires owner review.`;
+          task.completedAt = new Date().toISOString();
+          this.gateway.broadcast('agent.proposal.created', analysisResult.proposal);
+          this.gateway.broadcast('agent.task.completed', task);
+          this.saveTask(task);
+          return {task, proposal:analysisResult.proposal};
+        }
+        failures.push(`${candidate.symbol}: ${analysisResult.evaluation.reasons.join(', ')}`);
       }
-
-      if (analysisResult.evaluation.passed && analysisResult.proposal) {
-        task.status = AgentTaskStatus.COMPLETED;
-        task.proposalGenerated = analysisResult.proposal;
-        task.resultSummary = `Signal confirmed for ${candidate.symbol}: ${analysisResult.proposal.evidence.rationale}. Trade proposal created (expires in 3m).`;
-        task.completedAt = new Date().toISOString();
-
-        // Broadcast to universal client
-        this.gateway.broadcast('agent.proposal.created', analysisResult.proposal);
-        this.gateway.broadcast('agent.task.completed', task);
-        this.saveTask(task);
-
-        return { task, proposal: analysisResult.proposal };
-      } else {
-        task.status = AgentTaskStatus.COMPLETED;
-        task.resultSummary = `Candidate ${candidate.symbol} evaluated: Criteria not satisfied (${analysisResult.evaluation.reasons.join(', ')}).`;
-        task.completedAt = new Date().toISOString();
-        this.saveTask(task);
-        return { task };
-      }
+      task.status = AgentTaskStatus.COMPLETED;
+      task.resultSummary = `No candidate satisfied the strategy. ${failures.join('; ')}`;
+      task.completedAt = new Date().toISOString();
+      this.saveTask(task);
+      return {task};
     } catch (err: any) {
       this.logger.error(`[AgentCoordinator] Task ${taskId} failed: ${err.message}`);
       task.status = AgentTaskStatus.FAILED;

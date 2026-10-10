@@ -24,7 +24,7 @@ export class ProposalsController {
       proposalId: id,
       intentId: result.intentId,
       status: 'USER_APPROVED',
-      message: 'Proposal approved by owner. Dispatched to risk orchestrator.',
+      message: 'Proposal approved by owner. Execution is pending and must pass the risk checks.',
     };
   }
 

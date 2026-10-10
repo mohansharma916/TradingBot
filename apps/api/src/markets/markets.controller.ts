@@ -21,9 +21,9 @@ export class MarketsController {
     @Query('underlying') underlying = 'NIFTY',
     @Query('expiry') expiry?: string,
   ): OptionChainResult {
-    const spotKey = underlying.toUpperCase() === 'BANKNIFTY' ? 'NSE_INDEX|Nifty Bank' : 'NSE_INDEX|Nifty 50';
+    const spotKey = ({ NIFTY: 'NSE_INDEX|Nifty 50', BANKNIFTY: 'NSE_INDEX|Nifty Bank', FINNIFTY: 'NSE_INDEX|Nifty Fin Service', MIDCPNIFTY: 'NSE_INDEX|NIFTY MID SELECT' } as Record<string,string>)[underlying.toUpperCase()] ?? '';
     const spotQuote = this.feedService.getQuote(spotKey);
-    const spotPrice = spotQuote ? spotQuote.lastPrice : underlying.toUpperCase() === 'BANKNIFTY' ? 55256.65 : 22520.45;
+    const spotPrice = spotQuote && ['LIVE','DELAYED','SIMULATED'].includes(spotQuote.provenance ?? '') ? spotQuote.lastPrice : 0;
 
     return this.catalog.buildOptionChain(
       underlying,
@@ -40,6 +40,9 @@ export class MarketsController {
           openInterest: q.openInterest,
           netChangePct: q.netChangePct || 0,
           isStale: q.isStale,
+          provenance: q.provenance,
+          depthKnown: q.depthKnown,
+          timestamp: q.timestamp,
         };
       },
     );

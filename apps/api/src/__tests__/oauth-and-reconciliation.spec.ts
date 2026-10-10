@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import { EnvService } from '../config/env.service';
 import { TokenStorageService } from '../broker/token-storage.service';
 import { UpstoxOAuthService } from '../broker/upstox-oauth.service';
@@ -8,13 +10,14 @@ import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
 import { RiskReservationManager } from '../risk/risk-reservation.manager';
 import { InstrumentCatalogService } from '../instruments/instrument-catalog.service';
 import { EventsGateway } from '../websocket/events.gateway';
+import { LiveExecutionLedgerService } from '../broker/live-execution-ledger.service';
+import { BrokerRouterService } from '../broker/broker-router.service';
 import {
-  OrderStatus,
+  EnvSchema,
   OrderSide,
   OrderType,
   ProductType,
   Position,
-  BrokerOrder,
   UpstoxSessionStatusSchema,
   ReconciliationReportSchema,
 } from '@trading-bot/contracts';
@@ -30,9 +33,12 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
   let reconciliationService: BrokerReconciliationService;
   let gateway: EventsGateway;
   let mockFeed: any;
+  let directory: string;
 
   beforeEach(() => {
-    envService = new EnvService();
+    directory = fs.mkdtempSync('/private/tmp/broker-session-');
+    envService = { config: EnvSchema.parse({ NODE_ENV: 'test', STATE_DIRECTORY: directory, TOKEN_ENCRYPTION_KEY: 'private-fixture-encryption-key-32-characters', UPSTOX_API_KEY: 'fixture-app-key', UPSTOX_API_SECRET: 'fixture-app-secret' }) } as EnvService;
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Unexpected network request: tests require an explicit broker response stub.'); }));
     tokenStorage = new TokenStorageService(envService);
     gateway = new EventsGateway();
     oauthService = new UpstoxOAuthService(envService, tokenStorage, gateway);
@@ -52,7 +58,7 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
     };
 
     paperBroker = new PaperBrokerAdapter(catalogService, mockFeed, gateway);
-    reservationManager = new RiskReservationManager(envService);
+    reservationManager = new RiskReservationManager(envService, gateway);
     reconciliationService = new BrokerReconciliationService(
       paperBroker,
       upstoxBroker,
@@ -61,6 +67,7 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
       gateway,
     );
   });
+  afterEach(() => { reconciliationService?.onModuleDestroy(); vi.unstubAllGlobals(); if (directory) fs.rmSync(directory, { recursive: true, force: true }); });
 
   describe('1. AES-256-GCM Token Encryption & Storage', () => {
     it('encrypts token payload, stores IV and auth tag, and decrypts accurately', () => {
@@ -102,6 +109,23 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
       expect(redacted).toBe('supe...ring');
       expect(redacted).not.toContain('access_token');
     });
+    it('durably restores encrypted credentials and a persisted disconnect without storing plaintext', () => {
+      const filename = path.join(directory, 'broker-token.json');
+      const durable = new TokenStorageService(envService, filename);
+      durable.storeToken({ accessToken: 'genuine-format-encrypted-fixture', expiresInSeconds: 3600, userId: 'FIXTURE', userType: 'individual' });
+      expect(fs.readFileSync(filename, 'utf8')).not.toContain('genuine-format-encrypted-fixture');
+      expect(fs.statSync(filename).mode & 0o777).toBe(0o600);
+      const restored = new TokenStorageService(envService, filename);
+      expect(restored.getToken()?.accessToken).toBe('genuine-format-encrypted-fixture');
+      restored.clearToken();
+      expect(new TokenStorageService(envService, filename).getToken()).toBeNull();
+    });
+    it('blocks production/live default encryption keys and corrupted durable token state', () => {
+      const unsafe = { config: EnvSchema.parse({ NODE_ENV: 'test', LIVE_EXECUTION_ENABLED: true }) } as EnvService;
+      expect(() => new TokenStorageService(unsafe)).toThrow(/private TOKEN_ENCRYPTION_KEY/);
+      const filename = path.join(directory, 'broken-token.json'); fs.writeFileSync(filename, '{"version":1,"record":"corrupted"}');
+      expect(() => new TokenStorageService(envService, filename)).toThrow(/cannot be validated/);
+    });
   });
 
   describe('2. Upstox OAuth 2.0 Authorization & Code Exchange', () => {
@@ -119,14 +143,11 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
       ).rejects.toThrow(/invalid, missing, or expired oauth csrf state/i);
     });
 
-    it('exchanges code, encrypts token, updates session status, and cleans up state', async () => {
+    it('rejects mock OAuth codes instead of inventing a connected broker session', async () => {
       const { state } = oauthService.generateAuthorizationUrl();
-      const result = await oauthService.exchangeAuthorizationCode('mock_code_123', state);
-
-      expect(result.success).toBe(true);
-      expect(result.session.isConnected).toBe(true);
-      expect(result.session.egressIpVerified).toBe(true);
-      expect(tokenStorage.hasValidToken()).toBe(true);
+      await expect(oauthService.exchangeAuthorizationCode('mock_code_123', state)).rejects.toThrow(/cannot establish/);
+      expect(tokenStorage.hasValidToken()).toBe(false);
+      expect(oauthService.getSessionStatus().isConnected).toBe(false);
 
       // Replay attack prevention: state must be consumed
       await expect(
@@ -136,7 +157,12 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
 
     it('clears encrypted token and broadcasts disconnect on logout', async () => {
       const { state } = oauthService.generateAuthorizationUrl();
-      await oauthService.exchangeAuthorizationCode('mock_code_123', state);
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ access_token: 'genuine-format-fixture-token', user_id: 'FIXTURE', user_type: 'individual' }) })));
+      const result = await oauthService.exchangeAuthorizationCode('fixture-authorization-code', state);
+      expect(result.session.isConnected).toBe(true);
+      expect(result.session.egressIpVerified).toBe(false);
+      const expiry = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(result.session.tokenExpiresAt!));
+      expect(expiry).toBe('03:29'); // Rounded down to a whole second, never beyond the broker cutoff.
       expect(tokenStorage.hasValidToken()).toBe(true);
 
       const res = oauthService.disconnect();
@@ -147,7 +173,7 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
   });
 
   describe('3. Upstox Read-Only Adapter & Live Write Safety Invariants', () => {
-    it('returns degraded health if unauthenticated, healthy when token is stored', async () => {
+    it('keeps mock credentials degraded instead of claiming successful broker authentication', async () => {
       tokenStorage.clearToken();
       const healthBefore = await upstoxBroker.getConnectionHealth();
       expect(healthBefore.isAuthenticated).toBe(false);
@@ -161,8 +187,9 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
       });
 
       const healthAfter = await upstoxBroker.getConnectionHealth();
-      expect(healthAfter.isAuthenticated).toBe(true);
-      expect(healthAfter.status).toBe('HEALTHY');
+      expect(healthAfter.isAuthenticated).toBe(false);
+      expect(healthAfter.status).toBe('DEGRADED');
+      expect(healthAfter.ipMatches).toBe(false);
       expect(healthAfter.registeredEgressIp).toBe('127.0.0.1');
     });
 
@@ -173,19 +200,35 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
           side: OrderSide.BUY,
           quantity: 25,
         }),
-      ).rejects.toThrow(/live order execution is strictly blocked in phase 4/i);
+      ).rejects.toThrow(/disabled by LIVE_EXECUTION_ENABLED/i);
 
       await expect(
         upstoxBroker.modifyOrder({ orderId: 'ord_1', price: 125 }),
-      ).rejects.toThrow(/live order modification is strictly blocked in phase 4/i);
+      ).rejects.toThrow(/disabled by LIVE_EXECUTION_ENABLED/i);
 
       await expect(upstoxBroker.cancelOrder('ord_1')).rejects.toThrow(
-        /live order cancellation is strictly blocked in phase 4/i,
+        /disabled by LIVE_EXECUTION_ENABLED/i,
       );
     });
   });
 
   describe('4. Broker Startup & Continuous Reconciliation Engine', () => {
+    it('begins unverified and never returns CLEAN after a failed live broker read', async () => {
+      expect(reconciliationService.getLatestReport().status).toBe('MISMATCH_DETECTED');
+      const ledger = new LiveExecutionLedgerService(path.join(directory, 'live.json'));
+      const selectedLive = { isLive: () => true } as BrokerRouterService;
+      const failingBroker = { getPositions: async () => { throw new Error('Broker unavailable'); }, getOrders: async () => [] } as unknown as UpstoxBrokerAdapter;
+      const recon = new BrokerReconciliationService(paperBroker, failingBroker, reservationManager, oauthService, gateway, envService, selectedLive, ledger);
+      const report = await recon.runReconciliation();
+      expect(report.status).toBe('MISMATCH_DETECTED'); expect(report.executionFrozen).toBe(true);
+      expect(reservationManager.isKillSwitchActive()).toBe(true);
+      expect(oauthService.getSessionStatus().lastReconciledAt).toBeNull();
+    });
+    it('uses the selected Testing adapter at startup without contacting Upstox', async () => {
+      await reconciliationService.onApplicationBootstrap();
+      expect(reconciliationService.getLatestReport().status).toBe('CLEAN');
+      expect(fetch).not.toHaveBeenCalled();
+    });
     it('returns CLEAN report when local ledger and broker positions match exactly', async () => {
       const localPositions = await paperBroker.getPositions();
       // Mirror local positions into broker to simulate exact match

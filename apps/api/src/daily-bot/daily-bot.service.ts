@@ -12,7 +12,7 @@ import {
   StrategyStatus,
   TradeMode,
 } from '@trading-bot/contracts';
-import { NSE_HOLIDAYS_2026 } from '@trading-bot/domain';
+import { isCalendarVerifiedForDate, NSE_HOLIDAYS_2026 } from '@trading-bot/domain';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { EnvService } from '../config/env.service';
@@ -35,8 +35,9 @@ function isActive(session: DailyBotSession): boolean {
 }
 
 function isTradingDate(date: string): boolean {
-  const day = new Date(`${date}T00:00:00.000Z`).getUTCDay();
-  return day !== 0 && day !== 6 && !NSE_HOLIDAYS_2026[date];
+  const candidate = new Date(`${date}T00:00:00.000Z`);
+  const day = candidate.getUTCDay();
+  return isCalendarVerifiedForDate(candidate) && day !== 0 && day !== 6 && !NSE_HOLIDAYS_2026[date];
 }
 
 function dayOutcomes(state: DailyBotState, tradingDate: string, mode: TradeMode) {

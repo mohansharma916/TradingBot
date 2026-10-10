@@ -1,3 +1,66 @@
+**Trading Bot — implementation review, 10 October 2026 (Asia/Kolkata)**
+
+**Current verdict: the audited defects have been addressed in code, and Testing / Live is implemented. Controlled personal paper testing is supported. Live execution still needs verification against the owner's actual Upstox account before treating this installation as production ready. Strategy profitability is unproven.**
+
+This review covers HEAD `0de83f6` and the subsequent working-tree fixes. The original second audit is preserved below as historical evidence; its outstanding findings describe the earlier checkout, not the current implementation. No real account connection, order, cancellation or account-specific broker validation was performed during this work.
+
+**The requested mode behavior**
+
+- The authenticated top navbar selects **Testing** or **Live**, using one shared server-confirmed mode across screens. Failed switches do not display success.
+- Testing uses separate durable paper funds, simulated fills and simulated charges. The initial virtual balance is configurable; subsequent funds follow the actual simulator ledger.
+- Live retrieves [Upstox V3 net cash](https://upstox.com/developer/api-documentation/get-funds-and-margin-v3/) from `available_to_trade.cash_available_to_trade.total`. Pledged collateral is excluded from spendable option-buy cash. Genuine zero remains zero; unavailable funds block entries. Account capital and loss caps still apply.
+- Selecting Live does not place an order. It requires the server feature flag, verified funds and a flat account. New entries additionally require fresh executable data, arming, current strategy approval and the signed owner checklist. Daily Bot sessions must match the selected mode.
+- Active positions, unresolved intents, pending orders and active Daily Bot sessions block mode changes. Restart preserves the selected ledger and starts disarmed.
+
+**Corrections to the second-audit findings**
+
+| Earlier findings | Current implementation and practical limit |
+| --- | --- |
+| 1–2: invented UI exits, orders and approvals | UI state follows server responses and confirmed fills. Failed or pending exits preserve exposure. No fabricated execution event, fee saving or successful approval is added locally. |
+| 3–4: ACK treated as fill; wrong broker IDs/protection payload | Documented V3 HFT orders retain actual `order_ids`. Actual quantities and weighted fill prices determine commitment. Protection uses a verified SINGLE SELL stop for confirmed exposure; targets are monitored by the API. |
+| 5: missing owner authentication | Private owner password and bounded JWT protect HTTP and WebSocket account access. Logout, expiry and restart invalidate sessions. Missing password blocks login; production requires configured credentials. |
+| 6: DISARMED did not block entries | Shared reservation and final broker-dispatch gates enforce arming expiry, kill switch, selected mode and funding. Async entry boundaries recheck approval, calendar, fresh quotes, current broker exposure, held risk and unchanged login/mode. Restart never restores arming. |
+| 7: ambiguous outcomes released risk or appeared CLEAN | Durable intents precede dispatch. Unknown outcomes retain exposure and freeze entries. Complete successful broker reads are required for reconciliation. Unknown stop dispatch blocks a competing SELL. |
+| 8–9, 17: fabricated contracts/liquidity and incorrect feed decoding | Official broker instrument metadata supplies keys, lots, ticks and expiries. The V3 protobuf/subscription contract is implemented. No seed quote or manufactured depth is substituted; REST is explicitly delayed and missing depth cannot authorize Live entry. Real broker-session validation remains outstanding. |
+| 10: cash was not enforced at dispatch | Live verifies V3 spendable cash before reserving and before BUY dispatch. Testing never substitutes its balance into the Live ledger. Zero-cash plus pledged-collateral regression passes. |
+| 11: fabricated or incorrect P&L | Reports match confirmed BUY/SELL fills using FIFO entry cost and allocated fees. Empty and BUY-only ledgers have zero realized profit. Unmatched sales and charge provenance are explicit. Live fees remain estimates pending broker contract notes. |
+| 12: modeled backtests presented as genuine option fills | Provider failure returns unavailable rather than random history. Underlying-candle providers and modeled option pricing are disclosed. The explicit synthetic fixture generator remains for tests/demo use; it is not a production history fallback. Actual historical option-performance validation is still needed. |
+| 13–16: strategy mismatch, chronology, drawdown and version errors | Runtime and backtest use canonical AST evaluation, configured direction/exits/timeframe and execution hashes. Stops precede ambiguous same-bar favorable moves; trailing updates affect later bars. Funding includes costs, final settlement updates drawdown, and ORB freezes its opening range. Unsupported rules fail closed. Scores remain labeled heuristics. |
+| 18: false readiness, memory-only state and broken compiled startup | Tokens persist encrypted; paper, risk, mode, proposals, strategy, Daily Bot and live execution state use durable files. An exclusive runtime lease precedes recovery. Worker is a passive authenticated observer. Health exposes unavailable measurements. Compiled packages and protobuf assets now initialize correctly. |
+| Daily Bot PAPER-only path and stale fee labels | Paper and owner-approved Live execution share the selected broker and confirmed exit workflow. Checklist, fresh data, funds, strategy version and risk gates are checked before dispatch. Fee labels show current estimated calculations. |
+
+Relevant implementation: [mode selection](/Users/user/Documents/Projects/TRADING-BOT/apps/api/src/trading/trading.controller.ts), [broker funds/orders](/Users/user/Documents/Projects/TRADING-BOT/apps/api/src/broker/upstox-broker.adapter.ts), [durable live ledger](/Users/user/Documents/Projects/TRADING-BOT/apps/api/src/broker/live-execution-ledger.service.ts), [risk reservations](/Users/user/Documents/Projects/TRADING-BOT/apps/api/src/risk/risk-reservation.manager.ts), [confirmed exits](/Users/user/Documents/Projects/TRADING-BOT/apps/api/src/orders/orders.service.ts), [shared workstation state](/Users/user/Documents/Projects/TRADING-BOT/apps/trader/src/hooks/useWorkstation.ts), and [owner evidence UI](/Users/user/Documents/Projects/TRADING-BOT/apps/trader/src/features/health/LiveChecklistReview.tsx).
+
+**Validation performed**
+
+| Check | Result |
+| --- | --- |
+| Full isolated unit/regression suite | **345 tests passed across 35 files** with `pnpm test --maxWorkers=2 --minWorkers=1`; no owner `.env` credentials or Live settings are inherited. |
+| Workspace typecheck | Passed. |
+| Root production build | Passed, including emitted API protobuf assets. |
+| Expo trader web export | Passed. |
+| Compiled runtime initialization | Passed with a fresh private state directory and all outbound requests blocked. Actual provider graph, exclusive lease, Testing defaults, disarmed risk and compiled worker were checked. |
+| Compiled HTTP/WebSocket smoke | Passed: owner login, protected routes, authenticated socket, logout revocation, Testing funds, empty accounting, disabled Live gate and actual worker observation. No broker calls were allowed. |
+
+Regression coverage includes rejected/partial/unknown orders, protection failure, zero genuine cash, persisted restart recovery, duplicated settlements, failed exits, stale/missing depth, mode switching, owner access, strategy rules, conservative backtest accounting and unverified calendar years. Build and test success do not establish actual broker interoperability or a profitable trading edge.
+
+**Remaining requirements and limits**
+
+1. Configure private owner credentials and encryption/signing keys, connect the genuine Upstox account, and verify broker permissions/settings, actual feed, funds, order lookup, rejection handling, stop placement/lookup/cancellation and recovery. Record the evidence in the owner checklist. These account-specific checks were not performed or automatically marked passed.
+2. Broker stop triggers do not guarantee execution price or completion. API-managed targets and tighter trailing require the API process and fresh data. A scheduled broker stop and a confirmed exit must be distinguished; unknown outcomes can require manual broker reconciliation.
+3. Use one API per Upstox account and a persistent private state directory. The file lease is a single-host ownership mechanism, not distributed leadership, and the ledger assumes the configured single account. Reconcile the original account before switching broker accounts; deleting state cannot resolve exposure. After a crash, verify the old process has stopped before removing a stale lease. An absolute state path avoids accidentally loading a different ledger from another launch directory.
+4. The verified exchange calendar covers **2026 only**, including the published additional election closure. New entries in unverified years are blocked; existing exit monitoring continues. Maintain future calendars from official exchange notices.
+5. Estimated charges, modeled option backtests and heuristic scores do not prove actual profits, win probability or the configured daily earnings target. Validate on genuine option contracts, realistic spreads/costs and out-of-sample results, then sustain supervised paper testing.
+6. This machine returned **ENOSPC** during a parallel test/build run; the bounded-worker rerun passed all tests. The data volume reported 100% capacity with approximately 730 MiB available at inspection. Ensure adequate local storage before Live operation, because durable intent/risk/token writes require free space. No unrelated files were deleted during this work.
+
+The current analysis agents are deterministic code; no LLM-generated profitability evidence has been introduced. Genuine broker data, disclosed simulations and unavailable measurements are now distinguished. This report makes no claim that every future broker outcome has been tested or that real-money operation has been certified.
+
+---
+
+**Historical second audit — before these implementation fixes**
+
+The remainder is the original report for HEAD `e42e718`, retained to show the problems that prompted the changes above. Its verdict and outstanding lists apply to that earlier checkout.
+
 **Trading Bot — second audit, 10 October 2026 (Asia/Kolkata)**
 
 **Verdict: still not ready for real-money trading. Data, fills, protection status and performance displays are not consistently trustworthy.** Several fixes are confirmed. Remaining defects can conceal open exposure, invent profits, execute different rules from those backtested, and prevent production services from starting. No profitable trading edge has been established.

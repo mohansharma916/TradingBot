@@ -4,7 +4,7 @@ import {
   DailyBotSession, DailyBotTrade, InstrumentType, OrderSide, OrderType,
   ProductType, ProposalStatus, QuoteSnapshot, StrategyConfig, StrategyStatus, TradeMode, TradeProposal,
 } from '@trading-bot/contracts';
-import { calculateOptionCharges, evaluateStrategySignal, NSE_HOLIDAYS_2026, strategyExitLevels, strategyTimeframeMinutes } from '@trading-bot/domain';
+import { calculateOptionCharges, evaluateStrategySignal, isCalendarVerifiedForDate, NSE_HOLIDAYS_2026, strategyExitLevels, strategyTimeframeMinutes } from '@trading-bot/domain';
 import { AgentCoordinatorService } from '../agents/agent-coordinator.service';
 import { AgentToolsService } from '../agents/agent-tools.service';
 import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
@@ -18,8 +18,11 @@ import { BrokerRouterService } from '../broker/broker-router.service';
 import { LiveExecutionLedgerService } from '../broker/live-execution-ledger.service';
 import { TradingModeService } from '../trading/trading-mode.service';
 import { OrdersService, OwnedExitResult } from '../orders/orders.service';
+import { GoLiveChecklistService } from '../orders/go-live-checklist.service';
+import { BrokerRequestError } from '../broker/upstox-broker.adapter';
 
 type SessionCheckpoint = (session: DailyBotSession) => void | Promise<void>;
+class DailyEntryDispatchRefusal extends BadRequestException {}
 
 /** Executes the immutable daily strategy snapshot and owns protection independently of the UI. */
 @Injectable()
@@ -40,6 +43,7 @@ export class DailyBotExecutionService {
     @Optional() @Inject(TradingModeService) private readonly mode?: TradingModeService,
     @Optional() @Inject(LiveExecutionLedgerService) private readonly liveLedger?: LiveExecutionLedgerService,
     @Optional() @Inject(OrdersService) private readonly orders?: OrdersService,
+    @Optional() @Inject(GoLiveChecklistService) private readonly goLiveChecklist?: GoLiveChecklistService,
   ) {}
 
   private get broker() { return this.router ?? this.paperBroker; }
@@ -52,7 +56,7 @@ export class DailyBotExecutionService {
   public restoreDailyLedger(sessions: DailyBotSession[]): Set<string> {
     const today = this.istClock().date;
     // Persistent broker/risk ledgers are authoritative. Never deduct a restored position twice.
-    if (!this.isLive() && this.reservations.getActiveReservations().length === 0 && this.reservations.getRealizedDailyLoss() === 0) {
+    if (!this.isLive() && this.reservations.getActiveReservations().length === 0 && this.reservations.getRealizedDailyLoss() === 0 && this.reservations.getRealizedNetDailyPnl() === 0) {
       this.reservations.restoreDailyResults(today, sessions.filter((session) => session.config.tradingMode === TradeMode.PAPER && session.config.tradingDate === today).flatMap((session) => session.trades.filter((trade) => trade.status === 'CLOSED').map((trade) => ({ orderId: trade.orderId, realizedNetPnl: trade.realizedNetPnl }))));
     }
     const recovered = new Set<string>();
@@ -63,7 +67,7 @@ export class DailyBotExecutionService {
     const instrument = this.catalog.getInstrument(trade.instrumentKey) ?? trade.instrumentSnapshot;
     if (this.isLive()) {
       const entry = this.liveLedger?.getEntries().find((record) => record.proposalId === trade.proposalId && record.side === OrderSide.BUY);
-      if (entry && entry.filledQuantity === trade.quantity && entry.reservationId === trade.reservationId && entry.gttOrderId && this.reservations.getReservation(trade.reservationId!)?.status === 'COMMITTED') recovered.add(session.id);
+      if (trade.status === 'OPEN' && entry && entry.filledQuantity === entry.quantity && entry.filledQuantity === trade.quantity && entry.reservationId === trade.reservationId && entry.gttOrderId && this.reservations.getReservation(trade.reservationId!)?.status === 'COMMITTED') recovered.add(session.id);
       this.reservations.setKillSwitch(true); // Actual broker reconciliation is required after restart.
       return recovered;
     }
@@ -92,6 +96,7 @@ export class DailyBotExecutionService {
     check('mode', 'Execution mode', this.matchesMode(config), 'The saved mode must match the global Testing/PAPER or Live/APPROVAL selection. Live entries require individual owner approval.');
     if (config.tradingMode === TradeMode.APPROVAL) {
       check('live-enabled', 'Live execution enabled', this.env.config.LIVE_EXECUTION_ENABLED && !!this.router && !!this.orders && !!this.liveLedger, 'Live execution requires the deployment flag, durable execution ledger and shared owned-exit service.');
+      check('owner-readiness', 'Owner go-live verification', this.liveAuthorized(), 'Live entry requires a complete signed owner checklist with current broker, risk, recovery and protection verification evidence. Missing or unreadable evidence blocks execution.');
       try {
         const funds = await this.broker.getFunds();
         const verified = funds.source === 'LIVE_BROKER' && funds.status === 'VERIFIED' && Number.isFinite(funds.availableCash) && funds.availableCash >= 0;
@@ -100,10 +105,11 @@ export class DailyBotExecutionService {
       } catch { check('verified-funds', 'Verified broker funds', false, 'Live broker funds could not be verified.'); }
     }
     check('trading-date', 'Trading date', config.tradingDate === clock.date, `Configured ${config.tradingDate}; current trading date is ${clock.date} IST.`);
+    check('exchange-calendar', 'Verified exchange calendar', isCalendarVerifiedForDate(new Date(`${clock.date}T00:00:00.000Z`)), `New entries require a verified NSE F&O calendar for ${clock.date.slice(0, 4)}. The bundled calendar currently covers 2026 only.`);
     check('market-session', 'Market session', this.isTradingDay(clock) && clock.time >= '09:15' && clock.time < config.lastEntryTime, `Entries require an exchange trading day between 09:15 and ${config.lastEntryTime} IST; current time is ${clock.weekday} ${clock.time}${NSE_HOLIDAYS_2026[clock.date] ? ` (${NSE_HOLIDAYS_2026[clock.date]})` : ''}.`);
     const timeframe = strategyTimeframeMinutes(strategy.timeframe);
     const supportedExits = strategyExitLevels({ strategy, entryPrice: 10000, quantity: 1 });
-    check('strategy', 'Selected strategy', strategy.id === config.strategyId && strategy.market === 'NSE_FO' && [1, 5, 15, 30].includes(timeframe) && !supportedExits.error && ![StrategyStatus.RETIRED, StrategyStatus.PAUSED, StrategyStatus.DRAFT].includes(strategy.status), supportedExits.error ?? 'Use an active intraday option strategy with aligned supported indicator timeframes and premium exits.');
+    check('strategy', 'Selected strategy', strategy.id === config.strategyId && strategy.market === 'NSE_FO' && [1, 5, 15, 30].includes(timeframe) && !strategy.astConfig?.indicators?.some((indicator) => indicator.timeframe && indicator.timeframe !== strategy.timeframe) && !supportedExits.error && ![StrategyStatus.RETIRED, StrategyStatus.PAUSED, StrategyStatus.DRAFT].includes(strategy.status), supportedExits.error ?? 'Use an active intraday option strategy with aligned supported indicator timeframes and premium exits.');
     check('kill-switch', 'Account risk gate', !this.reservations.isKillSwitchActive(), this.reservations.isKillSwitchActive() ? 'The account kill switch is active. Review account risk before enabling entries.' : 'Account kill switch is clear.');
     const owned = session?.trades.filter((trade) => trade.status !== 'CLOSED') ?? [];
     const positions = (await this.broker.getPositions()).filter((position) => position.netQuantity !== 0);
@@ -140,6 +146,7 @@ export class DailyBotExecutionService {
       if (!this.matchesMode(session.config)) { session.status = 'PAUSED'; this.reservations.disarm(); this.event(session, 'MODE_CHANGED', 'The global trading mode changed. Review this saved setup before resuming.'); return; }
       if (this.exitDue(session)) {
         session.status = 'COMPLETED';
+        this.reservations.disarm();
         session.stoppedAt = new Date().toISOString();
         this.event(session, 'SESSION_COMPLETED', 'Trading-day cutoff reached; entries are closed.');
         return;
@@ -229,10 +236,17 @@ export class DailyBotExecutionService {
   }
 
   private async enter(session: DailyBotSession, proposal: TradeProposal, signalKey: string, checkpoint?: SessionCheckpoint): Promise<void> {
+    const live = this.isLive();
+    const modeRevision = this.router?.getModeRevision();
+    const approvedProposal = JSON.stringify(proposal);
+    const approvedStrategy = JSON.stringify(session.strategySnapshot);
+    const approvedConfig = JSON.stringify(session.config);
     if (!this.entryWindow(session) || session.status !== 'RUNNING' || !this.matchesMode(session.config) || this.reservations.isKillSwitchActive() || !this.reentryAllowed(session)) throw new BadRequestException('New entries are blocked by the current bot state, trading mode, cooldown, or entry window.');
     this.reservations.assertEntryAllowed();
+    if (this.isLive() && !this.liveAuthorized()) throw new BadRequestException('Live execution is blocked until the complete owner verification checklist is signed and permitted.');
     if (session.trades.some((trade) => trade.status !== 'CLOSED') || session.processedSignalKeys.includes(signalKey) || session.trades.some((trade) => trade.proposalId === proposal.id)) return;
     if (session.tradesExecuted >= Math.min(session.config.maximumTradesPerDay, session.strategySnapshot.risk?.maxTradesPerDay ?? session.config.maximumTradesPerDay) || Date.parse(proposal.expiresAt) <= Date.now() || !Number.isFinite(Date.parse(proposal.expiresAt)) || proposal.strategyId !== session.config.strategyId || proposal.strategyVersion !== session.strategySnapshot.version) throw new BadRequestException('The daily trade count, strategy version, or proposal expiry blocks this entry.');
+    if ((this.isLive() && !proposal.versionHash) || (proposal.versionHash && proposal.versionHash !== session.strategySnapshot.versionHash)) throw new BadRequestException('The proposal does not match the immutable saved strategy hash.');
     const quote = this.feed.getQuote(proposal.instrumentKey);
     const underlying = this.feed.getQuote(this.underlyingKey(session.strategySnapshot));
     if (!this.fresh(quote) || !this.fresh(underlying, false)) throw new BadRequestException('Fresh observed underlying and executable option depth are required before placing the order.');
@@ -255,18 +269,47 @@ export class DailyBotExecutionService {
     const allInLoss = this.money((entry - stop + 0.25) * proposal.quantity + charges + slippage);
     const riskCap = Math.min(session.config.perTradeMaxLossAllIn, effective.risk!.maxAllInTradeLossInr, session.config.dailyMaxLossAllIn - this.sessionLoss(session));
     if (charges > effective.risk!.maxRoundTripCostBudgetInr || allInLoss > riskCap || capital + charges + slippage > Math.min(effective.risk!.maxCapitalInr, session.config.maxCapitalPerTrade, session.config.dailyCapitalBudget - this.sessionLoss(session))) throw new BadRequestException('Confirmed executable price, fees, and slippage exceed the configured trade capital or all-in loss budget.');
+    const assertDispatchBoundary = (): void => {
+      try {
+        if (this.isLive() !== live || (this.router && this.router.getModeRevision() !== modeRevision) || !this.matchesMode(session.config)) throw new Error('Trading mode changed before entry dispatch.');
+        if (session.status !== 'RUNNING' || !this.entryWindow(session) || !this.reentryAllowed(session) || session.trades.some((trade) => trade.status !== 'CLOSED')) throw new Error('Session, calendar, entry time, existing exposure or cooldown no longer permits a BUY.');
+        this.reservations.assertEntryAllowed();
+        if (live && (!this.env.config.LIVE_EXECUTION_ENABLED || !this.liveAuthorized())) throw new Error('Owner go-live authorization changed before dispatch; no BUY was submitted.');
+        if (session.pendingProposalId !== proposal.id || session.pendingProposal?.id !== proposal.id || JSON.stringify(proposal) !== approvedProposal || JSON.stringify(session.strategySnapshot) !== approvedStrategy || JSON.stringify(session.config) !== approvedConfig) throw new Error('The exact approved proposal or saved strategy configuration changed before dispatch.');
+        if (!Number.isFinite(Date.parse(proposal.expiresAt)) || Date.parse(proposal.expiresAt) <= Date.now() || proposal.strategyId !== session.config.strategyId || proposal.strategyVersion !== session.strategySnapshot.version || (live && !proposal.versionHash) || (proposal.versionHash && proposal.versionHash !== session.strategySnapshot.versionHash)) throw new Error('Proposal approval, expiry or immutable strategy hash no longer permits entry.');
+        const currentInstrument = this.catalog.getInstrument(proposal.instrumentKey);
+        if (!currentInstrument || JSON.stringify(currentInstrument) !== JSON.stringify(instrument)) throw new Error('Contract metadata changed or expired before dispatch.');
+        const current = this.feed.getQuote(proposal.instrumentKey);
+        const spot = this.feed.getQuote(this.underlyingKey(session.strategySnapshot));
+        if (!this.fresh(current) || !this.fresh(spot, false)) throw new Error('Fresh executable option depth and observed underlying data are required at BUY dispatch.');
+        const selection = session.strategySnapshot.astConfig?.contractSelection;
+        const spreadPct = (current.askPrice - current.bidPrice) / current.askPrice * 100;
+        if (![current.volume, current.openInterest].every(Number.isFinite) || spreadPct > (selection?.maxBidAskSpreadPct ?? session.strategySnapshot.entry?.maxBidAskSpreadPct ?? 1) || current.volume < (selection?.minVolume ?? session.strategySnapshot.entry?.minVolume ?? 1000) || current.openInterest < (selection?.minOpenInterest ?? 0) || current.askPrice < (selection?.minPremium ?? 0) || current.askPrice > (selection?.maxPremium ?? Infinity)) throw new Error('Current option depth no longer satisfies the approved strategy liquidity rules.');
+        const executable = live ? current.askPrice : this.ceilTick(current.askPrice + 0.25, instrument.tickSize);
+        if (executable > entry) throw new Error('Current executable ask exceeds the reserved maximum entry price.');
+        const bars = this.tools.getClosedCandles(this.underlyingKey(session.strategySnapshot), true, session.strategySnapshot.timeframe);
+        const signal = evaluateStrategySignal({ strategy: this.effectiveStrategy(session), candles: bars, currentTimeIst: this.istClock().time, candleTimestampBasis: 'CLOSE' });
+        if (instrument.instrumentType === InstrumentType.CE ? !signal.bullishSignal : !signal.bearishSignal) throw new Error('The approved direction no longer matches the verified closed-bar strategy signal.');
+      } catch (error) { throw new DailyEntryDispatchRefusal(this.message(error)); }
+    };
     const existing = (await this.broker.getPositions()).filter((position) => position.netQuantity !== 0);
+    assertDispatchBoundary();
     if (existing.length) throw new BadRequestException('Existing broker exposure must be reconciled before opening another position.');
     const reservation = this.reservations.acquireReservation({ proposalId: proposal.id, signalKey, instrumentKey: proposal.instrumentKey, capitalRequired: capital + charges + slippage, allInRisk: allInLoss, maxTradeRiskCap: riskCap, maxCapitalCap: session.config.maxCapitalPerTrade, maxDailyRiskCap: session.config.dailyMaxLossAllIn });
+    const ownsIntent = !live || this.liveLedger!.tryLockIntent(reservation.id);
+    if (!ownsIntent) { this.reservations.releaseReservation(reservation.id, 'Entry intent is already being managed.'); throw new BadRequestException('Entry protection is already being managed by another server workflow.'); }
     // Record intent before any asynchronous dispatch; replayed signals cannot place another order.
     session.processedSignalKeys.push(signalKey);
     let dispatched = false;
+    let acknowledged = false;
     let confirmedTerminalNoFill = false;
     try {
       this.event(session, 'ENTRY_SUBMITTING', `Entry intent ${reservation.id} recorded for ${proposal.symbol}; awaiting confirmed broker fill.`);
       await checkpoint?.(session);
+      assertDispatchBoundary();
       dispatched = true;
-      const ack = await this.broker.placeOrder({ intentId: reservation.id, proposalId: proposal.id, reservationId: reservation.id, signalKey, reservedCapital: capital + charges + slippage, reservedRisk: allInLoss, tag: `DAILY_${session.id}`, instrumentKey: proposal.instrumentKey, side: OrderSide.BUY, orderType: this.isLive() ? OrderType.LIMIT : OrderType.MARKET, price: this.isLive() ? entry : undefined, product: ProductType.I, quantity: proposal.quantity, stopLossPrice: stop, disableTarget: true, estimatedCharges: charges, maximumExecutionPrice: entry });
+      const ack = await this.broker.placeOrder({ intentId: reservation.id, proposalId: proposal.id, reservationId: reservation.id, signalKey, reservedCapital: capital + charges + slippage, reservedRisk: allInLoss, tag: `DAILY_${session.id}`, instrumentKey: proposal.instrumentKey, side: OrderSide.BUY, orderType: live ? OrderType.LIMIT : OrderType.MARKET, price: live ? entry : undefined, product: ProductType.I, quantity: proposal.quantity, stopLossPrice: stop, targetPrice: exits.targetPrice, disableTarget: true, estimatedCharges: charges, maximumExecutionPrice: entry, expectedModeRevision: modeRevision, beforeBuyDispatch: assertDispatchBoundary });
+      acknowledged = true;
       if (ack.status === 'REJECTED') {
         confirmedTerminalNoFill = true;
         this.reservations.releaseReservation(reservation.id, ack.message);
@@ -276,10 +319,44 @@ export class DailyBotExecutionService {
         await checkpoint?.(session);
         return;
       }
-      const confirmation = this.router ? await this.router.confirmFill(ack, proposal.quantity) : undefined;
+      let confirmation = this.router ? await this.router.confirmFill(ack, proposal.quantity) : undefined;
+      if (this.isLive() && confirmation && !confirmation.complete && !confirmation.terminal) {
+        // Cancel the known unfilled BUY remainder before freezing; acceptance alone is not a cancellation proof.
+        try {
+          for (const id of ack.orderIds ?? [ack.orderId]) await this.router!.cancelOrder(id);
+          confirmation = await this.router!.confirmFill(ack, proposal.quantity);
+        } catch (error) { this.event(session, 'ENTRY_CANCEL_UNVERIFIED', `The pending BUY remainder could not be verified cancelled: ${this.message(error)}. Review broker orders immediately.`); }
+      }
       const fills = this.broker.getFills().filter((fill) => (ack.orderIds ?? [ack.orderId]).includes(fill.orderId) && fill.side === OrderSide.BUY);
       const quantity = fills.reduce((sum, fill) => sum + fill.fillQty, 0);
       if (confirmation?.terminal && confirmation.filledQuantity === 0) confirmedTerminalNoFill = true;
+      if (this.isLive() && confirmation?.terminal && !confirmation.complete && quantity > 0 && quantity < proposal.quantity && quantity === confirmation.filledQuantity && confirmation.averagePrice > 0) {
+        // Cancellation plus verified terminal partial fills establishes actual owned exposure.
+        // Record it as ERROR, never as a complete approved trade, and protect that actual quantity.
+        const price = confirmation.averagePrice;
+        this.reservations.commitReservationToPosition(reservation.id, this.money(price * quantity));
+        const partial: DailyBotTrade = { proposalId: proposal.id, orderId: ack.orderId, instrumentKey: proposal.instrumentKey, symbol: proposal.symbol, quantity,
+          entryPrice: price, currentPrice: price, stopPrice: stop, initialStopPrice: stop, peakNetProfit: 0, protectedNetProfit: -allInLoss, trailingActive: false,
+          status: 'ERROR', realizedNetPnl: 0, estimatedCharges: calculateOptionCharges({ buyPrice: price, sellPrice: Math.max(instrument.tickSize, stop), quantity }).totalRoundTripCharges,
+          reservationId: reservation.id, signalKey, tickSize: instrument.tickSize, instrumentSnapshot: structuredClone(instrument), openedAt: new Date().toISOString(), closedAt: null };
+        session.trades.push(partial);
+        session.tradesExecuted++;
+        session.status = 'ERROR';
+        this.reservations.setKillSwitch(true);
+        try {
+          const protection = await this.router!.placeProtectiveExit({ instrumentKey: partial.instrumentKey, quantity, stopLossPrice: stop, targetPrice: exits.targetPrice, entryIntentId: reservation.id });
+          if (!protection.gttOrderId) throw new Error('Partial-fill protection was not verified.');
+          partial.gttId = protection.gttOrderId;
+          this.event(session, 'PARTIAL_ENTRY_PROTECTED', `Only ${quantity}/${proposal.quantity} units were broker-confirmed before cancellation. That actual quantity has a verified stop; entries remain frozen pending reconciliation.`);
+          session.pendingProposalId = null;
+          session.pendingProposal = null;
+          await checkpoint?.(session);
+        } catch (error) {
+          this.event(session, 'PARTIAL_PROTECTION_FAILED', `Terminal partial exposure could not obtain verified protection: ${this.message(error)}. Attempting the shared owned exit.`);
+          await this.exit(session, partial, 'PROTECTION_FAILED', checkpoint);
+        }
+        return;
+      }
       if (quantity !== proposal.quantity || (confirmation && !confirmation.complete)) {
         this.reservations.setKillSwitch(true);
         throw new BadRequestException('Entry remains pending, partial, or ambiguous. Its durable intent and full risk reservation are retained for broker reconciliation.');
@@ -293,7 +370,7 @@ export class DailyBotExecutionService {
       if (this.isLive()) {
         // One verified SINGLE SELL GTT protects the actual complete fill; targets are server-owned.
         try {
-          const protection = await this.router!.placeProtectiveExit({ instrumentKey: trade.instrumentKey, quantity, stopLossPrice: stop, entryIntentId: reservation.id });
+          const protection = await this.router!.placeProtectiveExit({ instrumentKey: trade.instrumentKey, quantity, stopLossPrice: stop, targetPrice: exits.targetPrice, entryIntentId: reservation.id });
           trade.gttId = protection.gttOrderId;
           if (!trade.gttId) throw new Error('Broker protective stop was not verified.');
         } catch (error) {
@@ -314,10 +391,12 @@ export class DailyBotExecutionService {
       await checkpoint?.(session);
     } catch (error) {
       // Absence of a fill is never proof that a dispatched live BUY failed.
-      if (!dispatched || confirmedTerminalNoFill) {
+      if (!dispatched || confirmedTerminalNoFill || (!acknowledged && (error instanceof DailyEntryDispatchRefusal || (error instanceof BrokerRequestError && error.definiteRejection)))) {
         this.reservations.releaseReservation(reservation.id, this.message(error));
         session.pendingProposalId = null;
         session.pendingProposal = null;
+        this.event(session, 'ENTRY_NOT_DISPATCHED', `Known no-fill refusal: ${this.message(error)}. Its held reservation was released; no unresolved broker fill was assumed.`);
+        await checkpoint?.(session);
       } else {
         session.status = 'ERROR';
         this.reservations.setKillSwitch(true);
@@ -325,6 +404,8 @@ export class DailyBotExecutionService {
         await checkpoint?.(session);
       }
       throw error;
+    } finally {
+      if (live) this.liveLedger!.unlockIntent(reservation.id);
     }
   }
 
@@ -506,8 +587,8 @@ export class DailyBotExecutionService {
     return this.money((trade.entryActualCharges ?? calculateOptionCharges({ buyPrice: trade.entryPrice, sellPrice: 0, quantity: trade.quantity }).totalRoundTripCharges - 23.6) + sellCharges);
   }
   private entryWindow(session: DailyBotSession): boolean { const clock = this.istClock(); const strategy = this.effectiveStrategy(session); return clock.date === session.config.tradingDate && this.isTradingDay(clock) && clock.time >= strategy.session!.start && clock.time < strategy.session!.lastEntry && !this.exitDue(session); }
-  private isTradingDay(clock: { date: string; weekday: string }): boolean { return clock.weekday !== 'Sat' && clock.weekday !== 'Sun' && !NSE_HOLIDAYS_2026[clock.date]; }
-  private exitDue(session: DailyBotSession): boolean { const clock = this.istClock(); const cutoff = [session.config.mandatoryExitTime, session.strategySnapshot.astConfig?.exitRules?.marketCutoffTime ?? session.config.mandatoryExitTime].sort()[0]!; return clock.date > session.config.tradingDate || (clock.date === session.config.tradingDate && clock.time >= cutoff); }
+  private isTradingDay(clock: { date: string; weekday: string }): boolean { return isCalendarVerifiedForDate(new Date(`${clock.date}T00:00:00.000Z`)) && clock.weekday !== 'Sat' && clock.weekday !== 'Sun' && !NSE_HOLIDAYS_2026[clock.date]; }
+  private exitDue(session: DailyBotSession): boolean { const clock = this.istClock(); const cutoff = [session.config.mandatoryExitTime, session.strategySnapshot.astConfig?.exitRules?.marketCutoffTime ?? session.strategySnapshot.exit?.marketCutoff ?? session.config.mandatoryExitTime].sort()[0]!; return clock.date > session.config.tradingDate || (clock.date === session.config.tradingDate && clock.time >= cutoff); }
   private istClock(): { date: string; time: string; weekday: string } {
     const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
     const value = (kind: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === kind)?.value ?? '';
@@ -518,6 +599,10 @@ export class DailyBotExecutionService {
     const observed = quote.provenance === 'LIVE' || (!this.isLive() && process.env.NODE_ENV === 'test' && quote.provenance === 'SIMULATED');
     const age = Date.now() - Date.parse(quote.timestamp);
     return observed && !quote.isStale && Number.isFinite(age) && age >= -1000 && age <= 3000 && Number.isFinite(quote.lastPrice) && quote.lastPrice > 0 && (!executable || (quote.depthKnown === true && quote.bidQty > 0 && quote.askQty > 0 && Number.isFinite(quote.bidPrice) && quote.bidPrice > 0 && Number.isFinite(quote.askPrice) && quote.askPrice >= quote.bidPrice));
+  }
+  private liveAuthorized(): boolean {
+    try { return this.goLiveChecklist?.getChecklist().liveExecutionPermitted === true; }
+    catch { return false; }
   }
   private reentryAllowed(session: DailyBotSession): boolean {
     const rules = session.strategySnapshot.astConfig?.entryRules;
@@ -534,7 +619,12 @@ export class DailyBotExecutionService {
     Object.assign(trade, { status: 'CLOSED', exitOrderId: result.orderId, exitPrice: result.exitPrice, currentPrice: result.exitPrice, closedAt: new Date().toISOString(), exitReason: reason, grossPnl: this.money((result.exitPrice! - trade.entryPrice) * trade.quantity), netPnl: result.netPnl, realizedNetPnl: result.netPnl, estimatedCharges: result.charges });
     return true;
   }
-  private underlyingKey(strategy: StrategyConfig): string { return strategy.underlying === 'NIFTY' ? 'NSE_INDEX|Nifty 50' : 'NSE_INDEX|Nifty Bank'; }
+  private underlyingKey(strategy: StrategyConfig): string {
+    const keys: Record<string, string> = { NIFTY: 'NSE_INDEX|Nifty 50', BANKNIFTY: 'NSE_INDEX|Nifty Bank', FINNIFTY: 'NSE_INDEX|Nifty Fin Service', MIDCPNIFTY: 'NSE_INDEX|NIFTY MID SELECT' };
+    const key = keys[strategy.underlying];
+    if (!key) throw new BadRequestException('No verified supported underlying identifier is configured for this strategy.');
+    return key;
+  }
   private ceilTick(price: number, tick: number): number { return this.money(Math.ceil((price - 1e-9) / tick) * tick); }
   private money(value: number): number { return Number(value.toFixed(2)); }
   private message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

@@ -1,16 +1,24 @@
 import { MarketSession } from '@trading-bot/contracts';
 
 /**
- * NSE/BSE Exchange Holidays for 2026 Calendar Year
+ * NSE 2026 F&O holiday calendar, with the subsequent January election closure.
+ * Sources: https://nsearchives.nseindia.com/content/circulars/FAOP71777.pdf
+ * https://www.nseindia.com/resources/exchange-communication-holidays
  * Formatted as YYYY-MM-DD
  */
 export const NSE_HOLIDAYS_2026: Record<string, string> = {
+  '2026-01-15': 'Municipal Corporation Election - Maharashtra',
   '2026-01-26': 'Republic Day',
   '2026-03-03': 'Holi',
-  '2026-03-20': 'Id-Ul-Fitr (Ramzan Id)',
+  '2026-03-21': 'Id-Ul-Fitr (Ramadan Eid)',
+  '2026-03-26': 'Shri Ram Navami',
+  '2026-03-31': 'Shri Mahavir Jayanti',
   '2026-04-03': 'Good Friday',
   '2026-04-14': 'Dr. Baba Saheb Ambedkar Jayanti',
   '2026-05-01': 'Maharashtra Day',
+  '2026-05-28': 'Bakri Id',
+  '2026-06-26': 'Muharram',
+  '2026-09-14': 'Ganesh Chaturthi',
   '2026-08-15': 'Independence Day',
   '2026-10-02': 'Mahatma Gandhi Jayanti',
   '2026-10-20': 'Dussehra',
@@ -21,6 +29,7 @@ export const NSE_HOLIDAYS_2026: Record<string, string> = {
 };
 
 export interface MarketCalendarDetails {
+  calendarVerified: boolean;
   session: MarketSession;
   isOpen: boolean;
   currentTimeIst: string;
@@ -74,12 +83,16 @@ export function isTradingHoliday(date: Date = new Date()): { isHoliday: boolean;
   };
 }
 
+/** Do not treat an unmaintained future holiday calendar as permission to trade. */
+export function isCalendarVerifiedForDate(date: Date = new Date()): boolean { return getIstDateTime(date).year === 2026; }
+
 export function isWeekend(date: Date = new Date()): boolean {
   const { dayOfWeek } = getIstDateTime(date);
   return dayOfWeek === 0 || dayOfWeek === 6; // Sunday or Saturday
 }
 
 export function getMarketSession(date: Date = new Date()): MarketSession {
+  if (!isCalendarVerifiedForDate(date)) return MarketSession.MARKET_CLOSED;
   if (isWeekend(date)) {
     return MarketSession.WEEKEND;
   }
@@ -125,7 +138,7 @@ export function getMarketCalendarDetails(date: Date = new Date()): MarketCalenda
   const closeMinutes = 15 * 60 + 30;
 
   const timeUntilOpenMs =
-    isOpen || totalMinutes >= openMinutes
+    !isCalendarVerifiedForDate(date) || isWeekend(date) || isHoliday || isOpen || totalMinutes >= openMinutes
       ? 0
       : (openMinutes - totalMinutes) * 60 * 1000 - ist.seconds * 1000;
 
@@ -135,6 +148,7 @@ export function getMarketCalendarDetails(date: Date = new Date()): MarketCalenda
       : (closeMinutes - totalMinutes) * 60 * 1000 - ist.seconds * 1000;
 
   return {
+    calendarVerified: isCalendarVerifiedForDate(date),
     session,
     isOpen,
     currentTimeIst: `${ist.dateString} ${ist.timeString} IST`,

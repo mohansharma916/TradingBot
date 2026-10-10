@@ -56,8 +56,9 @@ export class OrdersService {
       const broker = this.router?.getBroker() || this.paperBroker;
       let position = (await broker.getPositions()).find((item) => item.instrumentKey === instrumentKey && item.netQuantity > 0);
       const entry = live ? this.ledger?.getEntryForInstrument(instrumentKey) : undefined;
+      if (live && entry?.protectionDispatchPending && !entry.gttOrderId) throw new BadRequestException('Protective stop dispatch has an unknown broker outcome. No competing SELL or risk release is permitted until the stop is reconciled.');
       if (!position) {
-        if (entry) return await this.reconcileExternalExitIfFlat(instrumentKey);
+        if (entry) return await this.settleObservedExitIfFlat(instrumentKey);
         throw new NotFoundException(`No open position found for instrument '${instrumentKey}'.`);
       }
       const existingExit = live && entry ? this.ledger!.getEntries().find((intent) => intent.side === OrderSide.SELL && intent.entryIntentId === entry.intentId && ![OrderStatus.CLOSED, OrderStatus.REJECTED, OrderStatus.CANCELLED].includes(intent.state)) : undefined;
@@ -95,28 +96,45 @@ export class OrdersService {
   }
   /** Settle a broker-triggered/manual exit only when one complete SELL and a flat broker position agree. */
   public async reconcileExternalExitIfFlat(instrumentKey: string): Promise<OwnedExitResult> {
+    if (this.closing.has(instrumentKey)) return { success: false, message: 'An owned exit is already being reconciled.' };
+    this.closing.add(instrumentKey);
+    try { return await this.settleObservedExitIfFlat(instrumentKey); }
+    catch (error) { this.reservationManager.setKillSwitch(true); throw error; }
+    finally { this.closing.delete(instrumentKey); }
+  }
+  private async settleObservedExitIfFlat(instrumentKey: string): Promise<OwnedExitResult> {
     if (!this.router?.isLive() || !this.ledger) return { success: false, message: 'No live ledger is selected.' };
     const entry = this.ledger.getEntryForInstrument(instrumentKey);
     if (!entry || !entry.reservationId) return { success: false, message: 'No owned live entry is available for settlement.' };
+    if (entry.protectionDispatchPending && !entry.gttOrderId) throw new BadRequestException('Protective stop dispatch remains unknown; flat exposure alone cannot resolve a possible outstanding SELL trigger.');
     const positions = await this.router.getPositions();
     if (positions.some((position) => position.instrumentKey === instrumentKey && position.netQuantity !== 0)) return { success: false, message: 'Broker exposure remains open.' };
     const orders = await this.router.getOrders();
+    if (orders.some((order) => order.instrumentKey === instrumentKey && order.side === OrderSide.SELL && ![OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED].includes(order.status))) {
+      this.reservationManager.setKillSwitch(true); return { success: false, message: 'Broker is flat but another SELL remains active. Risk stays reserved until its outcome is confirmed.' };
+    }
     const consumed = new Set(this.ledger.getEntries().filter((intent) => intent.side === OrderSide.SELL && intent.entryIntentId !== entry.intentId).flatMap((intent) => intent.orderIds));
-    const exits = orders.filter((order) => order.instrumentKey === instrumentKey && order.side === OrderSide.SELL && order.status === OrderStatus.FILLED &&
+    const known = this.ledger.getEntries().find((intent) => intent.side === OrderSide.SELL && intent.entryIntentId === entry.intentId && intent.filledQuantity === entry.filledQuantity && intent.orderIds.length > 0 &&
+      intent.orderIds.every((id) => orders.some((order) => order.id === id && order.instrumentKey === instrumentKey && order.side === OrderSide.SELL &&
+        [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED].includes(order.status) && !consumed.has(id))));
+    const exits = known ? [] : orders.filter((order) => order.instrumentKey === instrumentKey && order.side === OrderSide.SELL && order.status === OrderStatus.FILLED &&
       order.filledQuantity === entry.filledQuantity && order.averageFillPrice > 0 && Date.parse(order.createdAt) >= Date.parse(entry.createdAt) && !consumed.has(order.id));
-    if (exits.length !== 1) { this.reservationManager.setKillSwitch(true); return { success: false, message: 'Broker is flat but its complete exit fill cannot be uniquely matched. Risk remains reserved for manual reconciliation.' }; }
-    const order = exits[0]!;
-    const intentId = this.ledger.getEntries().find((intent) => intent.entryIntentId === entry.intentId && intent.orderIds.includes(order.id))?.intentId || `${entry.intentId}:observed:${order.id}`;
+    if (!known && exits.length !== 1) { this.reservationManager.setKillSwitch(true); return { success: false, message: 'Broker is flat but its complete exit fill cannot be uniquely matched. Risk remains reserved for manual reconciliation.' }; }
+    const orderId = known?.orderIds[0] || exits[0]!.id;
+    const exitPrice = known?.averagePrice || exits[0]!.averageFillPrice;
+    const intentId = known?.intentId || `${entry.intentId}:observed:${orderId}`;
+    if (entry.gttOrderId) await this.router.reconcileStopAfterFlat(entry.gttOrderId, instrumentKey);
+    if ((await this.router.getPositions()).some((position) => position.instrumentKey === instrumentKey && position.netQuantity !== 0)) throw new Error('Broker exposure changed during exit reconciliation; settlement remains frozen.');
     if (!this.ledger.getIntent(intentId)) {
       this.ledger.beginIntent({ intentId, instrumentKey, side: OrderSide.SELL, product: entry.product, quantity: entry.filledQuantity, entryIntentId: entry.intentId, reservedCapital: 0, reservedRisk: 0 });
-      this.ledger.markAcknowledged(intentId, [order.id]);
+      this.ledger.markAcknowledged(intentId, [orderId]);
     }
     this.ledger.observeOrders(orders);
-    const charges = calculateOptionCharges({ buyPrice: entry.averagePrice, sellPrice: order.averageFillPrice, quantity: entry.filledQuantity }).totalRoundTripCharges;
-    const pnl = Number(((order.averageFillPrice - entry.averagePrice) * entry.filledQuantity - charges).toFixed(2));
+    const charges = calculateOptionCharges({ buyPrice: entry.averagePrice, sellPrice: exitPrice, quantity: entry.filledQuantity }).totalRoundTripCharges;
+    const pnl = Number(((exitPrice - entry.averagePrice) * entry.filledQuantity - charges).toFixed(2));
     if (!this.reservationManager.settleReservation(entry.reservationId, pnl)) return { success: false, message: 'Confirmed flat broker exposure still requires reservation settlement review.' };
     this.ledger.settleExit(intentId, pnl);
-    this.gateway.broadcast('position.closed', { instrumentKey, orderId: order.id, price: order.averageFillPrice, netPnl: pnl, chargesSource: 'ESTIMATED' });
-    return { success: true, orderId: order.id, quantity: entry.filledQuantity, exitPrice: order.averageFillPrice, netPnl: pnl, charges, status: OrderStatus.CLOSED, message: 'A unique complete broker SELL and flat position were reconciled. Charges remain estimated.' };
+    this.gateway.broadcast('position.closed', { instrumentKey, orderId, price: exitPrice, netPnl: pnl, chargesSource: 'ESTIMATED' });
+    return { success: true, orderId, quantity: entry.filledQuantity, exitPrice, netPnl: pnl, charges, status: OrderStatus.CLOSED, message: 'A complete owned broker SELL and flat position were reconciled. Charges remain estimated.' };
   }
 }

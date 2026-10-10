@@ -42,6 +42,8 @@ export interface OrderFillEvent {
 }
 
 export interface PlacePaperOrderParams {
+  expectedModeRevision?: number;
+  beforeBuyDispatch?: () => void;
   proposalId?: string;
   reservationId?: string;
   signalKey?: string;
@@ -100,7 +102,7 @@ export class PaperBrokerAdapter implements BrokerPort {
     if (this.storagePath) {
       try {
         const raw = JSON.parse(fs.readFileSync(this.storagePath, 'utf8'));
-        const saved = z.object({ version: z.literal(1), orders: z.array(BrokerOrderSchema), positions: z.array(PositionSchema), fills: z.array(z.object({
+        const saved = z.object({ version: z.literal(1), orders: z.array(BrokerOrderSchema.extend({ id: z.string().min(1), intentId: z.string().min(1) })), positions: z.array(PositionSchema.extend({ id: z.string().min(1) })), fills: z.array(z.object({
           id: z.string(), orderId: z.string(), instrumentKey: z.string(), side: z.nativeEnum(OrderSide), fillQty: z.number().int().positive(),
           fillPrice: z.number().positive(), charges: z.any(), timestamp: z.string(), estimatedCharges: z.number(), actualCharges: z.number().nonnegative(), chargesSource: z.enum(['SIMULATED', 'ESTIMATED', 'BROKER_CONFIRMED']).optional(),
         })) }).parse(raw);
@@ -111,15 +113,16 @@ export class PaperBrokerAdapter implements BrokerPort {
 
   async getConnectionHealth(): Promise<BrokerHealth> {
     const feedHealth = this.feed.getFeedHealth();
+    const connected = (this.feed.getAllQuotes?.().length ?? 0) > 0 && feedHealth.staleCount === 0;
     return {
       broker: 'UPSTOX',
-      status: feedHealth.staleCount > 0 ? BrokerHealthStatus.DEGRADED : BrokerHealthStatus.HEALTHY,
+      status: connected ? BrokerHealthStatus.HEALTHY : BrokerHealthStatus.DEGRADED,
       isAuthenticated: false,
       tokenExpiresAt: null,
-      registeredEgressIp: '127.0.0.1',
-      currentEgressIp: '127.0.0.1',
+      registeredEgressIp: 'UNVERIFIED',
+      currentEgressIp: 'UNVERIFIED',
       ipMatches: false,
-      marketFeedConnected: (this.feed.getAllQuotes?.().length ?? 0) > 0 && feedHealth.staleCount === 0,
+      marketFeedConnected: connected,
       feedLatencyMs: feedHealth.feedLatencyMs,
       lastSeenAt: new Date().toISOString(),
     };
@@ -140,12 +143,13 @@ export class PaperBrokerAdapter implements BrokerPort {
     };
   }
 
-  async getMargin(_instrumentKey: string, quantity: number, price = 100): Promise<MarginEstimate> {
-    const required = quantity * price;
+  async getMargin(_instrumentKey: string, quantity: number, price?: number): Promise<MarginEstimate> {
+    if (!Number.isInteger(quantity) || quantity <= 0 || !Number.isFinite(price) || price! <= 0) throw new Error('A quantity and observed premium are required for a simulated margin estimate.');
+    const required = quantity * price!;
     return {
       requiredMargin: required,
       finalMargin: required,
-      shortfall: 0,
+      shortfall: Math.max(0, required - (await this.getFunds()).availableCash),
     };
   }
 
@@ -212,6 +216,8 @@ export class PaperBrokerAdapter implements BrokerPort {
    */
   async placeOrder(params: PlacePaperOrderParams): Promise<OrderAcknowledgement> {
     if (this.persistenceFailed) throw new ServiceUnavailableException('Paper broker persistence failed; restart after repairing storage.');
+    params = { ...params, tag: (params.tag || params.intentId).slice(0, 20) };
+    if (![OrderSide.BUY, OrderSide.SELL].includes(params.side) || ![OrderType.MARKET, OrderType.LIMIT].includes(params.orderType)) throw new Error('Paper execution supports explicit BUY/SELL market and limit orders; trigger orders require the protection workflow.');
     const previous = Array.from(this.orders.values()).find((order) => order.intentId === params.intentId);
     if (previous) {
       return { orderId: previous.id, tag: previous.tag, status: previous.status === OrderStatus.REJECTED ? 'REJECTED' : 'ACKNOWLEDGED', message: 'Existing paper order returned for this intent.' };
@@ -263,13 +269,14 @@ export class PaperBrokerAdapter implements BrokerPort {
     }
 
     // 2. Realistic Price & Slippage Simulation
-    const basePrice = quote ? (params.side === OrderSide.BUY ? quote.askPrice : quote.bidPrice) : (params.price || 120.0);
+    const basePrice = params.side === OrderSide.BUY ? quote!.askPrice : quote!.bidPrice;
     const slippage = params.side === OrderSide.BUY ? 0.25 : -0.25;
     const tick = this.catalog.getInstrument(params.instrumentKey)?.tickSize ?? 0.05;
     const executable = Math.max(1.0, basePrice + slippage);
     const executionPrice = Number(((params.side === OrderSide.BUY ? Math.ceil((executable - 1e-9) / tick) : Math.floor((executable + 1e-9) / tick)) * tick).toFixed(2));
     const entryFees = calculateOptionCharges({ buyPrice: executionPrice, sellPrice: 0, quantity: params.quantity }).totalRoundTripCharges - 23.6;
     if (params.side === OrderSide.BUY && executionPrice * params.quantity + entryFees > (await this.getFunds()).availableCash) return { orderId, tag: params.tag, status: 'REJECTED', message: 'Virtual account cash does not cover this paper entry and fees.' };
+    if (params.side === OrderSide.BUY) params.beforeBuyDispatch?.();
     if (params.maximumExecutionPrice !== undefined && executionPrice > params.maximumExecutionPrice) {
       return { orderId, tag: params.tag, status: 'REJECTED', message: 'Executable ask moved above the reserved entry price; refresh and revalidate the signal.' };
     }
@@ -378,7 +385,9 @@ export class PaperBrokerAdapter implements BrokerPort {
 
   async cancelOrder(orderId: string): Promise<void> {
     const existing = this.orders.get(orderId);
-    if (existing) {
+    if (!existing) throw new Error('Paper order is not present.');
+    if ([OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CLOSED].includes(existing.status)) throw new Error('A terminal paper order cannot be cancelled.');
+    if (existing.status !== OrderStatus.CANCELLED) {
       existing.status = OrderStatus.CANCELLED;
       existing.updatedAt = new Date().toISOString();
       this.orders.set(orderId, existing);

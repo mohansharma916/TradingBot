@@ -45,7 +45,7 @@ export class StrategyAnalystAgent {
 
     // 1. Calculate closed candle indicators
     const underlyingKey =
-      strategy.underlying === 'NIFTY' ? 'NSE_INDEX|Nifty 50' : 'NSE_INDEX|Nifty Bank';
+      ({NIFTY:'NSE_INDEX|Nifty 50',BANKNIFTY:'NSE_INDEX|Nifty Bank',FINNIFTY:'NSE_INDEX|Nifty Fin Service',MIDCPNIFTY:'NSE_INDEX|NIFTY MID SELECT'} as Record<string,string>)[strategy.underlying] ?? '';
     const indicatorInput = {
       instrumentKey: underlyingKey,
       timeframe: strategy.timeframe,
@@ -118,6 +118,7 @@ export class StrategyAnalystAgent {
       },
     });
 
+    if (evaluation.proposal) evaluation.proposal.versionHash = strategy.versionHash;
     return {
       candidateSymbol: candidate.symbol,
       evaluation,

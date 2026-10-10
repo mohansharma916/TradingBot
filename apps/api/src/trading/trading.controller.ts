@@ -23,8 +23,22 @@ export class TradingController {
 
   @Get('mode')
   async snapshot(): Promise<TradingModeSnapshot> {
-    try { this.mode.updateFunds(this.mode.isLive() ? await this.liveFunds() : this.paperFunds()); }
-    catch (error) { this.mode.markFundsUnavailable(error instanceof Error ? error.message : 'Upstox funds are unavailable.'); this.risk.disarm(); }
+    if (this.switching) return this.mode.getSnapshot();
+    const revision = this.mode.getRevision();
+    const live = this.mode.isLive();
+    try {
+      const funds = live ? await this.liveFunds() : await this.paperFunds();
+      if (this.switching || this.mode.getRevision() !== revision) return this.mode.getSnapshot();
+      if (live) this.risk.synchronizeFunds(funds.availableCash);
+      this.mode.updateFunds(funds);
+    }
+    catch (error) {
+      // A response for an older ledger must not overwrite or disarm the newly selected account.
+      if (!this.switching && this.mode.getRevision() === revision) {
+        this.mode.markFundsUnavailable(error instanceof Error ? error.message : 'Account funds are unavailable.');
+        this.risk.disarm();
+      }
+    }
     return this.mode.getSnapshot();
   }
 
@@ -34,7 +48,10 @@ export class TradingController {
     if (!parsed.success) throw new BadRequestException('Select Testing (PAPER) or Live (APPROVAL).');
     if (this.switching) throw new ConflictException('A mode change is already in progress.');
     if (parsed.data.mode === this.mode.getMode()) return this.snapshot();
+    const previousMode = this.mode.getMode();
+    let configuringRisk = false;
     this.switching = true;
+    this.risk.disarm();
     try {
       if (this.risk.getActiveReservations().length || this.ledger.hasUnresolvedExposure()) throw new ConflictException('Close or reconcile positions and pending orders before switching modes.');
       const running = this.dailyBots.snapshot().sessions.some(session => ['RUNNING', 'PAUSED', 'STOPPING'].includes(session.status) || session.trades.some(trade => trade.status !== 'CLOSED'));
@@ -50,14 +67,19 @@ export class TradingController {
       }
       // Disarm before changing either the adapter or ledger; a failed state write cannot dispatch.
       this.risk.disarm();
+      configuringRisk = true;
       this.risk.configureMode(parsed.data.mode);
       this.mode.setMode(parsed.data.mode, funds);
       this.proposals.invalidateApprovals();
       if (funds) { this.broker.recoverLiveExposure(); this.risk.synchronizeFunds(funds.availableCash); }
-      else this.mode.updateFunds(this.paperFunds());
+      else this.mode.updateFunds(await this.paperFunds());
       return this.mode.getSnapshot();
     } catch (error) {
       this.risk.disarm();
+      if (configuringRisk && this.mode.getMode() === previousMode) {
+        try { this.risk.configureMode(previousMode); }
+        catch { this.risk.setKillSwitch(true); }
+      }
       throw error;
     } finally { this.switching = false; }
   }
@@ -67,9 +89,12 @@ export class TradingController {
     if (funds.source !== 'LIVE_BROKER' || funds.status !== 'VERIFIED' || ![funds.availableCash,funds.usedMargin].every(value => Number.isFinite(value) && value >= 0)) throw new BadRequestException('Verified Upstox funds are required. Connect a genuine broker session.');
     return { availableCash: funds.availableCash, reservedMargin: funds.usedMargin, totalCapital: funds.availableCash + funds.usedMargin, source: 'LIVE_BROKER', status: 'VERIFIED', verifiedAt: funds.verifiedAt ?? new Date().toISOString() };
   }
-  private paperFunds(): AccountFunds {
-    const reservedMargin = this.risk.getTotalReservedCapital();
-    const availableCash = this.risk.getAvailableCash();
+  private async paperFunds(): Promise<AccountFunds> {
+    const funds = await this.broker.getFunds();
+    if (funds.source !== 'PAPER_SIMULATION' || !Number.isFinite(funds.availableCash) || funds.availableCash < 0) throw new Error('Paper ledger funds are unavailable.');
+    const held = this.risk.getHeldReservations().reduce((sum,record) => sum + record.reservedCapital,0);
+    const reservedMargin = funds.usedMargin + held;
+    const availableCash = Math.max(0,funds.availableCash - held);
     return { availableCash, reservedMargin, totalCapital: availableCash + reservedMargin, source: 'PAPER_SIMULATION', status: 'VERIFIED', verifiedAt: new Date().toISOString() };
   }
 }

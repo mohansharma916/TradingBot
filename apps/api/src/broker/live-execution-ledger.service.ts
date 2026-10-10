@@ -13,7 +13,7 @@ const IntentSchema = z.object({
   instrumentKey: z.string().min(1), symbol: z.string(), side: z.nativeEnum(OrderSide), product: z.nativeEnum(ProductType),
   quantity: z.number().int().positive(), reservedCapital: z.number().nonnegative(), reservedRisk: z.number().nonnegative(),
   state: z.nativeEnum(OrderStatus), orderIds: z.array(z.string()), filledQuantity: z.number().int().nonnegative(), averagePrice: z.number().nonnegative(),
-  stopLossPrice: z.number().optional(), targetPrice: z.number().optional(), gttOrderId: z.string().optional(),
+  stopLossPrice: z.number().optional(), targetPrice: z.number().optional(), gttOrderId: z.string().optional(), protectionVerified: z.boolean().optional(), protectionDispatchPending: z.boolean().optional(),
   entryIntentId: z.string().optional(), settledPnl: z.number().optional(), filledAt: z.string().optional(), createdAt: z.string(), updatedAt: z.string(), message: z.string().optional(),
 });
 export type LiveExecutionIntent = z.infer<typeof IntentSchema>;
@@ -25,6 +25,7 @@ export class LiveExecutionLedgerService {
   public readonly storagePath: string;
   private state: z.infer<typeof StateSchema>;
   private failed = false;
+  private readonly locks = new Set<string>();
   constructor(@Optional() @Inject('LIVE_EXECUTION_LEDGER_PATH') storagePath?: string, @Optional() @Inject(EnvService) env?: EnvService) {
     this.storagePath = path.resolve(storagePath || process.env.LIVE_EXECUTION_LEDGER_PATH || path.resolve(env?.config.STATE_DIRECTORY || process.env.STATE_DIRECTORY || '.data', 'live-execution.json'));
     try { this.state = StateSchema.parse(JSON.parse(fs.readFileSync(this.storagePath, 'utf8'))); }
@@ -34,6 +35,9 @@ export class LiveExecutionLedgerService {
     }
   }
   public getEntries(): LiveExecutionIntent[] { return structuredClone(this.state.intents); }
+  /** Shared process lock: reconciliation must not attach protection while an entry workflow owns it. */
+  public tryLockIntent(intentId: string): boolean { if (this.locks.has(intentId)) return false; this.locks.add(intentId); return true; }
+  public unlockIntent(intentId: string): void { this.locks.delete(intentId); }
   public getIntent(intentId: string): LiveExecutionIntent | undefined { return this.getEntries().find((intent) => intent.intentId === intentId); }
   public getEntryForInstrument(key: string): LiveExecutionIntent | undefined {
     return this.getEntries().find((intent) => intent.side === OrderSide.BUY && intent.instrumentKey === key && ![OrderStatus.CLOSED, OrderStatus.REJECTED, OrderStatus.CANCELLED].includes(intent.state));
@@ -74,8 +78,8 @@ export class LiveExecutionLedgerService {
       const average = quantity ? confirmed.reduce((sum, order) => sum + order.filledQuantity * order.averageFillPrice, 0) / quantity : 0;
       if (quantity < intent.filledQuantity || quantity > intent.quantity || (quantity > 0 && (!Number.isFinite(average) || average <= 0))) throw new Error('Broker fill quantity or price conflicts with the durable intent.');
       const terminal = confirmed.every((order) => [OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED].includes(order.status));
-      const state = quantity === intent.quantity ? (intent.gttOrderId ? OrderStatus.PROTECTED : OrderStatus.FILLED)
-        : quantity > 0 ? OrderStatus.PARTIALLY_FILLED
+      const state = quantity === intent.quantity ? (intent.gttOrderId && intent.protectionVerified ? OrderStatus.PROTECTED : OrderStatus.FILLED)
+        : quantity > 0 ? (intent.gttOrderId && intent.protectionVerified ? OrderStatus.PROTECTED : OrderStatus.PARTIALLY_FILLED)
         : terminal ? (confirmed.every((order) => order.status === OrderStatus.REJECTED) ? OrderStatus.REJECTED : OrderStatus.CANCELLED) : OrderStatus.ACKNOWLEDGED;
       if (intent.filledQuantity !== quantity || intent.averagePrice !== average || intent.state !== state) {
         if (quantity > 0 && !intent.filledAt) intent.filledAt = new Date().toISOString();
@@ -84,7 +88,7 @@ export class LiveExecutionLedgerService {
     }
     if (changed) this.commit(next);
   }
-  public setProtection(intentId: string, gttOrderId: string, stopLossPrice: number): void { this.update(intentId, { gttOrderId, stopLossPrice, state: OrderStatus.PROTECTED }); }
+  public setProtection(intentId: string, gttOrderId: string, stopLossPrice: number): void { this.update(intentId, { gttOrderId, stopLossPrice, protectionVerified: true, state: OrderStatus.PROTECTED }); }
   public settleExit(exitIntentId: string, pnl: number): boolean {
     const exit = this.getIntent(exitIntentId);
     if (!exit || exit.side !== OrderSide.SELL || exit.filledQuantity !== exit.quantity || exit.state === OrderStatus.CLOSED) return false;

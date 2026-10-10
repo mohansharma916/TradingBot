@@ -33,6 +33,7 @@ describe('Phase 3: Simulation, Risk Engine & Paper Broker', () => {
     catalog.bootstrapCatalog();
     feed = new UpstoxMarketFeedService(envService, decoder, gateway);
     reservationManager = new RiskReservationManager(envService, gateway);
+    reservationManager.arm(30);
     broker = new PaperBrokerAdapter(catalog, feed, gateway);
     proposalsService = new ProposalsService(gateway);
     ordersService = new OrdersService(broker, reservationManager, proposalsService, gateway);
@@ -103,7 +104,10 @@ describe('Phase 3: Simulation, Risk Engine & Paper Broker', () => {
 
     it('enforces daily drawdown cap: blocks trade when all-in risk exceeds remaining budget', () => {
       // Simulate ₹1,200 loss today out of ₹1,500 daily drawdown cap
-      reservationManager.settleClosedPosition('dummy_key', 3000, -1200);
+      const held = reservationManager.acquireReservation({proposalId:'loss',signalKey:'dummy_key',instrumentKey:'NSE_FO|51001',capitalRequired:3000,allInRisk:500});
+      reservationManager.commitReservationToPosition(held.id,3000);
+      reservationManager.settleReservation(held.id,-1200);
+      reservationManager.arm(30);
 
       // Remaining budget is now ₹300 (1500 - 1200)
       expect(reservationManager.getRemainingDailyRiskBudget()).toBe(300.0);
@@ -250,7 +254,7 @@ describe('Phase 3: Simulation, Risk Engine & Paper Broker', () => {
 
       // Add and approve a proposal
       const proposal = {
-        id: 'prop_e2e_001',
+        id: '550e8400-e29b-41d4-a716-446655440010',
         strategyId: '550e8400-e29b-41d4-a716-446655440002',
         strategyVersion: 1,
         proposingAgent: AgentType.STRATEGY_ANALYST,

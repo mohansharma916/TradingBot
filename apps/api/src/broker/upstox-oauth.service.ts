@@ -36,6 +36,7 @@ export class UpstoxOAuthService {
    */
   public generateAuthorizationUrl(): UpstoxOAuthConnectResponse {
     const cfg = this.envService.config;
+    if (!cfg.UPSTOX_API_KEY || cfg.UPSTOX_API_KEY === 'mock_key' || !cfg.UPSTOX_API_SECRET || cfg.UPSTOX_API_SECRET === 'mock_secret') throw new BadRequestException('Genuine Upstox app credentials must be configured before connecting.');
     const state = crypto.randomBytes(16).toString('hex');
     const now = Date.now();
 
@@ -50,7 +51,7 @@ export class UpstoxOAuthService {
 
     const params = new URLSearchParams({
       response_type: 'code',
-      client_id: cfg.UPSTOX_API_KEY || 'mock_key',
+      client_id: cfg.UPSTOX_API_KEY,
       redirect_uri: cfg.UPSTOX_REDIRECT_URI,
       state,
     });
@@ -88,26 +89,9 @@ export class UpstoxOAuthService {
 
     const cfg = this.envService.config;
 
-    // Simulation / Sandbox branch
+    // Placeholder credentials and test codes never manufacture a connected broker session.
     if (cfg.UPSTOX_API_KEY === 'mock_key' || code.startsWith('mock_') || code === 'test_auth_code') {
-      this.logger.log(`[UpstoxOAuth] Exchanging authorization code in SANDBOX/MOCK mode.`);
-      this.tokenStorage.storeToken({
-        accessToken: `upstox_sand_${crypto.randomBytes(16).toString('hex')}`,
-        refreshToken: `upstox_ref_${crypto.randomBytes(16).toString('hex')}`,
-        expiresInSeconds: 86400, // 24 hours
-        userId: 'UPSTOX_DEV_916',
-        userType: 'individual',
-      });
-
-      this.gateway.broadcast('broker.oauth.connected', {
-        status: 'CONNECTED',
-        userId: 'UPSTOX_DEV_916',
-      });
-
-      return {
-        success: true,
-        session: this.getSessionStatus(),
-      };
+      throw new BadRequestException('Mock OAuth codes and placeholder app credentials cannot establish a broker session.');
     }
 
     // Live OAuth Token Exchange
@@ -129,18 +113,24 @@ export class UpstoxOAuthService {
           Accept: 'application/json',
         },
         body: body.toString(),
+        signal: AbortSignal.timeout(10000),
       });
 
       if (!response.ok) {
-        const errText = await response.text();
-        this.logger.error(`[UpstoxOAuth] Token exchange failed HTTP ${response.status}: ${errText}`);
         throw new UnauthorizedException(`Upstox OAuth token exchange rejected: ${response.status}`);
       }
 
       const data = await response.json();
       const accessToken = data.access_token;
-      const expiresIn = data.expires_in || 86400;
-      const userId = data.user_id || 'UPSTOX_USER';
+      if (typeof accessToken !== 'string' || !accessToken || /^(mock_|test_|upstox_sand_|upstox_ref_)/i.test(accessToken) || typeof data.user_id !== 'string' || !data.user_id) throw new Error('Broker OAuth response lacks a genuine token or user ID.');
+      // Official OAuth tokens expire at the next 03:30 IST, including tokens created before 03:30.
+      // https://upstox.com/developer/api-documentation/get-token/
+      const now = Date.now(); const ist = new Date(now + 330 * 60000);
+      let expiry = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), 3, 30) - 330 * 60000;
+      if (expiry <= now) expiry += 86400000;
+      const dailyExpiry = Math.floor((expiry - now) / 1000);
+      const expiresIn = typeof data.expires_in === 'number' && data.expires_in > 0 ? Math.min(data.expires_in, dailyExpiry) : dailyExpiry;
+      const userId = data.user_id;
       const userType = data.user_type || 'individual';
 
       this.tokenStorage.storeToken({
@@ -186,7 +176,7 @@ export class UpstoxOAuthService {
       egressIpVerified: false,
       registeredEgressIp: cfg.UPSTOX_EGRESS_IP,
       currentEgressIp,
-      rateLimitRemaining: 25,
+      rateLimitRemaining: 0, // Broker-wide request budget is not measured by the OAuth service.
       lastReconciledAt: this.lastReconciledAt,
     };
   }

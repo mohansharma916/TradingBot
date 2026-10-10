@@ -11,6 +11,7 @@ import {
   RiskState,
 } from '@trading-bot/contracts';
 import { apiClient } from '../src/services/api';
+import LiveChecklistReview from '../src/features/health/LiveChecklistReview';
 
 export default function HealthScreen() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -101,7 +102,7 @@ export default function HealthScreen() {
           window.location.href = res.authUrl;
         }
       } else {
-        showToast('Upstox connection initiated.');
+        throw new Error('The API did not supply an Upstox authorization URL.');
       }
     } catch (err: any) {
       showToast(`OAuth connection error: ${err?.message || 'Check API connection'}`);
@@ -226,6 +227,8 @@ export default function HealthScreen() {
         </div>
       </div>
 
+      <LiveChecklistReview />
+
       {/* Diagnostics Telemetry Metrics Bar */}
       <div
         style={{
@@ -237,10 +240,10 @@ export default function HealthScreen() {
         <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
           <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>WS FEED LATENCY</div>
           <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.profit, marginTop: 4 }}>
-            {diagnostics.marketFeed.latencyMs} ms
+            {diagnostics.marketFeed.lastTickAt ? `${diagnostics.marketFeed.latencyMs} ms` : 'Unavailable'}
           </div>
           <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 4 }}>
-            Protobuf V3 Streaming
+            {diagnostics.marketFeed.connected ? 'Feed connected' : 'Feed disconnected or unavailable'}
           </div>
         </div>
 
@@ -267,7 +270,7 @@ export default function HealthScreen() {
         <div style={{ backgroundColor: colors.surface, border: `1px solid ${colors.border}`, borderRadius: borderRadius.md, padding: spacing.md }}>
           <div style={{ color: colors.textMuted, fontSize: typography.fontSize.xs }}>RECONCILIATION SCHEDULER</div>
           <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: schedulerStatus.schedulerActive ? colors.profit : colors.warning, marginTop: 4 }}>
-            {schedulerStatus.schedulerActive ? 'ACTIVE (60s)' : 'PAUSED'}
+            {schedulerStatus.schedulerActive ? `ACTIVE (${schedulerStatus.intervalSeconds}s)` : 'PAUSED'}
           </div>
           <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 4 }}>
             Total audits: {schedulerStatus.totalRuns}
@@ -291,7 +294,7 @@ export default function HealthScreen() {
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
               <span style={{ color: colors.textMuted }}>Token Status:</span>
               <span style={{ fontWeight: typography.fontWeight.semibold, color: session.isExpired ? colors.loss : colors.profit }}>
-                {session.isExpired ? 'Expired / Missing' : 'Valid (AES-256-GCM Encrypted)'}
+                {session.isConnected && !session.isExpired ? 'Token locally valid' : 'Expired or unavailable'}
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
@@ -303,13 +306,13 @@ export default function HealthScreen() {
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0`, borderBottom: `1px solid ${colors.border}` }}>
               <span style={{ color: colors.textMuted }}>Egress IP Binding:</span>
               <span style={{ fontWeight: typography.fontWeight.semibold, color: session.egressIpVerified ? colors.profit : colors.loss }}>
-                {session.currentEgressIp} {session.egressIpVerified ? '✓ Verified' : '✗ Mismatch'}
+                {session.egressIpVerified ? `${session.currentEgressIp} · Verified` : 'Not measured'}
               </span>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0` }}>
               <span style={{ color: colors.textMuted }}>Rate Limiter Pool:</span>
               <span style={{ fontWeight: typography.fontWeight.semibold, color: colors.cyan }}>
-                {session.rateLimitRemaining} / 25 req/sec
+                Not measured
               </span>
             </div>
           </div>
@@ -375,7 +378,7 @@ export default function HealthScreen() {
             <div style={{ display: 'flex', justifyContent: 'space-between', padding: `${spacing.xs}px 0` }}>
               <span style={{ color: colors.textMuted }}>Auto-Scheduler Status:</span>
               <span style={{ color: schedulerStatus.schedulerActive ? colors.profit : colors.warning, fontWeight: 'bold' }}>
-                {schedulerStatus.schedulerActive ? 'Enabled (Every 60s)' : 'Stopped'}
+                {schedulerStatus.schedulerActive ? `Enabled (Every ${schedulerStatus.intervalSeconds}s)` : 'Stopped'}
               </span>
             </div>
           </div>
@@ -468,10 +471,10 @@ export default function HealthScreen() {
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: spacing.sm }}>
           <div>
             <h2 style={{ margin: 0, fontSize: typography.fontSize.md }}>
-              System Alerts & Multi-Channel Notification Center
+              In-App System Alerts
             </h2>
             <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-              API-confirmed system alerts. External delivery depends on configured integrations.
+              Alerts recorded by the API and sent through the in-app notification channel.
             </p>
           </div>
 
@@ -506,7 +509,7 @@ export default function HealthScreen() {
                 textAlign: 'center',
               }}
             >
-              Zero active system alerts. All operational subsystems healthy.
+              No recorded system alerts. Check diagnostics for subsystem status.
             </div>
           ) : (
             alerts.map((alert) => (

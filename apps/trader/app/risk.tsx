@@ -172,7 +172,7 @@ export default function RiskCenterScreen() {
               marginTop: 4,
             }}
           >
-            {state.openPositionsCount} Open / {state.activeReservationsCount} Held
+            {state.isLiveSynced ? `${state.openPositionsCount} Open / ${state.activeReservationsCount} Held` : 'Unavailable'}
           </div>
           <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 4 }}>
             Max concurrency limit: 1 position
@@ -314,7 +314,7 @@ export default function RiskCenterScreen() {
                 Control B: Request Flatten All Positions
               </h2>
               <Badge
-                label={state.openPositionsCount > 0 ? `${state.openPositionsCount} ACTIVE` : 'FLAT'}
+                label={!state.isLiveSynced ? 'EXPOSURE UNAVAILABLE' : state.openPositionsCount > 0 ? `${state.openPositionsCount} OWNED POSITIONS` : 'NO OWNED EXPOSURE'}
                 variant={state.openPositionsCount > 0 ? 'warning' : 'neutral'}
               />
             </div>

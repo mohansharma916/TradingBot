@@ -1,7 +1,7 @@
 import { Injectable, Inject, OnApplicationBootstrap } from '@nestjs/common';
 import { BrokerPort, OrderAcknowledgement } from './broker.port';
 import { PaperBrokerAdapter } from './paper-broker.adapter';
-import { UpstoxBrokerAdapter } from './upstox-broker.adapter';
+import { UpstoxBrokerAdapter, BrokerRequestError } from './upstox-broker.adapter';
 import { TradingModeService } from '../trading/trading-mode.service';
 import { RiskReservationManager } from '../risk/risk-reservation.manager';
 import { LiveExecutionLedgerService } from './live-execution-ledger.service';
@@ -19,6 +19,7 @@ export class BrokerRouterService implements BrokerPort, OnApplicationBootstrap {
   ) {}
   public onApplicationBootstrap(): void { if (this.isLive()) this.recoverLiveExposure(); }
   public isLive(): boolean { return this.mode.isLive(); }
+  public getModeRevision(): number { return this.mode.getRevision(); }
   public getBroker(): PaperBrokerAdapter | UpstoxBrokerAdapter { return this.isLive() ? this.live : this.paper; }
   public getActiveAdapter(): PaperBrokerAdapter | UpstoxBrokerAdapter { return this.getBroker(); }
   public get brokerName(): string { return this.getBroker().brokerName; }
@@ -30,15 +31,23 @@ export class BrokerRouterService implements BrokerPort, OnApplicationBootstrap {
   public getPositions() { return this.getBroker().getPositions(); }
   public getFills() { return this.getBroker().getFills(); }
   public async placeOrder(req: any): Promise<OrderAcknowledgement> {
+    const live = this.isLive(); const revision = req.expectedModeRevision ?? this.mode.getRevision(); const broker = this.getBroker();
     if (req.side === OrderSide.BUY) {
-      this.risk.assertEntryAllowed();
-      if (this.isLive()) {
-        const funds = await this.live.getFunds();
-        if (funds.source !== 'LIVE_BROKER' || funds.status !== 'VERIFIED') throw new Error('Verified live broker funds are required before a BUY.');
-        this.risk.synchronizeFunds(funds.availableCash);
+      try {
+        if (this.mode.getRevision() !== revision) throw new Error('Trading mode changed before entry funds verification. Refresh before submitting.');
+        this.risk.assertEntryAllowed();
+        if (live) {
+          const funds = await this.live.getFunds();
+          if (funds.source !== 'LIVE_BROKER' || funds.status !== 'VERIFIED') throw new Error('Verified live broker funds are required before a BUY.');
+          if (!this.isLive() || this.mode.getRevision() !== revision) throw new Error('Trading mode changed during entry funds verification. Refresh before submitting.');
+          this.risk.assertEntryAllowed();
+          this.risk.synchronizeFunds(funds.availableCash);
+        }
+      } catch (error) {
+        throw new BrokerRequestError(error instanceof Error ? error.message : 'Entry funds verification was revoked before dispatch.', true);
       }
     }
-    return this.getBroker().placeOrder(req);
+    return broker.placeOrder({ ...req, ...(req.side === OrderSide.BUY && live ? { expectedModeRevision: revision } : {}) });
   }
   public modifyOrder(req: any) { return this.getBroker().modifyOrder(req); }
   public cancelOrder(orderId: string) { return this.getBroker().cancelOrder(orderId); }
@@ -46,6 +55,7 @@ export class BrokerRouterService implements BrokerPort, OnApplicationBootstrap {
   public async cancelProtectiveExit(gttOrderId: string): Promise<void> {
     if (this.isLive()) await this.live.cancelProtectiveExit(gttOrderId);
   }
+  public async reconcileStopAfterFlat(gttOrderId: string, instrumentKey: string): Promise<void> { if (this.isLive()) await this.live.reconcileStopAfterFlat(gttOrderId, instrumentKey); }
   public async confirmFill(ack: OrderAcknowledgement, quantity: number) {
     if (this.isLive()) return this.live.confirmFill(ack, quantity);
     const order = (await this.paper.getOrders()).find((item) => item.id === ack.orderId);

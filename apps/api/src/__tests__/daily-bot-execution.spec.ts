@@ -53,6 +53,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
   }
 
   beforeEach(() => {
+    vi.stubEnv('OWNER_PASSWORD', 'daily-bot-test-password');
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-12T04:30:00.000Z')); // Monday 10:00 IST
     env = new EnvService();
@@ -82,7 +83,7 @@ describe('Daily Bot execution and protective lifecycle', () => {
     tick();
   });
 
-  afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers(); });
 
   function liveHarness(liveQuotes = true) {
     env.config.LIVE_EXECUTION_ENABLED = true;
@@ -95,22 +96,126 @@ describe('Daily Bot execution and protective lifecycle', () => {
     // Explicit broker test doubles: this fixture never contacts Upstox or places real orders.
     const router = {
       isLive: () => true,
+      getModeRevision: vi.fn(() => 0),
       getFunds: vi.fn(async () => ({ source: 'LIVE_BROKER', status: 'VERIFIED', availableCash: 10000 })),
       getPositions: vi.fn(() => broker.getPositions()),
       getOrders: vi.fn(() => broker.getOrders()),
       getFills: vi.fn(() => broker.getFills()),
-      placeOrder: vi.fn((input: any) => broker.placeOrder(input)),
+      placeOrder: vi.fn((input: any) => { input.beforeBuyDispatch?.(); return broker.placeOrder(input); }),
+      cancelOrder: vi.fn(async () => { throw new Error('Cancellation remains unverified in this test fixture.'); }),
       confirmFill: vi.fn(async (ack: any, quantity: number) => {
         const order = (await broker.getOrders()).find((item) => item.id === ack.orderId);
         return { complete: order?.filledQuantity === quantity, terminal: true, filledQuantity: order?.filledQuantity ?? 0, averagePrice: order?.averageFillPrice ?? 0, status: order?.status };
       }),
       placeProtectiveExit: vi.fn(async () => ({ success: true, gttOrderId: 'gtt_verified_fixture' })),
     };
-    const ledger = { getEntries: vi.fn(() => []) };
+    const ledger = { getEntries: vi.fn(() => []), tryLockIntent: vi.fn(() => true), unlockIntent: vi.fn() };
     const orders = { closePosition: vi.fn(), reconcileExternalExitIfFlat: vi.fn() };
-    runtime = new DailyBotExecutionService(broker, reservations, coordinator, tools, feed, catalog, env, proposals, gateway, router as any, { getMode: () => TradeMode.APPROVAL } as any, ledger as any, orders as any);
-    return { router, ledger, orders };
+    const checklist = { getChecklist: vi.fn(() => ({ liveExecutionPermitted: true })) };
+    runtime = new DailyBotExecutionService(broker, reservations, coordinator, tools, feed, catalog, env, proposals, gateway, router as any, { getMode: () => TradeMode.APPROVAL } as any, ledger as any, orders as any, checklist as any);
+    return { router, ledger, orders, checklist };
   }
+
+  it('blocks an unsigned owner checklist before scanning or submitting any Live entry', async () => {
+    const { router, checklist } = liveHarness();
+    checklist.getChecklist.mockReturnValue({ liveExecutionPermitted: false });
+    const preflight = await runtime.preflight(session.config, session.strategySnapshot);
+    expect(preflight.checks.find((check) => check.id === 'owner-readiness')?.passed).toBe(false);
+    await runtime.tick(session);
+    expect(session.pendingProposalId).toBeNull();
+    expect(router.placeOrder).not.toHaveBeenCalled();
+    expect(reservations.getActiveReservations()).toEqual([]);
+  });
+
+  it('fails closed when the owner checklist provider is missing in a Live deployment', async () => {
+    const { router, ledger, orders } = liveHarness();
+    runtime = new DailyBotExecutionService(broker, reservations, coordinator, tools, feed, catalog, env, proposals, gateway, router as any, { getMode: () => TradeMode.APPROVAL } as any, ledger as any, orders as any);
+    const preflight = await runtime.preflight(session.config, session.strategySnapshot);
+    expect(preflight.checks.find((check) => check.id === 'owner-readiness')?.passed).toBe(false);
+    await runtime.tick(session);
+    expect(router.placeOrder).not.toHaveBeenCalled();
+  });
+
+  it('blocks a BUY when quotes age out while its durable checkpoint is awaiting completion', async () => {
+    let finish!: () => void;
+    let enteredCheckpoint!: () => void;
+    const waiting = new Promise<void>((resolve) => { enteredCheckpoint = resolve; });
+    const checkpoint = new Promise<void>((resolve) => { finish = resolve; });
+    const scan = runtime.tick(session, async () => { enteredCheckpoint(); await checkpoint; });
+    await waiting;
+    vi.advanceTimersByTime(4000);
+    finish();
+    await scan;
+    expect(await broker.getOrders()).toEqual([]);
+    expect(reservations.getActiveReservations()).toEqual([]);
+    expect(session.events.some((event) => event.type === 'ENTRY_RECONCILIATION_REQUIRED')).toBe(false);
+  });
+
+  it('blocks a Paper BUY when the account is disarmed during the intent checkpoint', async () => {
+    await runtime.tick(session, () => { reservations.disarm(); });
+    expect(await broker.getOrders()).toEqual([]);
+    expect(reservations.getActiveReservations()).toEqual([]);
+    expect(session.events.some((event) => event.type === 'ENTRY_RECONCILIATION_REQUIRED')).toBe(false);
+  });
+
+  it('revalidates session state in the final broker callback after asynchronous broker lookups', async () => {
+    const { router, ledger } = liveHarness();
+    await runtime.tick(session);
+    const brokerSubmit = vi.spyOn(broker, 'placeOrder');
+    router.placeOrder.mockImplementationOnce(async (input: any) => {
+      await Promise.resolve();
+      session.status = 'PAUSED';
+      input.beforeBuyDispatch();
+      return broker.placeOrder(input);
+    });
+    await expect(runtime.approveEntry(session)).rejects.toThrow('Session');
+    expect(brokerSubmit).not.toHaveBeenCalled();
+    expect(reservations.getActiveReservations()).toEqual([]);
+    expect(ledger.unlockIntent).toHaveBeenCalledOnce();
+    expect(session.events.some((event) => event.type === 'ENTRY_RECONCILIATION_REQUIRED')).toBe(false);
+  });
+
+  it('rejects an executable ask above the reserved entry bound in the final broker callback', async () => {
+    const { router } = liveHarness();
+    await runtime.tick(session);
+    const brokerSubmit = vi.spyOn(broker, 'placeOrder');
+    router.placeOrder.mockImplementationOnce(async (input: any) => {
+      await Promise.resolve();
+      tick(102);
+      input.beforeBuyDispatch();
+      return broker.placeOrder(input);
+    });
+    await expect(runtime.approveEntry(session)).rejects.toThrow('reserved maximum entry price');
+    expect(brokerSubmit).not.toHaveBeenCalled();
+    expect(reservations.getActiveReservations()).toEqual([]);
+  });
+
+  it('rejects a changed mode revision in the final broker callback and releases the known undispatched reservation', async () => {
+    const { router } = liveHarness();
+    await runtime.tick(session);
+    const brokerSubmit = vi.spyOn(broker, 'placeOrder');
+    router.placeOrder.mockImplementationOnce(async (input: any) => {
+      expect(input.expectedModeRevision).toBe(0);
+      await Promise.resolve();
+      router.getModeRevision.mockReturnValue(2);
+      input.beforeBuyDispatch();
+      return broker.placeOrder(input);
+    });
+    await expect(runtime.approveEntry(session)).rejects.toThrow('Trading mode changed');
+    expect(brokerSubmit).not.toHaveBeenCalled();
+    expect(reservations.getActiveReservations()).toEqual([]);
+    expect(session.events.some((event) => event.type === 'ENTRY_RECONCILIATION_REQUIRED')).toBe(false);
+  });
+
+  it('rechecks owner authorization at individual approval and retains no reservation when it is revoked', async () => {
+    const { router, checklist } = liveHarness();
+    await runtime.tick(session);
+    expect(session.pendingProposalId).not.toBeNull();
+    checklist.getChecklist.mockReturnValue({ liveExecutionPermitted: false });
+    await expect(runtime.approveEntry(session)).rejects.toThrow('preflight failed');
+    expect(router.placeOrder).not.toHaveBeenCalled();
+    expect(reservations.getActiveReservations()).toEqual([]);
+  });
 
   it('keeps Live scans pending until individual approval and protects only the confirmed filled quantity', async () => {
     const { router } = liveHarness();
@@ -156,6 +261,47 @@ describe('Daily Bot execution and protective lifecycle', () => {
     expect(session.pendingProposalId).not.toBeNull();
     expect(reservations.getHeldReservationsCount()).toBe(1);
     expect(router.placeProtectiveExit).not.toHaveBeenCalled();
+  });
+
+  it('protects only the verified terminal partial quantity and retains ERROR until reconciliation', async () => {
+    const { router } = liveHarness();
+    await runtime.tick(session);
+    router.placeOrder.mockImplementationOnce((input: any) => broker.placeOrder({ ...input, simulatedPartialFill: true }));
+    router.confirmFill.mockResolvedValueOnce({ complete: false, terminal: true, filledQuantity: 32, averagePrice: 100.45, status: 'CANCELLED' });
+    await runtime.approveEntry(session);
+    expect(session).toMatchObject({ status: 'ERROR', pendingProposalId: null });
+    expect(session.trades[0]).toMatchObject({ quantity: 32, status: 'ERROR', gttId: 'gtt_verified_fixture' });
+    expect(router.placeProtectiveExit).toHaveBeenCalledWith(expect.objectContaining({ quantity: 32 }));
+    expect(reservations.getHeldReservationsCount()).toBe(0);
+    expect(reservations.getOpenPositionsCount()).toBe(1);
+    expect(reservations.isKillSwitchActive()).toBe(true);
+  });
+
+  it('attempts a shared owned emergency close when a confirmed Live fill cannot obtain verified protection', async () => {
+    const { router, orders } = liveHarness();
+    const confirmedExits = new OrdersService(broker, reservations, proposals, gateway);
+    orders.closePosition.mockImplementation((key) => confirmedExits.closePosition(key));
+    router.placeProtectiveExit.mockRejectedValueOnce(new Error('GTT verification failed'));
+    await runtime.tick(session);
+    await runtime.approveEntry(session);
+    expect(orders.closePosition).toHaveBeenCalledOnce();
+    expect(session.trades[0]?.status).toBe('CLOSED');
+    expect(session.status).toBe('ERROR');
+    expect(reservations.isKillSwitchActive()).toBe(true);
+    expect(reservations.getOpenPositionsCount()).toBe(0);
+  });
+
+  it('allows the independent owned Live emergency exit even when Daily Bot checkpoint storage fails', async () => {
+    const { orders } = liveHarness();
+    const confirmedExits = new OrdersService(broker, reservations, proposals, gateway);
+    orders.closePosition.mockImplementation((key) => confirmedExits.closePosition(key));
+    await runtime.tick(session);
+    await runtime.approveEntry(session);
+    await expect(runtime.stop(session, true, () => { throw new Error('Daily storage unavailable'); })).rejects.toThrow('Daily storage unavailable');
+    expect(orders.closePosition).toHaveBeenCalledOnce();
+    expect(await broker.getPositions()).toEqual([]);
+    expect(session.trades[0]?.status).toBe('CLOSED');
+    expect(reservations.getOpenPositionsCount()).toBe(0);
   });
 
   it('fails closed for unsupported AST reversal exits and never dispatches an order', async () => {
@@ -220,6 +366,18 @@ describe('Daily Bot execution and protective lifecycle', () => {
     expect(exposure.checks.find((item) => item.id === 'reconciliation')!.passed).toBe(false);
     await runtime.tick(session);
     expect(session.tradesExecuted).toBe(0);
+  });
+
+  it('blocks next-year entries until an official exchange calendar is verified', async () => {
+    vi.setSystemTime(new Date('2027-01-04T04:30:00.000Z')); // Monday 10:00 IST, an unverified calendar year.
+    session.config.tradingDate = '2027-01-04';
+    tick();
+    const preflight = await runtime.preflight(session.config, session.strategySnapshot);
+    expect(preflight.checks.find((check) => check.id === 'trading-date')?.passed).toBe(true);
+    expect(preflight.checks.find((check) => check.id === 'exchange-calendar')?.passed).toBe(false);
+    expect(preflight.checks.find((check) => check.id === 'market-session')?.passed).toBe(false);
+    await runtime.tick(session);
+    expect(await broker.getOrders()).toEqual([]);
   });
 
   it('respects smaller daily and trade budgets instead of substituting account defaults', async () => {

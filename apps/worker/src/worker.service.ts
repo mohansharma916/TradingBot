@@ -1,63 +1,53 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
-import { RiskState, TradeMode } from '@trading-bot/contracts';
+import { RiskState, TradeMode, RiskStatusSchema } from '@trading-bot/contracts';
+import dotenv from 'dotenv';
+import path from 'node:path';
+dotenv.config({path:path.resolve(__dirname,'../../../.env'),quiet:true});
 
+/** Passive observer. The API's exclusive runtime lease owns all account dispatch. */
 @Injectable()
 export class WorkerService implements OnModuleInit, OnModuleDestroy {
-  private isLeader = false;
   private riskState: RiskState = RiskState.DISARMED;
   private tradeMode: TradeMode = TradeMode.PAPER;
   private timer: NodeJS.Timeout | null = null;
-
+  private token: string | null = null;
+  private observing = false;
+  private connected = false;
+  private lastObservedAt: string | null = null;
+  private error: string | null = null;
   async onModuleInit() {
-    console.log('[Trading Worker] Starting up...');
-    // Single leader election guard
-    await this.acquireLeaderLock();
-
-    // Invariant: Always start DISARMED
-    this.riskState = RiskState.DISARMED;
-    console.log(`[Trading Worker] Safety invariant active. Current risk state: ${this.riskState}`);
-
-    // Reconcile open orders and positions before resuming
-    await this.reconcileBrokerState();
-
-    // Start background reconciliation & health heartbeat
-    this.timer = setInterval(() => {
-      this.heartbeat();
-    }, 10000);
+    await this.observe();
+    this.timer = setInterval(() => { void this.observe(); },10000);
+    this.timer.unref();
   }
-
-  async onModuleDestroy() {
-    if (this.timer) {
-      clearInterval(this.timer);
-    }
-    console.log('[Trading Worker] Cleanly shutting down. Releasing leader lock...');
+  onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
+  public async observe(): Promise<void> {
+    if (this.observing) return;
+    this.observing = true;
+    try {
+      const base = process.env.TRADING_API_URL ?? 'http://127.0.0.1:4000/api/v1';
+      if (!this.token) {
+        if (!process.env.OWNER_PASSWORD) throw new Error('Owner login is not configured for the observer.');
+        const response = await fetch(base+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({username:process.env.OWNER_USERNAME ?? 'owner',password:process.env.OWNER_PASSWORD}),signal:AbortSignal.timeout(5000)});
+        if (!response.ok) throw new Error('API owner authentication failed.');
+        const body = await response.json() as {token?:string};
+        if (!body.token) throw new Error('API did not return an owner session.');
+        this.token = body.token;
+      }
+      const response = await fetch(base+'/risk/status',{headers:{Authorization:'Bearer '+this.token},signal:AbortSignal.timeout(5000)});
+      if (response.status === 401) this.token = null;
+      if (!response.ok) throw new Error('API account status is unavailable.');
+      const status = RiskStatusSchema.parse(await response.json());
+      this.riskState = status.state; this.tradeMode = status.mode;
+      this.lastObservedAt = new Date().toISOString(); this.connected = true; this.error = null;
+    } catch (error) {
+      this.connected = false; this.riskState = RiskState.DISARMED;
+      this.error = error instanceof Error ? error.message : 'API status unavailable.';
+    } finally { this.observing = false; }
   }
-
-  private async acquireLeaderLock(): Promise<boolean> {
-    // In production, uses PostgreSQL advisory lock: SELECT pg_try_advisory_lock(ACCOUNT_ID_HASH)
-    this.isLeader = true;
-    console.log('[Trading Worker] Single-leader advisory lock acquired.');
-    return true;
-  }
-
-  private async reconcileBrokerState(): Promise<void> {
-    console.log('[Trading Worker] Running startup reconciliation: Checking broker orders & positions...');
-    // Verifies no dangling or unmatched orders exist
-    console.log('[Trading Worker] Reconciliation clean: 0 discrepancies found.');
-  }
-
-  private heartbeat() {
-    console.log(
-      `[Trading Worker Heartbeat] Status: ACTIVE | Mode: ${this.tradeMode} | State: ${this.riskState}`,
-    );
-  }
-
   public getStatus() {
-    return {
-      isLeader: this.isLeader,
-      riskState: this.riskState,
-      tradeMode: this.tradeMode,
-      uptime: process.uptime(),
-    };
+    return {isLeader:false,role:'API_OBSERVER',connected:this.connected,riskState:this.riskState,tradeMode:this.tradeMode,
+      lastObservedAt:this.lastObservedAt,error:this.error,uptime:process.uptime()};
   }
 }

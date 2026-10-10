@@ -98,6 +98,40 @@ describe('Daily Bot durable orchestration', () => {
     expect(dailyBotTradingDate(new Date('2026-10-09T18:30:00Z'))).toBe('2026-10-10');
   });
 
+  it('stores Daily Bot state in the configured ledger directory and preserves an explicit path override', () => {
+    const configured = new DailyBotStore(undefined, { config: { STATE_DIRECTORY: directory } } as any);
+    expect(configured.storagePath).toBe(path.join(directory, 'daily-bot.json'));
+    expect(new DailyBotStore(storagePath, { config: { STATE_DIRECTORY: path.join(directory, 'other') } } as any).storagePath).toBe(storagePath);
+  });
+
+  it('requires a matching Live mode and literal consent code, then arms only after successful preflight', async () => {
+    const gate = { getAvailableCash: () => 10000, arm: vi.fn(), disarm: vi.fn() };
+    const live = new DailyBotService(store, execution as any, { getStrategy: () => selectedStrategy, getAllStrategies: () => [selectedStrategy] } as any, { config: { ...env.config, LIVE_EXECUTION_ENABLED: true } } as any, gate as any, { getMode: () => TradeMode.APPROVAL } as any);
+    const setup = await live.createSetup({ ...configuration(), tradingMode: TradeMode.APPROVAL });
+    await expect(live.start(setup.id, { operatorConsent: true, confirmationCode: 'YES' })).rejects.toThrow('confirmationCode LIVE');
+    expect(gate.arm).not.toHaveBeenCalled();
+    execution.preflight.mockResolvedValueOnce({ passed: false, evaluatedAt: new Date().toISOString(), checks: [{ id: 'funds', passed: false, message: 'Unverified funds' }] });
+    await expect(live.start(setup.id, { operatorConsent: true, confirmationCode: 'LIVE' })).rejects.toThrow('preflight failed');
+    expect(gate.arm).not.toHaveBeenCalled();
+    const started = await live.start(setup.id, { operatorConsent: true, confirmationCode: 'LIVE' });
+    expect(gate.arm).toHaveBeenCalledOnce();
+    await live.pause(started.id);
+    expect(gate.disarm).toHaveBeenCalledOnce();
+    await live.resume(started.id);
+    expect(gate.arm).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not carry Testing P&L, trade counts or consumed signals into a Live trading-day budget', async () => {
+    const paperSetup = savedSetup();
+    const paper = sessionFor(paperSetup);
+    paper.status = 'STOPPED'; paper.trades = [{ ...trade('CLOSED'), realizedNetPnl: -1000 }]; paper.tradesExecuted = 3; paper.processedSignalKeys = ['paper-only'];
+    store.commit({ version: 1, setups: [paperSetup], sessions: [paper] });
+    const live = new DailyBotService(store, execution as any, { getStrategy: () => selectedStrategy, getAllStrategies: () => [selectedStrategy] } as any, { config: { ...env.config, LIVE_EXECUTION_ENABLED: true } } as any, { getAvailableCash: () => 10000, arm: vi.fn(), disarm: vi.fn() } as any, { getMode: () => TradeMode.APPROVAL } as any);
+    const setup = await live.createSetup({ ...configuration(), tradingMode: TradeMode.APPROVAL });
+    const started = await live.start(setup.id, { operatorConsent: true, confirmationCode: 'LIVE' });
+    expect(started).toMatchObject({ tradesExecuted: 0, trades: [], processedSignalKeys: [] });
+  });
+
   it('durably captures immutable strategy/config and clones a new date without changing history', async () => {
     const saved = await service.createSetup(configuration());
     selectedStrategy.version = 2;
@@ -124,6 +158,13 @@ describe('Daily Bot durable orchestration', () => {
     await service.createSetup(configuration('2026-10-03'));
     vi.setSystemTime(new Date('2026-10-05T04:00:00Z'));
     expect(service.getToday().previousSetup?.id).toBe(prior.id);
+  });
+
+  it('does not label a saved weekday in an unverified calendar year as a previous trading day', async () => {
+    const verified = await service.createSetup(configuration('2026-12-31'));
+    await service.createSetup(configuration('2027-01-01'));
+    vi.setSystemTime(new Date('2027-01-04T04:00:00Z'));
+    expect(service.getToday().previousSetup?.id).toBe(verified.id);
   });
 
   it('restores a missing custom strategy at its highest saved version so copied risk configurations can be saved', async () => {

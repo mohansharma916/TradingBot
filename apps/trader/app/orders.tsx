@@ -7,10 +7,10 @@ import {
   OrderSide,
   OrderFillEvent,
   ExitProtectionStatus,
-  GoLiveChecklistItem,
 } from '@trading-bot/contracts';
 import { useWorkstation } from '../src/hooks/useWorkstation';
 import { apiClient } from '../src/services/api';
+import LiveChecklistReview from '../src/features/health/LiveChecklistReview';
 
 type TabType = 'POSITIONS' | 'ORDERS' | 'JOURNAL' | 'CHECKLIST';
 
@@ -65,22 +65,16 @@ export default function OrdersScreen() {
     finally { setPendingAction(false); }
   };
 
-  // Phase 5: 10-Item Go-Live Safety Checklist State
-  const [checklistItems, setChecklistItems] = useState<GoLiveChecklistItem[]>([]);
-  const [checklistSignedOffBy, setChecklistSignedOffBy] = useState<string | null>(null);
-  const [checklistSignedOffAt, setChecklistSignedOffAt] = useState<string | null>(null);
-
   // Periodic sync with live backend API
   useEffect(() => {
     let isMounted = true;
     const syncOrdersData = async () => {
       try {
-        const [orderList, posList, fillsList, riskData, checklistData] = await Promise.all([
+        const [orderList, posList, fillsList, riskData] = await Promise.all([
           apiClient.getOrders(),
           apiClient.getPositions(),
           apiClient.getOrderFills(),
           apiClient.getRiskStatus(),
-          apiClient.getGoLiveChecklist(),
         ]);
         if (isMounted) {
           if (orderList) setOrders(orderList);
@@ -91,11 +85,6 @@ export default function OrdersScreen() {
             setReservedCapital(riskData.reservedCapital);
             setRemainingDailyRiskBudget(riskData.remainingDailyRiskBudget);
             setIsLiveConnected(true);
-          }
-          if (checklistData) {
-            setChecklistItems(checklistData.items);
-            setChecklistSignedOffBy(checklistData.signedOffBy || null);
-            setChecklistSignedOffAt(checklistData.signedOffAt || null);
           }
         }
       } catch (failure) {
@@ -109,25 +98,6 @@ export default function OrdersScreen() {
       clearInterval(interval);
     };
   }, [workstationState.mode]);
-
-  const handleSignOffItem = async (id: string) => {
-    if (pendingAction) return; setPendingAction(true);
-    try {
-      const result = await apiClient.signOffChecklistItem(id, 'Verified by operator in workstation');
-      setChecklistItems((items) => items.map((item) => item.id === id ? result : item));
-      showNotification('Checklist verification recorded by the API.');
-    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Checklist verification failed.'); }
-    finally { setPendingAction(false); }
-  };
-  const handleCompleteChecklist = async () => {
-    if (pendingAction) return; setPendingAction(true);
-    try {
-      const result = await apiClient.signOffGoLiveChecklist('Platform Owner');
-      setChecklistItems(result.items); setChecklistSignedOffBy(result.signedOffBy || null); setChecklistSignedOffAt(result.signedOffAt || null);
-      showNotification('Checklist sign-off recorded. Trading remains subject to account and execution gates.');
-    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Checklist sign-off failed.'); }
-    finally { setPendingAction(false); }
-  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.lg, maxWidth: 1200, margin: '0 auto', width: '100%' }}>
@@ -205,7 +175,7 @@ export default function OrdersScreen() {
             <h1 style={{ margin: 0, fontSize: typography.fontSize.xxl, fontWeight: typography.fontWeight.bold }}>
               Execution & Protective Exit Ledger
             </h1>
-            <Badge label="SUPERVISED APPROVAL MODE" variant="primary" />
+            <Badge label={workstationState.mode === 'PAPER' ? 'TESTING ACCOUNT' : 'LIVE ACCOUNT · OWNER APPROVAL'} variant="primary" />
             <Badge
               label={workstationState.riskState === 'ARMED' ? 'ARMED' : 'DISARMED'}
               variant={workstationState.riskState === 'ARMED' ? 'success' : 'neutral'}
@@ -280,7 +250,7 @@ export default function OrdersScreen() {
               fontSize: typography.fontSize.xs,
             }}
           >
-            Go-Live Checklist ({checklistItems.filter((c) => c.passed).length}/10)
+            Go-Live Checklist
           </button>
         </div>
       </div>
@@ -365,15 +335,15 @@ export default function OrdersScreen() {
             >
               <div style={{ fontSize: typography.fontSize.lg, marginBottom: spacing.xs }}>No Open Positions</div>
               <div style={{ fontSize: typography.fontSize.xs }}>
-                All capital reservations released. Authorize a Trade Proposal or trigger a supervised test order above.
+                No open positions were reported by the selected account. Reserved capital is shown separately above.
               </div>
             </div>
           ) : (
             positions
               .filter((p) => p.netQuantity > 0)
               .map((pos) => {
-                const pnl = (pos.lastPrice - pos.buyAvgPrice) * pos.netQuantity;
-                const pnlPct = ((pos.lastPrice - pos.buyAvgPrice) / pos.buyAvgPrice) * 100;
+                const pnl = pos.unrealizedPnl;
+                const pnlPct = pos.buyAvgPrice > 0 && pos.netQuantity > 0 ? pnl / (pos.buyAvgPrice * pos.netQuantity) * 100 : 0;
                 const isProfitable = pnl >= 0;
 
                 return (
@@ -397,9 +367,11 @@ export default function OrdersScreen() {
                           </span>
                           <Badge label="INTRADAY MIS" variant="primary" size="sm" />
                           {pos.protectionStatus === ExitProtectionStatus.PROTECTED_GTT ? (
-                            <Badge label="GTT PROTECTED" variant="success" size="sm" />
+                            <Badge label={workstationState.mode === 'PAPER' ? 'VIRTUAL PROTECTION' : 'BROKER GTT CONFIRMED'} variant="success" size="sm" />
+                          ) : pos.protectionStatus === ExitProtectionStatus.PROTECTED_SERVER ? (
+                            <Badge label="SERVER MONITOR" variant="warning" size="sm" />
                           ) : (
-                            <Badge label="UNPROTECTED" variant="danger" size="sm" />
+                            <Badge label="PROTECTION UNVERIFIED" variant="danger" size="sm" />
                           )}
                         </div>
                         <div style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary, marginTop: 2 }}>
@@ -411,7 +383,7 @@ export default function OrdersScreen() {
                         <div style={{ fontSize: typography.fontSize.lg, fontWeight: typography.fontWeight.bold, color: isProfitable ? colors.profit : colors.loss }}>
                           {isProfitable ? '+' : ''}₹{pnl.toFixed(2)} ({isProfitable ? '+' : ''}{pnlPct.toFixed(2)}%)
                         </div>
-                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Unrealized MTM P&L</div>
+                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Last reported unrealized MTM P&L</div>
                       </div>
                     </div>
 
@@ -419,7 +391,7 @@ export default function OrdersScreen() {
                       <div>
                         <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>NET QUANTITY</div>
                         <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.semibold, marginTop: 2 }}>
-                          {pos.netQuantity} ({Math.round(pos.netQuantity / 25)} Lot)
+                          {pos.netQuantity} units
                         </div>
                       </div>
                       <div>
@@ -435,14 +407,14 @@ export default function OrdersScreen() {
                         </div>
                       </div>
                       <div>
-                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>PROTECTIVE STOP (GTT)</div>
+                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>REPORTED STOP PRICE</div>
                         <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.semibold, color: colors.loss, marginTop: 2 }}>
                           ₹{pos.stopLossPrice?.toFixed(2) ?? 'None'}
                         </div>
                         <div style={{ fontSize: '10px', color: colors.textMuted }}>Limit trigger; not guaranteed</div>
                       </div>
                       <div>
-                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>PROFIT TARGET (GTT)</div>
+                        <div style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>REPORTED TARGET PRICE</div>
                         <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.semibold, color: colors.profit, marginTop: 2 }}>
                           ₹{pos.targetPrice?.toFixed(2) ?? 'None'}
                         </div>
@@ -450,7 +422,7 @@ export default function OrdersScreen() {
                       </div>
                       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'flex-end' }}>
                         <button
-                          onClick={() => handleClosePosition(pos.instrumentKey)}
+                          disabled={pendingAction} onClick={() => handleClosePosition(pos.instrumentKey)}
                           style={{
                             padding: `${spacing.xs}px ${spacing.md}px`,
                             backgroundColor: colors.lossMuted,
@@ -606,7 +578,7 @@ export default function OrdersScreen() {
               </button>
             </div>
 
-            {/* Fee Variance Savings Summary Strip */}
+            {/* Reported fees retain their verification source. */}
             <div
               style={{
                 display: 'grid',
@@ -621,15 +593,15 @@ export default function OrdersScreen() {
                 </div>
               </div>
               <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.sm, borderRadius: borderRadius.sm }}>
-                <div style={{ fontSize: '11px', color: colors.textMuted }}>ACTUAL STATUTORY LEVIES</div>
+                <div style={{ fontSize: '11px', color: colors.textMuted }}>REPORTED FEES</div>
                 <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.textPrimary, marginTop: 2 }}>
                   ₹{fills.reduce((sum, f) => sum + f.actualCharges, 0).toFixed(2)}
                 </div>
               </div>
               <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.sm, borderRadius: borderRadius.sm }}>
-                <div style={{ fontSize: '11px', color: colors.textMuted }}>FEE VARIANCE SAVINGS</div>
-                <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.profit, marginTop: 2 }}>
-                  +₹{(fills.reduce((sum, f) => sum + f.estimatedCharges, 0) - fills.reduce((sum, f) => sum + f.actualCharges, 0)).toFixed(2)} saved
+                <div style={{ fontSize: '11px', color: colors.textMuted }}>FEES SOURCE</div>
+                <div style={{ fontSize: typography.fontSize.sm, fontWeight: typography.fontWeight.bold, color: colors.textSecondary, marginTop: 2 }}>
+                  {[...new Set(fills.map((fill) => fill.chargesSource ?? (workstationState.mode === 'PAPER' ? 'SIMULATED' : 'ESTIMATED')))].join(' · ') || 'No fills'}
                 </div>
               </div>
             </div>
@@ -644,9 +616,9 @@ export default function OrdersScreen() {
                   <th style={{ padding: spacing.sm }}>SIDE</th>
                   <th style={{ padding: spacing.sm }}>QTY @ PRICE</th>
                   <th style={{ padding: spacing.sm }}>ESTIMATED CHARGES</th>
-                  <th style={{ padding: spacing.sm }}>ACTUAL CHARGES</th>
-                  <th style={{ padding: spacing.sm }}>CHARGE BREAKDOWN</th>
-                  <th style={{ padding: spacing.sm }}>VARIANCE</th>
+                  <th style={{ padding: spacing.sm }}>REPORTED CHARGES</th>
+                  <th style={{ padding: spacing.sm }}>REPORTED BREAKDOWN</th>
+                  <th style={{ padding: spacing.sm }}>FEES SOURCE</th>
                 </tr>
               </thead>
               <tbody>
@@ -658,7 +630,6 @@ export default function OrdersScreen() {
                   </tr>
                 ) : (
                   fills.map((f) => {
-                  const variance = f.estimatedCharges - f.actualCharges;
                   return (
                     <tr key={f.id} style={{ borderBottom: `1px solid ${colors.border}` }}>
                       <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
@@ -683,8 +654,8 @@ export default function OrdersScreen() {
                         <div>Brokerage: ₹{f.charges.brokerage.toFixed(2)} | STT: ₹{f.charges.stt.toFixed(2)}</div>
                         <div>Exch: ₹{f.charges.exchangeCharges.toFixed(2)} | Stamp: ₹{f.charges.stampDuty.toFixed(2)} | GST: ₹{f.charges.gst.toFixed(2)}</div>
                       </td>
-                      <td style={{ padding: spacing.sm, color: variance >= 0 ? colors.profit : colors.loss, fontWeight: typography.fontWeight.bold }}>
-                        {variance >= 0 ? `+₹${variance.toFixed(2)} saved` : `-₹${Math.abs(variance).toFixed(2)} excess`}
+                      <td style={{ padding: spacing.sm, color: colors.textSecondary }}>
+                        {f.chargesSource ?? (workstationState.mode === 'PAPER' ? 'SIMULATED' : 'ESTIMATED')}
                       </td>
                     </tr>
                   );
@@ -695,138 +666,7 @@ export default function OrdersScreen() {
         </div>
       )}
 
-      {activeTab === 'CHECKLIST' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.md }}>
-          {/* Header Banner */}
-          <div
-            style={{
-              backgroundColor: colors.surface,
-              borderRadius: borderRadius.md,
-              border: `1px solid ${colors.border}`,
-              padding: spacing.md,
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              flexWrap: 'wrap',
-              gap: spacing.md,
-            }}
-          >
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: spacing.sm }}>
-                <h3 style={{ margin: 0, fontSize: typography.fontSize.md, fontWeight: typography.fontWeight.bold }}>
-                  10-Point Pre-Flight Go-Live Safety Checklist
-                </h3>
-                {checklistItems.every((i) => i.passed) && checklistSignedOffAt ? (
-                  <Badge label="LIVE EXECUTION: PERMITTED" variant="success" />
-                ) : (
-                  <Badge label="LIVE EXECUTION: BLOCKED" variant="danger" />
-                )}
-              </div>
-              <p style={{ margin: '4px 0 0 0', color: colors.textSecondary, fontSize: typography.fontSize.xs }}>
-                Mandatory Section 20 Blueprint Acceptance: All 10 regulatory, infrastructure, risk, and consent gates must be verified before live order submission.
-              </p>
-              {checklistSignedOffAt && (
-                <div style={{ fontSize: '11px', color: colors.profit, marginTop: 4 }}>
-                  Signed off by {checklistSignedOffBy} at {new Date(checklistSignedOffAt).toLocaleTimeString()} IST.
-                </div>
-              )}
-            </div>
-
-            <button
-              onClick={handleCompleteChecklist}
-              style={{
-                padding: `${spacing.sm}px ${spacing.md}px`,
-                backgroundColor: colors.profit,
-                color: '#022C22',
-                border: 'none',
-                borderRadius: borderRadius.sm,
-                fontSize: typography.fontSize.xs,
-                fontWeight: typography.fontWeight.bold,
-                cursor: 'pointer',
-              }}
-            >
-              Sign Off Checklist as Platform Owner
-            </button>
-          </div>
-
-          {/* Checklist Items Table */}
-          <div style={{ backgroundColor: colors.surface, borderRadius: borderRadius.md, border: `1px solid ${colors.border}`, overflowX: 'auto' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: typography.fontSize.xs }}>
-              <thead>
-                <tr style={{ backgroundColor: colors.surfaceElevated, borderBottom: `1px solid ${colors.border}`, color: colors.textMuted }}>
-                  <th style={{ padding: spacing.sm }}>GATE CATEGORY</th>
-                  <th style={{ padding: spacing.sm }}>CHECKLIST ITEM & DESCRIPTION</th>
-                  <th style={{ padding: spacing.sm }}>AUDIT EVIDENCE</th>
-                  <th style={{ padding: spacing.sm }}>STATUS</th>
-                  <th style={{ padding: spacing.sm }}>ACTION</th>
-                </tr>
-              </thead>
-              <tbody>
-                {checklistItems.map((item) => (
-                  <tr key={item.id} style={{ borderBottom: `1px solid ${colors.border}` }}>
-                    <td style={{ padding: spacing.sm }}>
-                      <Badge
-                        label={item.category}
-                        variant={
-                          item.category === 'RISK_CAPS' || item.category === 'PROTECTION_MECHANISM'
-                            ? 'primary'
-                            : item.category === 'REGULATORY' || item.category === 'CONSENT'
-                              ? 'warning'
-                              : 'neutral'
-                        }
-                        size="sm"
-                      />
-                    </td>
-                    <td style={{ padding: spacing.sm }}>
-                      <div style={{ fontWeight: typography.fontWeight.bold, color: colors.textPrimary }}>
-                        {item.title}
-                      </div>
-                      <div style={{ color: colors.textSecondary, fontSize: '11px', marginTop: 2 }}>
-                        {item.description}
-                      </div>
-                    </td>
-                    <td style={{ padding: spacing.sm, color: colors.textMuted, fontSize: '11px' }}>
-                      {item.evidence || 'Verification recorded in system audit log.'}
-                      {item.verifiedAt && (
-                        <div style={{ color: colors.cyan, fontSize: '10px', marginTop: 2 }}>
-                          Verified: {new Date(item.verifiedAt).toLocaleTimeString()}
-                        </div>
-                      )}
-                    </td>
-                    <td style={{ padding: spacing.sm }}>
-                      {item.passed ? (
-                        <Badge label="VERIFIED PASSED" variant="success" size="sm" />
-                      ) : (
-                        <Badge label="PENDING ACTION" variant="danger" size="sm" />
-                      )}
-                    </td>
-                    <td style={{ padding: spacing.sm }}>
-                      {!item.passed ? (
-                        <button
-                          onClick={() => handleSignOffItem(item.id)}
-                          style={{
-                            padding: '3px 8px',
-                            backgroundColor: colors.surfaceElevated,
-                            color: colors.cyan,
-                            border: `1px solid ${colors.cyan}`,
-                            borderRadius: borderRadius.sm,
-                            fontSize: '11px',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          Verify & Pass
-                        </button>
-                      ) : (
-                        <span style={{ color: colors.profit, fontSize: '11px' }}>✓ Compliant</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
+      {activeTab === 'CHECKLIST' && <LiveChecklistReview />}
     </div>
   );
 }

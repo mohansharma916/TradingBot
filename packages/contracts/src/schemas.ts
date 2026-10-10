@@ -34,7 +34,10 @@ export const EnvSchema = z.object({
   CORS_ORIGIN: z.string().default('http://localhost:8081,http://localhost:3000'),
   JWT_SECRET: z.string().min(16).default('super_secret_dev_key_change_in_production_min_32_chars'),
   OWNER_USERNAME: z.string().min(1).default('owner'),
-  OWNER_PASSWORD: z.string().min(12).optional(),
+  OWNER_PASSWORD: z.preprocess(
+    (value) => value === '' ? undefined : value,
+    z.string().min(12).max(512).optional(),
+  ),
   API_HOST: z.string().default('127.0.0.1'),
   STATE_DIRECTORY: z.string().min(1).default('.data'),
   UPSTOX_ALGO_NAME: z.string().optional(),
@@ -661,6 +664,7 @@ export const TradeProposalSchema = z.object({
   id: z.string().uuid(),
   strategyId: z.string().uuid(),
   strategyVersion: z.number().int().positive(),
+  versionHash: z.string().optional(),
   proposingAgent: z.nativeEnum(AgentType),
   instrumentKey: z.string(),
   symbol: z.string(),
@@ -715,8 +719,8 @@ export type ExecutionIntent = z.infer<typeof ExecutionIntentSchema>;
 
 // Broker Order Schema
 export const BrokerOrderSchema = z.object({
-  id: z.string().uuid(),
-  intentId: z.string().uuid(),
+  id: z.string().min(1),
+  intentId: z.string().min(1),
   brokerOrderId: z.string().nullable(),
   tag: z.string().max(20),
   instrumentKey: z.string(),
@@ -739,7 +743,7 @@ export type BrokerOrder = z.infer<typeof BrokerOrderSchema>;
 
 // Position Schema
 export const PositionSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   instrumentKey: z.string(),
   symbol: z.string(),
   netQuantity: z.number().int(),

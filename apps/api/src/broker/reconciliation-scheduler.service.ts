@@ -51,12 +51,12 @@ export class ReconciliationSchedulerService
     // Initial run after short 5-second warmup
     setTimeout(() => {
       if (this.isRunning) {
-        this.runAuditCycle();
+        void this.runAuditCycle().catch(() => {});
       }
     }, 5000);
 
     this.timer = setInterval(() => {
-      this.runAuditCycle();
+      void this.runAuditCycle().catch(() => {});
     }, this.intervalSeconds * 1000);
   }
 

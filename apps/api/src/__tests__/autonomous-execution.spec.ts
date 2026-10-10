@@ -1,325 +1,72 @@
 import 'reflect-metadata';
-import { describe, it, expect, beforeEach } from 'vitest';
-import { EnvService } from '../config/env.service';
-import { GoLiveChecklistService } from '../orders/go-live-checklist.service';
-import { TokenStorageService } from '../broker/token-storage.service';
-import { UpstoxMarketFeedService } from '../market-data/upstox-market-feed.service';
-import { StrategiesService } from '../strategies/strategies.service';
-import { SupervisedExecutionService } from '../orders/supervised-execution.service';
-import { ProposalsService } from '../proposals/proposals.service';
-import { RiskReservationManager } from '../risk/risk-reservation.manager';
-import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
-import { UpstoxBrokerAdapter } from '../broker/upstox-broker.adapter';
-import { BrokerReconciliationService } from '../broker/broker-reconciliation.service';
-import { UpstoxOAuthService } from '../broker/upstox-oauth.service';
-import { InstrumentCatalogService } from '../instruments/instrument-catalog.service';
-import { EventsGateway } from '../websocket/events.gateway';
-import { NotificationsService } from '../notifications/notifications.service';
-import { AutonomousExecutionService } from '../orders/autonomous-execution.service';
-import {
-  StrategyStatus,
-  ProposalStatus,
-  OrderSide,
-  ProductType,
-  TradeProposal,
-  AllowedOptionType,
-  OrderStatus,
-  ExitProtectionStatus,
-} from '@trading-bot/contracts';
+import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
+import {EnvSchema,ProposalStatus,OrderStatus,ExitProtectionStatus,TradeMode} from '@trading-bot/contracts';
+import {AutonomousExecutionService} from '../orders/autonomous-execution.service';
+import {StrategiesService} from '../strategies/strategies.service';
+import {ProposalsService} from '../proposals/proposals.service';
+import {RiskReservationManager} from '../risk/risk-reservation.manager';
+import {TradingModeService} from '../trading/trading-mode.service';
 
-describe('Bounded Autonomous Execution & Readiness Gates (Phase 7)', () => {
-  let envService: EnvService;
-  let checklistService: GoLiveChecklistService;
-  let tokenStorage: TokenStorageService;
-  let catalogService: InstrumentCatalogService;
-  let gateway: EventsGateway;
-  let oauthService: UpstoxOAuthService;
-  let paperBroker: PaperBrokerAdapter;
-  let upstoxBroker: UpstoxBrokerAdapter;
-  let reservationManager: RiskReservationManager;
-  let reconciliationService: BrokerReconciliationService;
-  let proposalsService: ProposalsService;
-  let strategiesService: StrategiesService;
-  let supervisedExecution: SupervisedExecutionService;
-  let notifications: NotificationsService;
-  let autonomousService: AutonomousExecutionService;
-  let mockFeed: any;
-  const TEST_STRATEGY_ID = '550e8400-e29b-41d4-a716-446655440002';
-
-  beforeEach(() => {
-    envService = new EnvService();
-    tokenStorage = new TokenStorageService(envService);
-    checklistService = new GoLiveChecklistService(envService, tokenStorage);
-    gateway = new EventsGateway();
-    oauthService = new UpstoxOAuthService(envService, tokenStorage, gateway);
-    catalogService = new InstrumentCatalogService();
-    notifications = new NotificationsService(gateway);
-
-    mockFeed = {
-      getQuote: (key: string) => ({
-        instrumentKey: key,
-        lastPrice: 122.5,
-        bidPrice: 122.0,
-        askPrice: 123.0, // 0.81% spread (<= 1.0%)
-        isStale: false,
-        timestamp: new Date().toISOString(),
-      }),
-      getFeedHealth: () => ({ staleCount: 0, feedLatencyMs: 18 }),
-    };
-
-    paperBroker = new PaperBrokerAdapter(catalogService, mockFeed as any, gateway);
-    upstoxBroker = new UpstoxBrokerAdapter(envService, catalogService, tokenStorage);
-    reservationManager = new RiskReservationManager(envService, gateway);
-
-    reconciliationService = new BrokerReconciliationService(
-      paperBroker,
-      upstoxBroker,
-      reservationManager,
-      oauthService,
-      gateway,
-    );
-
-    proposalsService = new ProposalsService(gateway);
-    const mockCoordinator = { runStrategyWorkflow: async () => ({}) } as any;
-    strategiesService = new StrategiesService(mockCoordinator, proposalsService);
-
-    supervisedExecution = new SupervisedExecutionService(
-      envService,
-      proposalsService,
-      paperBroker,
-      upstoxBroker,
-      mockFeed as any,
-      reservationManager,
-      checklistService,
-      gateway,
-    );
-
-    autonomousService = new AutonomousExecutionService(
-      envService,
-      checklistService,
-      reconciliationService,
-      tokenStorage,
-      mockFeed as any,
-      strategiesService,
-      proposalsService,
-      supervisedExecution,
-      reservationManager,
-      gateway,
-      notifications,
-      paperBroker,
-    );
+describe('bounded autonomy with verified evidence',()=>{
+  let service:AutonomousExecutionService, strategies:StrategiesService, proposals:ProposalsService, risk:RiskReservationManager;
+  let feed:any, supervised:any, mode:TradingModeService;
+  const gateway={broadcast:vi.fn()} as any;
+  const env={config:EnvSchema.parse({NODE_ENV:'test'})} as any;
+  const request=()=>({strategyId:strategies.getAllStrategies()[0]!.id,windowMinutes:30,maxSessionTrades:1,confirmationCode:'CONFIRM_AUTO_EXECUTION',operatorConsent:true});
+  beforeEach(()=>{
+    mode=new TradingModeService(env);
+    risk=new RiskReservationManager(env,gateway,mode);
+    proposals=new ProposalsService(gateway);
+    strategies=new StrategiesService({} as any,proposals);
+    feed={getFeedHealth:()=>({status:'DISCONNECTED',provenance:'UNAVAILABLE',totalTicksReceived:0,staleCount:0,feedLatencyMs:0})};
+    supervised={executeSupervisedProposal:vi.fn().mockResolvedValue({orderId:'paper-confirmed',filledQuantity:65,orderStatus:OrderStatus.FILLED,protectionStatus:ExitProtectionStatus.PROTECTED_VIRTUAL})};
+    service=new AutonomousExecutionService(env,{getChecklist:()=>({items:[],signedOffAt:null}),isLiveExecutionPermitted:()=>false} as any,
+      {runReconciliation:async()=>({discrepancies:[]})} as any,
+      {getTokenMetadata:()=>({exists:false,isExpired:true,secondsRemaining:0})} as any,
+      feed,strategies,proposals,supervised,risk,gateway,{dispatchAlert:vi.fn()} as any,
+      {getFills:()=>[],getPositions:async()=>[],getOrders:async()=>[]} as any,mode);
   });
-
-  it('checkReadiness() blocks arming when Go-Live checklist is unsigned', async () => {
-    // Initial state: checklist is unsigned
-    expect(checklistService.isLiveExecutionPermitted()).toBe(false);
-
-    const report = await autonomousService.checkReadiness();
-    expect(report.isEligibleForAuto).toBe(false);
-
-    const goLiveItem = report.items.find((i) => i.id === 'auto_03');
-    expect(goLiveItem?.passed).toBe(false);
-
-    // Attempting to arm throws ForbiddenException
-    await expect(
-      autonomousService.armAutonomous({
-        strategyId: TEST_STRATEGY_ID,
-        windowMinutes: 30,
-        maxSessionTrades: 2,
-        confirmationCode: 'CONFIRM_AUTO_EXECUTION',
-        operatorConsent: true,
-      }),
-    ).rejects.toThrow(/AUTONOMOUS_EXECUTION_BLOCKED/);
+  afterEach(()=>{service.disarmAutonomous('Test teardown');vi.restoreAllMocks();});
+  const permitFixtureReadiness=()=>vi.spyOn(service,'checkReadiness').mockResolvedValue({isEligibleForAuto:true,items:[],evaluatedAt:new Date().toISOString(),summary:'Explicit isolated unit-test readiness fixture'});
+  function addProposal(overrides:any={}){
+    const strategy=strategies.getAllStrategies()[0]!;
+    const proposal={id:'550e8400-e29b-41d4-a716-446655440010',strategyId:strategy.id,strategyVersion:strategy.version,versionHash:strategy.versionHash,proposingAgent:'STRATEGY_ANALYST',instrumentKey:'NSE_FO|52175',symbol:'Fixture',side:'BUY',product:'I',suggestedEntryPrice:100,suggestedStopPrice:95,suggestedTargetPrice:110,lotSize:65,quantity:65,estimatedCapitalRequired:6500,estimatedRoundTripCosts:60,allInMaxLoss:385,estimatedNetProfit:590,evidence:{indicators:{closedBars:40},rationale:'Explicit test fixture',confidence:0.6},status:ProposalStatus.PENDING,expiresAt:new Date(Date.now()+180000).toISOString(),createdAt:new Date().toISOString(),...overrides};
+    proposals.addProposal(proposal as any);return proposal;
+  }
+  it('empty feed never passes merely because staleCount is zero',async()=>{
+    const result=await service.checkReadiness();
+    expect(result.isEligibleForAuto).toBe(false);
+    expect(result.items.find(item=>item.id==='auto_06')?.passed).toBe(false);
+    await expect(service.armAutonomous(request())).rejects.toThrow('AUTONOMOUS_EXECUTION_BLOCKED');
   });
-
-  it('armAutonomous() succeeds when all gates pass and rejects invalid confirmation codes', async () => {
-    // 1. Store valid broker token
-    tokenStorage.storeToken({
-      accessToken: 'test_access_token_123',
-      expiresInSeconds: 86400,
-      userId: 'UPSTOX_DEV_916',
-      userType: 'individual',
-    });
-
-    // 2. Sign off Go-Live checklist
-    (envService.config as any).LIVE_EXECUTION_ENABLED = true;
-    checklistService.completeChecklist('Platform Owner John');
-    expect(checklistService.isLiveExecutionPermitted()).toBe(true);
-
-    const readiness = await autonomousService.checkReadiness();
-    expect(readiness.isEligibleForAuto).toBe(true);
-    expect(readiness.items.every((i) => i.passed)).toBe(true);
-
-    // Reject wrong confirmation code
-    await expect(
-      autonomousService.armAutonomous({
-        strategyId: TEST_STRATEGY_ID,
-        windowMinutes: 30,
-        maxSessionTrades: 2,
-        confirmationCode: 'WRONG_CODE',
-        operatorConsent: true,
-      }),
-    ).rejects.toThrow(/Invalid confirmation code/);
-
-    // Valid arming
-    const session = await autonomousService.armAutonomous({
-      strategyId: TEST_STRATEGY_ID,
-      windowMinutes: 30,
-      maxSessionTrades: 2,
-      confirmationCode: 'CONFIRM_AUTO_EXECUTION',
-      operatorConsent: true,
-    });
-
-    expect(session.isArmed).toBe(true);
-    expect(session.strategyId).toBe(TEST_STRATEGY_ID);
-    expect(session.remainingMinutes).toBeGreaterThan(28);
-    expect(session.maxSessionTrades).toBe(2);
-    expect(session.tradesExecutedInSession).toBe(0);
-
-    // Verify strategy status updated to ARMED
-    const strategy = strategiesService.getStrategy(TEST_STRATEGY_ID);
-    expect(strategy.status).toBe(StrategyStatus.ARMED);
-
-    // Teardown: Disarm cleanly
-    autonomousService.disarmAutonomous('Test clean disarm');
-    expect(autonomousService.getSessionStatus().isArmed).toBe(false);
+  it('Live requires owner evidence and multiple actual paper days',async()=>{
+    vi.spyOn(mode,'isLive').mockReturnValue(true);
+    const result=await service.checkReadiness();
+    expect(result.items.filter(item=>['auto_01','auto_02','auto_03','auto_05'].includes(item.id)).every(item=>!item.passed)).toBe(true);
   });
-
-  it('disarmAutonomous() resets strategy status, logs action, and creates alert', async () => {
-    tokenStorage.storeToken({
-      accessToken: 'test_token_123',
-      expiresInSeconds: 86400,
-      userId: 'UPSTOX_DEV_916',
-      userType: 'individual',
-    });
-    (envService.config as any).LIVE_EXECUTION_ENABLED = true;
-    checklistService.completeChecklist('Platform Owner John');
-
-    await autonomousService.armAutonomous({
-      strategyId: TEST_STRATEGY_ID,
-      windowMinutes: 30,
-      maxSessionTrades: 2,
-      confirmationCode: 'CONFIRM_AUTO_EXECUTION',
-      operatorConsent: true,
-    });
-
-    expect(autonomousService.getSessionStatus().isArmed).toBe(true);
-
-    const disarmedStatus = autonomousService.disarmAutonomous('Operator Manual Intervention');
-    expect(disarmedStatus.isArmed).toBe(false);
-    expect(disarmedStatus.lastDisarmReason).toBe('Operator Manual Intervention');
-
-    const logs = autonomousService.getExecutionLogs();
-    expect(logs.length).toBeGreaterThan(0);
-    const disarmLog = logs.find((l) => l.action === 'AUTO_DISARMED');
-    expect(disarmLog).toBeDefined();
-    expect(disarmLog?.details).toContain('Operator Manual Intervention');
+  it('requires explicit consent and arms/disarms the shared entry gate',async()=>{
+    permitFixtureReadiness();
+    await expect(service.armAutonomous({...request(),operatorConsent:false})).rejects.toThrow('Invalid confirmation');
+    await service.armAutonomous(request());expect(risk.isArmed()).toBe(true);
+    service.disarmAutonomous('Owner stop');expect(risk.isArmed()).toBe(false);
+    expect(service.getSessionStatus().isArmed).toBe(false);
   });
-
-  it('executeAutonomousProposal() validates conditions and executes with GTT exits', async () => {
-    tokenStorage.storeToken({
-      accessToken: 'test_token_123',
-      expiresInSeconds: 86400,
-      userId: 'UPSTOX_DEV_916',
-      userType: 'individual',
-    });
-    (envService.config as any).LIVE_EXECUTION_ENABLED = true;
-    checklistService.completeChecklist('Platform Owner John');
-
-    // Create a trade proposal
-    const proposal: TradeProposal = {
-      id: 'prop_auto_test_01',
-      strategyId: TEST_STRATEGY_ID,
-      strategyName: 'NIFTY EMA20 Momentum',
-      strategyVersion: 1,
-      versionHash: 'v1-test-hash',
-      instrumentKey: 'NSE_FO|NIFTY_2026-10-15_25100_CE',
-      symbol: 'NIFTY 25100 CE',
-      optionType: AllowedOptionType.LONG_CALL,
-      action: 'BUY',
-      quantity: 25,
-      suggestedEntryPrice: 122.5,
-      side: OrderSide.BUY,
-      product: ProductType.I,
-      lotSize: 25,
-      suggestedStopPrice: 114,
-      suggestedTargetPrice: 136,
-      estimatedCapitalRequired: 3062.5,
-      estimatedRoundTripCosts: 52.35,
-      allInMaxLoss: 270.7,
-      estimatedNetProfit: 300,
-      estimatedCharges: 52.35,
-      capitalRequired: 3062.5,
-      allInRisk: 270.7,
-      maxLossBuffer: 218.35,
-      targetNetProfit: 300,
-      stopLossPrice: 114.0,
-      targetPrice: 136.0,
-      status: ProposalStatus.PENDING,
-      evidence: {
-        ema20: 25050,
-        rsi14: 62.4,
-        spreadPct: 0.81,
-        volume: 15000,
-        candleCloseTime: new Date().toISOString(),
-      },
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 180000).toISOString(),
-    };
-
-    proposalsService.addProposal(proposal);
-
-    // Reject execution while DISARMED
-    await expect(
-      autonomousService.executeAutonomousProposal(proposal.id),
-    ).rejects.toThrow(/Engine is DISARMED/);
-
-    // Arm session with limit of 1 trade
-    await autonomousService.armAutonomous({
-      strategyId: TEST_STRATEGY_ID,
-      windowMinutes: 30,
-      maxSessionTrades: 1,
-      confirmationCode: 'CONFIRM_AUTO_EXECUTION',
-      operatorConsent: true,
-    });
-
-    // Execute proposal autonomously
-    const execResult = await autonomousService.executeAutonomousProposal(proposal.id);
-    expect(execResult.orderStatus).toBe(OrderStatus.PROTECTED);
-    expect(execResult.protectionStatus).toBe(ExitProtectionStatus.PROTECTED_GTT);
-    expect(execResult.filledQuantity).toBe(25);
-
-    // Session trade cap of 1 reached -> verify auto-disarmed
-    const status = autonomousService.getSessionStatus();
-    expect(status.tradesExecutedInSession).toBe(1);
-    expect(status.isArmed).toBe(false);
-    expect(status.lastDisarmReason).toBe('SESSION_TRADE_CAP_REACHED');
+  it('rejects a proposal with a different strategy hash before approval or dispatch',async()=>{
+    permitFixtureReadiness();const proposal=addProposal({versionHash:'old-version'});
+    await service.armAutonomous(request());
+    await expect(service.executeAutonomousProposal(proposal.id)).rejects.toThrow('exact armed strategy');
+    expect(supervised.executeSupervisedProposal).not.toHaveBeenCalled();
+    expect(proposals.getProposal(proposal.id)?.status).toBe(ProposalStatus.PENDING);
   });
-
-  it('blocks autonomous execution when Kill Switch is active', async () => {
-    tokenStorage.storeToken({
-      accessToken: 'test_token_123',
-      expiresInSeconds: 86400,
-      userId: 'UPSTOX_DEV_916',
-      userType: 'individual',
-    });
-    (envService.config as any).LIVE_EXECUTION_ENABLED = true;
-    checklistService.completeChecklist('Platform Owner John');
-
-    // Engage kill switch
-    reservationManager.setKillSwitch(true);
-
-    // Arming should be rejected
-    await expect(
-      autonomousService.armAutonomous({
-        strategyId: TEST_STRATEGY_ID,
-        windowMinutes: 30,
-        maxSessionTrades: 2,
-        confirmationCode: 'CONFIRM_AUTO_EXECUTION',
-        operatorConsent: true,
-      }),
-    ).rejects.toThrow(/Kill Switch is active/);
-
-    reservationManager.setKillSwitch(false); // Cleanup
+  it('counts confirmed fills and describes returned protection without inventing a GTT',async()=>{
+    permitFixtureReadiness();const proposal=addProposal();await service.armAutonomous(request());
+    await service.executeAutonomousProposal(proposal.id);
+    expect(service.getSessionStatus()).toMatchObject({tradesExecutedInSession:1,isArmed:false,lastDisarmReason:'SESSION_TRADE_CAP_REACHED'});
+    expect(service.getExecutionLogs().find(log=>log.action==='ORDER_DISPATCHED')?.details).toContain('FILLED');
+    expect(service.getExecutionLogs().find(log=>log.action==='ORDER_DISPATCHED')?.details).not.toContain('GTT Exits armed');
+  });
+  it('kill switch blocks shared arming even with an isolated passing readiness fixture',async()=>{
+    permitFixtureReadiness();risk.setKillSwitch(true);
+    await expect(service.armAutonomous(request())).rejects.toThrow('Kill Switch');
   });
 });

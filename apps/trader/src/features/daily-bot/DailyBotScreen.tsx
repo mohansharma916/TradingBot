@@ -70,7 +70,7 @@ function SessionMonitor({ session, busy, control }: {
     </View>
     <Text accessibilityLiveRegion="polite" style={styles.description}>{session.lastMessage}</Text>
     <View style={styles.row}>
-      <Metric label="Realized net P&L" value={money(realized)} positive={realized >= 0} />
+      <Metric label={session.config.tradingMode === TradeMode.PAPER ? 'Virtual realized net P&L' : 'Realized net P&L (estimated fees)'} value={money(realized)} positive={realized >= 0} />
       <Metric label="Estimated open net P&L" value={money(unrealized)} positive={unrealized >= 0} />
       <Metric label="Allocated capital" value={money(allocated)} />
       <Metric label="Entry trades today" value={`${session.tradesExecuted} / ${session.config.maximumTradesPerDay}`} />
@@ -88,7 +88,7 @@ function SessionMonitor({ session, busy, control }: {
         <Button label="Emergency Stop & Request Exit" disabled={busy} danger
           onPress={() => { void control(session.id, 'emergency-stop'); }} />}
     </View>
-    <Text style={styles.hint}>Pausing or stopping entries keeps position protection active. Exit requests are confirmed against fills.</Text>
+    <Text style={styles.hint}>Pausing or stopping entries does not close positions. Review recorded protection status; exit requests require confirmed fills.</Text>
     {openTrades.length === 0 && <Text style={styles.description}>No open bot positions. The backend waits for a valid strategy signal.</Text>}
     {openTrades.map((trade) => <View key={trade.orderId} style={styles.innerCard}>
       <View style={styles.rowBetween}><Text style={styles.heading}>{trade.symbol}</Text><Text style={styles.status}>{trade.status}</Text></View>
@@ -141,7 +141,7 @@ export default function DailyBotScreen() {
       setStep(stored.step);
       if (stored.savedSetupId) {
         const found = today.setups.find((s) => s.id === stored.savedSetupId) ?? (today.todaySetup?.id === stored.savedSetupId ? today.todaySetup : null);
-        if (found) setSavedSetup(found);
+        if (found?.config.tradingMode === workstation.mode) setSavedSetup(found);
       }
     }
   }, [today, draft]);
@@ -460,13 +460,13 @@ export default function DailyBotScreen() {
           <Text style={styles.description}>{session.config.tradingDate} · {session.strategySnapshot.name} · {session.status}</Text>
           <View style={styles.row}>
             <Metric label="Trades" value={String(session.tradesExecuted)} />
-            <Metric label="Realized net P&L" value={money(session.trades.reduce((sum, trade) => sum + trade.realizedNetPnl, 0))} />
+            <Metric label={session.config.tradingMode === TradeMode.PAPER ? 'Virtual realized net P&L' : 'Realized net P&L (estimated fees)'} value={money(session.trades.reduce((sum, trade) => sum + trade.realizedNetPnl, 0))} />
             <Metric label="Estimated trade costs" value={money(session.trades.reduce((sum, trade) => sum + trade.estimatedCharges, 0))} />
           </View>
           {session.trades.length === 0 && <Text style={styles.description}>No trades executed. The event log shows skipped signals and readiness checks.</Text>}
           {session.trades.map((trade) => <View key={trade.orderId} style={styles.innerCard}>
             <Text style={styles.label}>{trade.symbol} · {trade.status}</Text>
-            <Text style={styles.description}>{trade.quantity} units · Entry {money(trade.entryPrice)} · Net realized {money(trade.realizedNetPnl)}</Text>
+            <Text style={styles.description}>{trade.quantity} units · Entry {money(trade.entryPrice)} · {session.config.tradingMode === TradeMode.PAPER ? 'Virtual net realized' : 'Net realized, estimated fees'} {money(trade.realizedNetPnl)}</Text>
           </View>)}
           {session.events.slice().reverse().map((event, index) => <View key={`${event.timestamp}-${index}`} style={styles.event}>
             <Text style={styles.hint}>{new Date(event.timestamp).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })} IST · {event.type}</Text>

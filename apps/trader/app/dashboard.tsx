@@ -130,9 +130,9 @@ export default function DashboardScreen() {
           subValue={`₹${(risk?.reservedCapital ?? 0).toFixed(2)} reserved for trading`}
         />
         <StatCard
-          label="Realized Net P&L"
+          label={workstation.mode === 'PAPER' ? 'Virtual Realized Net P&L' : report.chargesSource === 'BROKER_CONFIRMED' ? 'Realized Net P&L' : 'Realized Net P&L (estimated fees)'}
           value={`${netPnl >= 0 ? '+' : ''}₹${netPnl.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-          subValue={`After ₹${(report?.actualCharges ?? 0).toFixed(2)} fees | ${report?.totalTrades ?? 0} trades`}
+          subValue={`${report.chargesSource ?? 'ESTIMATED'} fees: ₹${(report?.actualCharges ?? 0).toFixed(2)} | ${report?.totalTrades ?? 0} trades`}
           trend={netPnl >= 0 ? 'profit' : 'loss'}
         />
         <StatCard

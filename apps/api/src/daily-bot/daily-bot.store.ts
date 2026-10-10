@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
+import { EnvService } from '../config/env.service';
 
 const DailyBotStateSchema = z.object({
   version: z.literal(1),
@@ -35,8 +36,8 @@ export class DailyBotStore {
   private state: DailyBotState;
   private writeFailure: string | null = null;
 
-  constructor(@Optional() @Inject('DAILY_BOT_STORAGE_PATH') storagePath?: string) {
-    this.storagePath = path.resolve(storagePath || process.env.DAILY_BOT_STORAGE_PATH || path.resolve(__dirname, '../../../../.data/daily-bot.json'));
+  constructor(@Optional() @Inject('DAILY_BOT_STORAGE_PATH') storagePath?: string, @Optional() @Inject(EnvService) env?: EnvService) {
+    this.storagePath = path.resolve(storagePath || process.env.DAILY_BOT_STORAGE_PATH || (env?.config.STATE_DIRECTORY ? path.join(env.config.STATE_DIRECTORY, 'daily-bot.json') : path.resolve(__dirname, '../../../../.data/daily-bot.json')));
     this.state = this.load();
   }
 

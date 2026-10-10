@@ -26,7 +26,7 @@ function WorkstationShell() {
     <View style={styles.loginCard}>
       <Text style={styles.brandTitle}>PERSONAL TRADING WORKSTATION</Text>
       <Text style={styles.loginTitle}>Owner Sign In</Text>
-      <Text style={styles.navText}>Sign in to manage your account. Trading starts in Testing mode.</Text>
+      <Text style={styles.navText}>Sign in to manage your account. New entries require arming.</Text>
       <Text style={styles.navText}>Username</Text>
       <TextInput accessibilityLabel="Owner username" value={username} onChangeText={setUsername} autoCapitalize="none" style={styles.loginInput} />
       <Text style={styles.navText}>Password</Text>

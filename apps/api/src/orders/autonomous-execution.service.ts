@@ -50,7 +50,7 @@ export class AutonomousExecutionService {
   private executionLogs: AutonomousExecutionLog[] = [];
 
   constructor(
-    @Inject(EnvService) private readonly envService: EnvService,
+    @Inject(EnvService) _envService: EnvService,
     @Inject(GoLiveChecklistService) private readonly checklistService: GoLiveChecklistService,
     @Inject(BrokerReconciliationService) private readonly reconciliationService: BrokerReconciliationService,
     @Inject(TokenStorageService) private readonly tokenStorage: TokenStorageService,

@@ -49,6 +49,8 @@ export class HealthController {
     const memory = process.memoryUsage();
     const feedHealth = this.marketFeed.getFeedHealth();
     const tokenMeta = this.tokenStorage.getTokenMetadata();
+    const token = this.tokenStorage.hasValidToken() ? this.tokenStorage.getToken()?.accessToken : undefined;
+    const genuineToken = Boolean(token) && !/^(mock_|test_|upstox_sand_|upstox_ref_)/i.test(token ?? '');
     const riskStatus = this.riskService.getStatus();
     const scheduleStatus = this.reconciliationScheduler.getStatus();
 
@@ -63,7 +65,7 @@ export class HealthController {
         lastTickAt: feedHealth.lastTickReceivedAt ?? null,
       },
       brokerConnection: {
-        authenticated: tokenMeta.exists && !tokenMeta.isExpired,
+        authenticated: genuineToken && tokenMeta.exists && !tokenMeta.isExpired,
         rateLimiterTokensRemaining: null,
         egressIpMatch: null,
         registeredIp: this.envService.config.UPSTOX_EGRESS_IP,

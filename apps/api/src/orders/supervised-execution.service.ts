@@ -1,6 +1,6 @@
 import { Injectable, Inject, Optional, NotFoundException, BadRequestException } from '@nestjs/common';
 import { OrderStatus, OrderType, OrderSide, ExitProtectionStatus, SupervisedExecutionRequest, SupervisedExecutionResult, ProposalStatus } from '@trading-bot/contracts';
-import { validateGTTExitParameters, calculateOptionCharges } from '@trading-bot/domain';
+import { validateGTTExitParameters, calculateOptionCharges, isMarketOpenForTrading, isCalendarVerifiedForDate } from '@trading-bot/domain';
 import { EnvService } from '../config/env.service';
 import { ProposalsService } from '../proposals/proposals.service';
 import { PaperBrokerAdapter } from '../broker/paper-broker.adapter';
@@ -31,8 +31,11 @@ export class SupervisedExecutionService {
     const proposal = this.proposalsService.getProposal(req.proposalId);
     if (!proposal) throw new NotFoundException(`Trade proposal '${req.proposalId}' not found.`);
     const live = this.router?.isLive() ?? false;
+    const modeRevision = this.router?.getModeRevision();
+    const approvedSnapshot = JSON.stringify(proposal);
     const broker = live ? this.upstoxBroker : this.paperBroker;
     if (live && (!this.envService.config.LIVE_EXECUTION_ENABLED || !this.ledger || !this.goLiveChecklist.getChecklist().liveExecutionPermitted)) throw new BadRequestException('Live execution requires the enabled feature flag, durable ledger and verified owner checklist.');
+    if (live && (!isCalendarVerifiedForDate() || !isMarketOpenForTrading())) throw new BadRequestException('Live entry requires the verified exchange calendar and an open regular trading session.');
     if (live && [req.simulateTimeout, req.simulateProtectionFailure, req.simulateUncoveredPosition, req.simulateExitLimitUnfilled].some(Boolean)) throw new BadRequestException('Simulation controls cannot be used in Live mode.');
     if (proposal.status !== ProposalStatus.APPROVED) throw new BadRequestException(`Proposal '${req.proposalId}' must be APPROVED by owner before supervised execution. Current status: ${proposal.status}`);
     if (!Number.isFinite(Date.parse(proposal.expiresAt)) || Date.now() >= Date.parse(proposal.expiresAt)) throw new BadRequestException('Proposal approval window has expired. A fresh proposal and approval are required.');
@@ -41,24 +44,40 @@ export class SupervisedExecutionService {
     const quote = this.marketFeed.getQuote(proposal.instrumentKey);
     const age = quote ? Date.now() - Date.parse(quote.timestamp) : NaN;
     if (!quote || quote.isStale || !Number.isFinite(age) || age < -1000 || age > 3000 || !Number.isFinite(quote.bidPrice) || quote.bidPrice <= 0 || !Number.isFinite(quote.askPrice) || quote.askPrice < quote.bidPrice) throw new BadRequestException('Pre-trade revalidation failed: missing quote or quote age exceeds 3,000ms safety threshold.');
-    if (live && (quote.provenance !== 'LIVE' || quote.depthKnown !== true || quote.bidQty <= 0 || quote.askQty <= 0)) throw new BadRequestException('Live execution requires genuine fresh broker depth and positive executable bid/ask quantities.');
+    if (live && (quote.provenance !== 'LIVE' || quote.depthKnown !== true || !(quote.bidQty > 0) || !(quote.askQty > 0))) throw new BadRequestException('Live execution requires genuine fresh broker depth and positive executable bid/ask quantities.');
     const spread = (quote.askPrice - quote.bidPrice) / quote.askPrice * 100;
     if (spread > 1) throw new BadRequestException('Pre-trade revalidation failed: spread exceeds 1.0% maximum liquidity ceiling.');
     const maximumPrice = Math.max(proposal.suggestedEntryPrice, quote.askPrice + (live ? 0 : 0.25));
     const capital = Math.max(proposal.estimatedCapitalRequired, maximumPrice * proposal.quantity);
     const charges = calculateOptionCharges({ buyPrice: maximumPrice, sellPrice: Math.max(1, proposal.suggestedStopPrice - 0.25), quantity: proposal.quantity }).totalRoundTripCharges;
     const risk = Math.max(proposal.allInMaxLoss, (maximumPrice - proposal.suggestedStopPrice + 0.25) * proposal.quantity + charges + 10);
+    const assertEntryBoundary = (): void => {
+      if (this.router && (this.router.isLive() !== live || this.router.getModeRevision() !== modeRevision)) throw new BadRequestException('Trading mode changed during proposal revalidation; a new owner approval is required.');
+      const current = this.proposalsService.getProposal(proposal.id);
+      if (!current || current.status !== ProposalStatus.APPROVED || JSON.stringify(current) !== approvedSnapshot || !Number.isFinite(Date.parse(current.expiresAt)) || Date.parse(current.expiresAt) <= Date.now()) throw new BadRequestException('Proposal approval changed or expired during entry revalidation.');
+      this.riskReservationManager.assertEntryAllowed();
+      if (live && (!this.envService.config.LIVE_EXECUTION_ENABLED || !this.goLiveChecklist.getChecklist().liveExecutionPermitted || !isCalendarVerifiedForDate() || !isMarketOpenForTrading())) throw new BadRequestException('Live checklist, execution consent or trading session changed before dispatch.');
+      const currentQuote = this.marketFeed.getQuote(proposal.instrumentKey);
+      const currentAge = currentQuote ? Date.now() - Date.parse(currentQuote.timestamp) : NaN;
+      if (!currentQuote || currentQuote.isStale || !Number.isFinite(currentAge) || currentAge < -1000 || currentAge > 3000 || !Number.isFinite(currentQuote.bidPrice) || currentQuote.bidPrice <= 0 || !Number.isFinite(currentQuote.askPrice) || currentQuote.askPrice < currentQuote.bidPrice || currentQuote.askPrice > maximumPrice ||
+        (currentQuote.askPrice - currentQuote.bidPrice) / currentQuote.askPrice * 100 > 1 ||
+        (live && (currentQuote.provenance !== 'LIVE' || currentQuote.depthKnown !== true || !(currentQuote.bidQty > 0) || !(currentQuote.askQty > 0)))) throw new BadRequestException('Fresh executable quote or reserved entry price changed before dispatch.');
+    };
     if (live) {
       const instrument = await broker.getInstrument(proposal.instrumentKey);
+      assertEntryBoundary();
       if (!instrument || !/^NSE_FO\|\d+$/.test(instrument.instrumentKey) || proposal.quantity % instrument.lotSize !== 0) throw new BadRequestException('Live orders require the broker instrument token and correct contract lot size.');
       const funds = await broker.getFunds();
+      assertEntryBoundary();
       if (funds.source !== 'LIVE_BROKER' || funds.status !== 'VERIFIED' || capital + charges > funds.availableCash) throw new BadRequestException('Verified live funds do not cover entry capital and estimated charges.');
       this.riskReservationManager.synchronizeFunds(funds.availableCash);
     }
     const intentId = `supervised_${proposal.id}`;
     const signalKey = `${proposal.strategyId}:${proposal.instrumentKey}:5m:${proposal.id}`;
+    assertEntryBoundary();
     if (live && this.ledger!.getIntent(intentId)) throw new BadRequestException('This proposal already has a durable live intent; reconcile its existing outcome instead of replaying it.');
     const reservation = this.riskReservationManager.acquireReservation({ proposalId: proposal.id, signalKey, instrumentKey: proposal.instrumentKey, capitalRequired: capital, allInRisk: risk });
+    if (live && !this.ledger!.tryLockIntent(intentId)) { this.riskReservationManager.releaseReservation(reservation.id); throw new BadRequestException('The existing entry workflow is still being reconciled.'); }
     const result = (status: OrderStatus, protection: ExitProtectionStatus, quantity: number, price: number, message: string, orderId = intentId, gttOrderId?: string): SupervisedExecutionResult => ({ orderId, intentId, orderStatus: status, protectionStatus: protection, filledQuantity: quantity, averagePrice: price, message, ...(gttOrderId ? { gttOrderId } : {}) });
     if (req.simulateTimeout) {
       this.riskReservationManager.setKillSwitch(true);
@@ -68,8 +87,10 @@ export class SupervisedExecutionService {
     let ack: OrderAcknowledgement | undefined;
     let confirmed: ConfirmedOrderFill | undefined;
     try {
+      assertEntryBoundary();
       dispatched = true;
       ack = await broker.placeOrder({ intentId, proposalId: proposal.id, reservationId: reservation.id, signalKey, symbol: proposal.symbol,
+        expectedModeRevision: modeRevision, beforeBuyDispatch: assertEntryBoundary,
         reservedCapital: capital, reservedRisk: risk, tag: intentId.slice(0, 20), instrumentKey: proposal.instrumentKey,
         side: proposal.side, orderType: OrderType.LIMIT, product: proposal.product, quantity: proposal.quantity, price: proposal.suggestedEntryPrice,
         stopLossPrice: proposal.suggestedStopPrice, targetPrice: proposal.suggestedTargetPrice, estimatedCharges: charges, maximumExecutionPrice: maximumPrice });
@@ -106,7 +127,7 @@ export class SupervisedExecutionService {
         live ? `Confirmed ${quantity} units at ₹${price.toFixed(2)}. Broker stop verified; target is managed by the server. Trigger execution is not guaranteed.` : `Confirmed paper fill at ₹${price.toFixed(2)}, protected with GTT Stop and Target in simulation; not a guaranteed stop.`, ack.orderId, protection.gttOrderId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Execution failed.';
-      if (!dispatched || (error instanceof BrokerRequestError && error.definiteRejection && !confirmed?.filledQuantity)) {
+      if (!dispatched || (error instanceof BrokerRequestError && error.definiteRejection && !ack && !confirmed?.filledQuantity)) {
         this.riskReservationManager.releaseReservation(reservation.id, message);
         throw new BadRequestException(`Supervised execution rejected: ${message}`);
       }
@@ -116,7 +137,7 @@ export class SupervisedExecutionService {
       if (live && this.ledger!.getIntent(intentId)) this.ledger!.update(intentId, { state: status, message });
       return result(status, quantity > 0 ? ExitProtectionStatus.PROTECTION_FAILED : ExitProtectionStatus.UNPROTECTED, quantity, confirmed?.averagePrice || 0,
         `${message} Account entries frozen. Position or ambiguous dispatch remains reserved; broker reconciliation is required.`, ack?.orderId || intentId);
-    }
+    } finally { if (live) this.ledger!.unlockIntent(intentId); }
   }
   private async confirmPaperFill(ack: OrderAcknowledgement, quantity: number): Promise<ConfirmedOrderFill> {
     const order = (await this.paperBroker.getOrders()).find((item) => item.id === ack.orderId);
