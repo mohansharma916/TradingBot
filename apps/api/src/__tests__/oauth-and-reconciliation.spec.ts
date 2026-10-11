@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { EnvService } from '../config/env.service';
 import { TokenStorageService } from '../broker/token-storage.service';
 import { UpstoxOAuthService } from '../broker/upstox-oauth.service';
@@ -36,7 +37,7 @@ describe('Phase 4: Upstox OAuth, Token Encryption & Broker Reconciliation', () =
   let directory: string;
 
   beforeEach(() => {
-    directory = fs.mkdtempSync('/private/tmp/broker-session-');
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'broker-session-'));
     envService = { config: EnvSchema.parse({ NODE_ENV: 'test', STATE_DIRECTORY: directory, TOKEN_ENCRYPTION_KEY: 'private-fixture-encryption-key-32-characters', UPSTOX_API_KEY: 'fixture-app-key', UPSTOX_API_SECRET: 'fixture-app-secret' }) } as EnvService;
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('Unexpected network request: tests require an explicit broker response stub.'); }));
     tokenStorage = new TokenStorageService(envService);

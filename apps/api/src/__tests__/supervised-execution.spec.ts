@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { EnvService } from '../config/env.service';
 import { SupervisedExecutionService } from '../orders/supervised-execution.service';
 import { GoLiveChecklistService } from '../orders/go-live-checklist.service';
@@ -42,7 +43,7 @@ describe('Supervised entries and durable broker-confirmed execution', () => {
   const response = (data: unknown, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => ({ status: 'success', data }) }) as Response;
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-12T04:30:00.000Z'));
-    directory = fs.mkdtempSync('/private/tmp/broker-safety-');
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), 'broker-safety-'));
     env = { config: EnvSchema.parse({ NODE_ENV: 'test', STATE_DIRECTORY: directory, LIVE_EXECUTION_ENABLED: true, TOKEN_ENCRYPTION_KEY: 'private-fixture-encryption-key-32-characters' }) } as EnvService;
     tokens = new TokenStorageService(env);
     const gateway = new EventsGateway();
