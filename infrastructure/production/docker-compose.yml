@@ -1,0 +1,125 @@
+
+name: fo-trading
+
+services:
+
+  # ---------------------------------
+  # PostgreSQL Database
+  # ---------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: fo-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_DATABASE}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - internal
+
+  # ---------------------------------
+  # NestJS API
+  # ---------------------------------
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+
+    container_name: fo-api
+    restart: unless-stopped
+
+    env_file:
+      - ../../.env.production
+
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DB_HOST: postgres
+      DB_PORT: 5432
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    expose:
+      - "3000"
+
+    networks:
+      - internal
+      - outbound
+
+  # ---------------------------------
+  # Trading Strategy Worker
+  # ---------------------------------
+  worker:
+    build:
+      context: ../..
+      dockerfile: apps/worker/Dockerfile
+
+    container_name: fo-worker
+    restart: unless-stopped
+
+    env_file:
+      - ../../.env.production
+
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      DB_PORT: 5432
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    networks:
+      - internal
+      - outbound
+
+  # ---------------------------------
+  # HTTPS Reverse Proxy
+  # ---------------------------------
+  caddy:
+    image: caddy:2
+    container_name: fo-caddy
+    restart: unless-stopped
+
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+    depends_on:
+      - api
+
+    networks:
+      - outbound
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    internal: true
+
+  outbound:
+    driver: bridge

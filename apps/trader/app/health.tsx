@@ -109,9 +109,34 @@ export default function HealthScreen() {
     }
   };
 
-  // Periodic sync with live backend API
+  // Periodic sync with live backend API & handle OAuth redirect query params
   useEffect(() => {
     let isMounted = true;
+
+    // Support direct frontend redirects (e.g. http://localhost:8081/health?code=...&state=...)
+    if (typeof window !== 'undefined' && window.location.search) {
+      const urlParams = new URLSearchParams(window.location.search);
+      const code = urlParams.get('code');
+      const state = urlParams.get('state');
+      if (code && state) {
+        showToast('Processing Upstox OAuth callback...');
+        apiClient
+          .exchangeUpstoxCallback(code, state)
+          .then((res) => {
+            if (res.success && isMounted) {
+              showToast('✓ Upstox broker connected successfully!');
+              window.history.replaceState({}, document.title, window.location.pathname);
+              syncHealth();
+            }
+          })
+          .catch((err) => {
+            if (isMounted) {
+              showToast(`OAuth exchange failed: ${err.message || 'Invalid or expired state'}`);
+            }
+          });
+      }
+    }
+
     const syncHealth = async () => {
       try {
         const [diag, sess, recon, sched, alertList] = await Promise.all([

@@ -1,0 +1,12 @@
+.git
+.github
+node_modules
+**/node_modules
+**/dist
+**/build
+**/.expo
+.env
+.env.*
+!.env.example
+.data
+*.log

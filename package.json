@@ -2,6 +2,7 @@
   "name": "trading-platform-root",
   "version": "1.0.0",
   "private": true,
+  "packageManager": "pnpm@10.13.1",
   "type": "module",
   "scripts": {
     "dev": "pnpm --filter @trading-bot/contracts build && pnpm --filter @trading-bot/domain build && pnpm --parallel --filter @trading-bot/api --filter @trading-bot/worker --filter @trading-bot/trader dev",
