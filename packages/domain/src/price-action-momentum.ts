@@ -8,7 +8,7 @@ import {
 import { calculateOptionCharges } from './charges';
 import { Candle } from './indicators';
 import { getStandardLotSize } from './lot-size';
-import { isMarketOpenForTrading } from './market-calendar';
+import { isMarketOpenForTrading, isCalendarVerifiedForDate, getIstDateTime } from './market-calendar';
 
 export interface PriceActionMomentumEvaluationInput {
   /** Completed 1-minute candles in chronological order. Last candle is the setup candle. */
@@ -396,6 +396,15 @@ export function runPriceActionMomentumBacktest(
     trendingMarketTrades: 0,
     rangingMarketTrades: 0,
   };
+
+  const unverifiedCandle = candles.find((c) => !isCalendarVerifiedForDate(new Date(c.timestamp)));
+  if (unverifiedCandle) {
+    const unverifiedYear = getIstDateTime(new Date(unverifiedCandle.timestamp)).year;
+    return {
+      ...emptyResult,
+      error: `UNSUPPORTED_CALENDAR_YEAR: Historical simulation only supports verified calendar years (2023-2026). Found unverified year: ${unverifiedYear}.`,
+    };
+  }
 
   if (candles.length < candleCount + 2) {
     return emptyResult;

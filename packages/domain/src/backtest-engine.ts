@@ -4,7 +4,7 @@ import { Candle } from './indicators';
 import { getStandardLotSize } from './lot-size';
 import { buildIndicatorCache, convertLegacyStrategyToAst, evaluateStrategyAst } from './strategy-rule-evaluator';
 import { strategyExitLevels, strategyTimeframeMinutes } from './strategy-evaluator';
-import { isMarketOpenForTrading } from './market-calendar';
+import { isMarketOpenForTrading, isCalendarVerifiedForDate, getIstDateTime } from './market-calendar';
 
 export interface BacktestOptions { strategy: StrategyConfig; candles: Candle[]; request?: Partial<BacktestRequest>; dataSource?: string; lotSize?: number; tickSize?: number }
 const iso = (time: string | number) => new Date(time).toISOString();
@@ -22,17 +22,33 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const dataSource = `MODELED_OPTIONS_ON_${source}`;
   const modelAssumptions = ['Underlying candles are input data; all option contracts, prices and fills are modeled.', 'ATM premium = 0.55% of spot, fixed delta = 0.5; IV, theta, expiry and real option depth are absent.', 'One tick each side models spread; intrabar stops precede targets and trailing updates only after the bar closes.', 'Current fee rates are estimates; simulated performance does not establish a profitable trading edge.'];
   let candles = [...(options.candles ?? [])].sort((a,b)=>Number(new Date(a.timestamp))-Number(new Date(b.timestamp)));
+  let tradeStartMs = -Infinity;
+  let tradeEndMs = Infinity;
+  let fromDate = candles[0] ? iso(candles[0].timestamp) : new Date().toISOString();
+  let toDate = candles.at(-1) ? iso(candles.at(-1)!.timestamp) : fromDate;
+
   if (request?.fromDate || request?.toDate) {
     const dates = [(request.fromDate ?? request.toDate)!.slice(0,10),(request.toDate ?? request.fromDate)!.slice(0,10)].sort();
-    const start = Date.parse(`${dates[0]}T00:00:00+05:30`), end = Date.parse(`${dates[1]}T23:59:59.999+05:30`);
-    candles = candles.filter(c=>Number(new Date(c.timestamp))>=start && Number(new Date(c.timestamp))<=end);
+    tradeStartMs = Date.parse(`${dates[0]}T00:00:00+05:30`);
+    tradeEndMs = Date.parse(`${dates[1]}T23:59:59.999+05:30`);
+    fromDate = `${dates[0]}T00:00:00.000Z`;
+    toDate = `${dates[1]}T23:59:59.999Z`;
   }
-  const fromDate = candles[0] ? iso(candles[0].timestamp) : new Date().toISOString();
-  const toDate = candles.at(-1) ? iso(candles.at(-1)!.timestamp) : fromDate;
   const empty:BacktestResult = {strategyId:strategy.id,strategyName:strategy.name,version:strategy.version,periodDays:Math.max(1,Math.ceil((Date.parse(toDate)-Date.parse(fromDate))/86400000)),timeframe,fromDate,toDate,dataSource,modelAssumptions,initialCapital,finalCapital:initialCapital,totalTrades:0,winningTrades:0,losingTrades:0,winRatePct:0,grossPnl:0,totalCharges:0,netPnl:0,maxDrawdown:0,maxDrawdownPct:0,profitFactor:0,trades:[]};
   if (!Number.isInteger(lotSize) || lotSize<=0 || !Number.isFinite(tickSize) || tickSize<=0 || !interval || !Number.isFinite(initialCapital) || initialCapital<=0) return {...empty,error:'Valid timeframe, capital and authoritative lot/tick metadata are required.'};
   if (candles.some((c,i)=>!Number.isFinite(Number(new Date(c.timestamp))) || ![c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite) || c.low<=0 || c.high<Math.max(c.open,c.close) || c.low>Math.min(c.open,c.close) || c.volume<0 || (i>0 && Number(new Date(c.timestamp))===Number(new Date(candles[i-1]!.timestamp))))) return {...empty,error:'Invalid or duplicate underlying candles.'};
   if (candles.length<3) return empty;
+
+  // Calendar verification (B07): reject unverified years explicitly
+  const unverifiedCandle = candles.find(c => !isCalendarVerifiedForDate(new Date(c.timestamp)));
+  if (unverifiedCandle) {
+    const unverifiedYear = getIstDateTime(new Date(unverifiedCandle.timestamp)).year;
+    return {
+      ...empty,
+      error: `UNSUPPORTED_CALENDAR_YEAR: Historical simulation only supports verified calendar years (2023-2026). Found unverified year: ${unverifiedYear}.`,
+    };
+  }
+
   if (interval >= 86400000) return {...empty,error:'This intraday premium model requires intraday candles; daily bars cannot determine session entry and exits.'};
   const minimumPremium=Math.min(...candles.map(c=>money(Math.max(25,c.open*0.0055)+tickSize)));
   const minimumCharges=calculateOptionCharges({buyPrice:minimumPremium,sellPrice:minimumPremium,quantity:lotSize}).totalRoundTripCharges;
@@ -42,7 +58,17 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   if (ast.contractSelection?.instrumentType==='FUTURES' || ast.exitRules?.exitOnIndicatorReversal) return {...empty,error:'Futures and generic indicator-reversal exits require a dedicated price/execution model.'};
   const useTrailing = request?.useTrailingStop ?? ast.trailingProfit?.enabled ?? false;
   if (useTrailing && ast.trailingProfit?.mode && ast.trailingProfit.mode!==TrailingProfitMode.FIXED_STEP) return {...empty,error:'Only fixed-step trailing is supported by this modeled backtest.'};
+
+  // Build indicator cache over the full dataset (including warmup padding)
   const cache = buildIndicatorCache(candles,ast,{timeframeMinutes:interval/60000,candleTimestampBasis:'OPEN'});
+
+  // Check warmup sufficiency (B11)
+  if (candles.length < cache.warmupRequired) {
+    return {
+      ...empty,
+      error: `INSUFFICIENT_WARMUP: Dataset contains ${candles.length} bars, but strategy requires at least ${cache.warmupRequired} warmup bars.`,
+    };
+  }
   const maxDaily = Math.min(request?.maxDailyLossInr ?? Infinity,strategy.risk?.maxAllInDailyLossInr ?? strategy.maxAllInDailyLossInr ?? 600);
   const maxTrade = Math.min(request?.maxTradeLossInr ?? Infinity,strategy.risk?.maxAllInTradeLossInr ?? strategy.maxAllInTradeLossInr ?? 500);
   const maxTrades = Math.min(request?.maxTradesPerDay ?? Infinity,strategy.risk?.maxTradesPerDay ?? 3);
@@ -80,7 +106,10 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     }
   };
   for (let i=0;i<candles.length;i++) {
-    const c=candles[i]!;const currentDay=iso(c.timestamp).slice(0,10);
+    const c=candles[i]!;
+    const candleMs = Number(new Date(c.timestamp));
+    const inTradingWindow = candleMs >= tradeStartMs && candleMs <= tradeEndMs;
+    const currentDay=iso(c.timestamp).slice(0,10);
     if (currentDay!==day) {
       if (active && i>0) {const prev=candles[i-1]!;settle(prices(prev).close,new Date(Number(new Date(prev.timestamp))+interval).toISOString(),'SESSION_DATA_END',i-1);}
       day=currentDay;dailyPnl=0;count=0;signalWaveEntered=false;
@@ -100,7 +129,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
       else protect(c,i);
     }
     if (active || lastExitIndex===i) continue;
-    if (!hasSignal || !evaluated.isWarmedUp || time<(strategy.session?.start ?? '09:25') || time>(strategy.session?.lastEntry ?? '14:45') || time>=cutoff || count>=maxTrades || dailyPnl<=-maxDaily || i-lastExitIndex<=(ast.entryRules?.cooldownBars ?? 0) || (ast.entryRules?.allowReentry===false && signalWaveEntered)) continue;
+    if (!inTradingWindow || !hasSignal || !evaluated.isWarmedUp || time<(strategy.session?.start ?? '09:25') || time>(strategy.session?.lastEntry ?? '14:45') || time>=cutoff || count>=maxTrades || dailyPnl<=-maxDaily || i-lastExitIndex<=(ast.entryRules?.cooldownBars ?? 0) || (ast.entryRules?.allowReentry===false && signalWaveEntered)) continue;
     const type=bullish?'CE':'PE';
     if (strategy.allowedInstruments && !strategy.allowedInstruments.includes(type==='CE'?AllowedOptionType.LONG_CALL:AllowedOptionType.LONG_PUT)) continue;
     if (ast.contractSelection?.optionSide==='LONG_CE' && type!=='CE' || ast.contractSelection?.optionSide==='LONG_PE' && type!=='PE') continue;
@@ -130,6 +159,19 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   return {...empty,finalCapital:capital,totalTrades:trades.length,winningTrades:wins.length,losingTrades:losses.length,winRatePct:trades.length?money(wins.length/trades.length*100):0,grossPnl,totalCharges,netPnl:money(grossPnl-totalCharges),maxDrawdown:money(drawdown),maxDrawdownPct:money(drawdownPct),profitFactor:loss?money(gains/loss):0,trades};
 }
 
+const UPSTOX_INDEX_MAP: Record<string, string> = {
+  NIFTY: 'NSE_INDEX|Nifty 50',
+  BANKNIFTY: 'NSE_INDEX|Nifty Bank',
+  FINNIFTY: 'NSE_INDEX|Nifty Fin Service',
+  MIDCPNIFTY: 'NSE_INDEX|NIFTY MID SELECT',
+};
+
+const YAHOO_INDEX_MAP: Record<string, string> = {
+  NIFTY: '%5ENSEI',
+  BANKNIFTY: '%5ENSEBANK',
+  FINNIFTY: 'NIFTY_FIN_SERVICE.NS',
+};
+
 /**
  * Fetches historical underlying candles from named external providers; unavailable data fails closed.
  * Supports Yahoo Finance chart API for NIFTY (^NSEI) and BANKNIFTY (^NSEBANK),
@@ -148,8 +190,31 @@ export async function fetchRealHistoricalCandles(options: {
   const { underlying, days = 14, fromDate, toDate, authToken, preferUpstox } = options;
   const requestedTf = options.timeframe || options.interval || '5m';
   const upperUnderlying = underlying.toUpperCase();
-  const yahooSymbol = upperUnderlying === 'BANKNIFTY' ? '%5ENSEBANK' : '%5ENSEI';
-  const interval = ['1m', '5m', '15m', '30m', '1d'].includes(requestedTf) ? requestedTf : '5m';
+
+  if (!(upperUnderlying in UPSTOX_INDEX_MAP)) {
+    throw new Error(
+      `Unsupported underlying instrument: "${underlying}". Supported underlyings are NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY.`,
+    );
+  }
+
+  const allowedIntervals = ['1m', '5m', '15m', '30m', '1d'];
+  if (!allowedIntervals.includes(requestedTf)) {
+    throw new Error(
+      `Unsupported timeframe interval: "${requestedTf}". Supported intervals: 1m, 5m, 15m, 30m, 1d.`,
+    );
+  }
+  const interval = requestedTf;
+
+  const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+  if (fromDate && (!ISO_DATE_REGEX.test(fromDate) || isNaN(Date.parse(fromDate)))) {
+    throw new Error(`Invalid fromDate format: "${fromDate}". Expected YYYY-MM-DD.`);
+  }
+  if (toDate && (!ISO_DATE_REGEX.test(toDate) || isNaN(Date.parse(toDate)))) {
+    throw new Error(`Invalid toDate format: "${toDate}". Expected YYYY-MM-DD.`);
+  }
+  if (fromDate && toDate && fromDate > toDate) {
+    throw new Error(`fromDate (${fromDate}) cannot be after toDate (${toDate}).`);
+  }
 
   const rawFrom = fromDate || toDate;
   const rawTo = toDate || fromDate;
@@ -169,100 +234,124 @@ export async function fetchRealHistoricalCandles(options: {
     startMs = endMs - days * 86400000;
   }
 
+  const formatIstDate = (ms: number): string => {
+    const ist = new Date(ms + 330 * 60000);
+    return ist.toISOString().slice(0, 10);
+  };
+
   // 1. Try Upstox Historical Candle API if token available or preferUpstox specified
   if (authToken || preferUpstox) {
     try {
-      const upstoxInstrumentKey = upperUnderlying === 'BANKNIFTY' ? 'NSE_INDEX|Nifty Bank' : 'NSE_INDEX|Nifty 50';
-      const toStr = new Date(endMs).toISOString().slice(0, 10);
-      const fromStr = new Date(startMs).toISOString().slice(0, 10);
+      const upstoxInstrumentKey = UPSTOX_INDEX_MAP[upperUnderlying]!;
       const upstoxInterval = interval === '1d' ? 'days/1' : `minutes/${strategyTimeframeMinutes(interval)}`;
       const headers: Record<string, string> = { Accept: 'application/json' };
       if (authToken && authToken !== 'public_market_data') {
         headers.Authorization = `Bearer ${authToken}`;
       }
-      const res = await fetch(
-        `https://api.upstox.com/v3/historical-candle/${encodeURIComponent(upstoxInstrumentKey)}/${upstoxInterval}/${toStr}/${fromStr}`,
-        { headers },
-      );
-      if (res.ok) {
-        const json = (await res.json()) as any;
-        const candlesRaw = json?.data?.candles;
-        if (Array.isArray(candlesRaw) && candlesRaw.length > 5) {
-          const parsedCandles: Candle[] = candlesRaw
-            .map((c: any[]) => ({
-              timestamp: c[0],
-              open: Number(c[1]),
-              high: Number(c[2]),
-              low: Number(c[3]),
-              close: Number(c[4]),
-              volume: Number(c[5] ?? 0),
-            }))
-            .filter((c) => {
-              const tMs = new Date(c.timestamp).getTime();
-              return tMs >= startMs && tMs <= endMs;
-            })
-            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-          if (parsedCandles.length >= 10) {
-            return { candles: parsedCandles, dataSource: 'UPSTOX_HISTORICAL_UNDERLYING' };
+      // Chunk requests in 30-day windows to respect Upstox V3 window limits (B09)
+      const chunkMs = 30 * 86400000;
+      const chunks: Array<{ start: number; end: number }> = [];
+      let cStart = startMs;
+      while (cStart < endMs) {
+        const cEnd = Math.min(cStart + chunkMs, endMs);
+        chunks.push({ start: cStart, end: cEnd });
+        cStart = cEnd + 1;
+      }
+
+      const candleMap = new Map<string, Candle>();
+      for (const chunk of chunks) {
+        const toStr = formatIstDate(chunk.end);
+        const fromStr = formatIstDate(chunk.start);
+        const res = await fetch(
+          `https://api.upstox.com/v3/historical-candle/${encodeURIComponent(upstoxInstrumentKey)}/${upstoxInterval}/${toStr}/${fromStr}`,
+          { headers, signal: AbortSignal.timeout(10000) },
+        );
+        if (res.ok) {
+          const json = (await res.json()) as any;
+          const candlesRaw = json?.data?.candles;
+          if (Array.isArray(candlesRaw)) {
+            for (const c of candlesRaw) {
+              const tMs = new Date(c[0]).getTime();
+              if (tMs >= startMs && tMs <= endMs) {
+                candleMap.set(c[0], {
+                  timestamp: c[0],
+                  open: Number(c[1]),
+                  high: Number(c[2]),
+                  low: Number(c[3]),
+                  close: Number(c[4]),
+                  volume: Number(c[5] ?? 0),
+                });
+              }
+            }
           }
         }
+      }
+
+      if (candleMap.size >= 10) {
+        const parsedCandles = Array.from(candleMap.values()).sort(
+          (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+        );
+        return { candles: parsedCandles, dataSource: 'UPSTOX_HISTORICAL_UNDERLYING' };
       }
     } catch {
       // Fall through to Yahoo
     }
   }
 
-  // 2. Fetch from Yahoo Finance Chart Feed (Real NSE Exchange Data)
-  try {
-    let url = '';
-    if (isCustom) {
-      const period1 = Math.floor(startMs / 1000);
-      const period2 = Math.floor(endMs / 1000);
-      url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&period1=${period1}&period2=${period2}`;
-    } else {
-      const range = days <= 7 ? '7d' : days <= 14 ? '14d' : days <= 30 ? '1mo' : '60d';
-      url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&range=${range}`;
-    }
+  // 2. Fetch from Yahoo Finance Chart Feed (Real NSE Exchange Data) if supported for underlying
+  const yahooSymbol = YAHOO_INDEX_MAP[upperUnderlying];
+  if (yahooSymbol) {
+    try {
+      let url = '';
+      if (isCustom) {
+        const period1 = Math.floor(startMs / 1000);
+        const period2 = Math.floor(endMs / 1000);
+        url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&period1=${period1}&period2=${period2}`;
+      } else {
+        const range = days <= 7 ? '7d' : days <= 14 ? '14d' : days <= 30 ? '1mo' : '60d';
+        url = `https://query1.finance.yahoo.com/v8/finance/chart/${yahooSymbol}?interval=${interval}&range=${range}`;
+      }
 
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (res.ok) {
-      const data = (await res.json()) as any;
-      const result = data?.chart?.result?.[0];
-      const timestamps: number[] = result?.timestamp || [];
-      const quote = result?.indicators?.quote?.[0];
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(10000) });
+      if (res.ok) {
+        const data = (await res.json()) as any;
+        const result = data?.chart?.result?.[0];
+        const timestamps: number[] = result?.timestamp || [];
+        const quote = result?.indicators?.quote?.[0];
 
-      if (timestamps.length > 5 && quote?.open && quote?.close) {
-        const candles: Candle[] = [];
-        for (let i = 0; i < timestamps.length; i++) {
-          const tMs = timestamps[i]! * 1000;
-          // Filter strictly within the requested time bounds
-          if (tMs < startMs || tMs > endMs) {
-            continue;
+        if (timestamps.length > 5 && quote?.open && quote?.close) {
+          const candles: Candle[] = [];
+          for (let i = 0; i < timestamps.length; i++) {
+            const tMs = timestamps[i]! * 1000;
+            // Filter strictly within the requested time bounds
+            if (tMs < startMs || tMs > endMs) {
+              continue;
+            }
+            const o = quote.open[i];
+            const h = quote.high[i];
+            const l = quote.low[i];
+            const c = quote.close[i];
+            const v = quote.volume[i] ?? 0;
+            if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
+              candles.push({
+                timestamp: new Date(tMs).toISOString(),
+                open: Number(Number(o).toFixed(2)),
+                high: Number(Number(h).toFixed(2)),
+                low: Number(Number(l).toFixed(2)),
+                close: Number(Number(c).toFixed(2)),
+                volume: Number(v),
+              });
+            }
           }
-          const o = quote.open[i];
-          const h = quote.high[i];
-          const l = quote.low[i];
-          const c = quote.close[i];
-          const v = quote.volume[i] ?? 0;
-          if (o !== null && h !== null && l !== null && c !== null && !isNaN(o) && !isNaN(c)) {
-            candles.push({
-              timestamp: new Date(tMs).toISOString(),
-              open: Number(Number(o).toFixed(2)),
-              high: Number(Number(h).toFixed(2)),
-              low: Number(Number(l).toFixed(2)),
-              close: Number(Number(c).toFixed(2)),
-              volume: Number(v),
-            });
+          if (candles.length >= 10) {
+            return { candles, dataSource: 'YAHOO_UNDERLYING_CANDLES' };
           }
-        }
-        if (candles.length >= 10) {
-          return { candles, dataSource: 'YAHOO_UNDERLYING_CANDLES' };
         }
       }
+    } catch {
+      // Network offline fallback
     }
-  } catch {
-    // Network offline fallback
   }
 
   throw new Error('Historical underlying data is unavailable from the configured providers. No synthetic data was substituted.');
