@@ -23,6 +23,9 @@ async function bootstrap() {
   await app.listen(port, envService.config.API_HOST);
   console.log(`[Trading Platform API] listening on http://localhost:${port}/api/v1`);
   console.log(`[Trading Platform WebSocket] listening on ws://localhost:${port}/ws`);
+
+
+
   console.log(`[Safety Invariant] Operating Mode: ${app.get(TradingModeService).getMode()}`);
 }
 
