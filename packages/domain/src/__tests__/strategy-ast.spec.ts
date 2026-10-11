@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  AllowedOptionType,
   ComparisonOperator,
   IndicatorType,
   LogicalOperator,
@@ -36,8 +37,8 @@ function makeMockCandles(count: number, basePrice = 24000, trend = 5): Candle[] 
 }
 
 describe('Strategy Lab: AST Evaluator & Templates', () => {
-  it('defines 6 research templates with valid AST configs', () => {
-    expect(PREDEFINED_STRATEGY_TEMPLATES).toHaveLength(6);
+  it('defines 7 research templates with valid AST configs', () => {
+    expect(PREDEFINED_STRATEGY_TEMPLATES).toHaveLength(7);
 
     const ids = PREDEFINED_STRATEGY_TEMPLATES.map((t) => t.id);
     expect(ids).toContain('tpl_trend_following');
@@ -46,6 +47,7 @@ describe('Strategy Lab: AST Evaluator & Templates', () => {
     expect(ids).toContain('tpl_vwap_momentum');
     expect(ids).toContain('tpl_opening_range_breakout');
     expect(ids).toContain('tpl_bollinger_breakout');
+    expect(ids).toContain('tpl_bear_panic_detector');
 
     for (const tpl of PREDEFINED_STRATEGY_TEMPLATES) {
       expect(tpl.name).toBeTruthy();
@@ -209,5 +211,30 @@ describe('Strategy Lab: AST Evaluator & Templates', () => {
     expect(result.finalCapital).toBeGreaterThan(0);
     expect(result.totalCharges).toBeGreaterThanOrEqual(0);
     expect(result.winRatePct).toBeGreaterThanOrEqual(0);
+  });
+
+  it('evaluates Bear Panic Detector (S7) AST structure and directional constraints', () => {
+    const tpl = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === 'tpl_bear_panic_detector')!;
+    expect(tpl).toBeDefined();
+    expect(tpl.astConfig.direction).toBe(TradeDirection.BEARISH);
+    expect(tpl.astConfig.indicators).toHaveLength(6);
+    expect(tpl.astConfig.contractSelection.optionSide).toBe('LONG_PE');
+    expect(tpl.defaultConfig.allowedInstruments).toEqual([AllowedOptionType.LONG_PUT]);
+    expect(tpl.astConfig.exitRules.targetProfitValue).toBe(30);
+    expect(tpl.astConfig.exitRules.stopLossValue).toBe(10);
+    expect(tpl.defaultConfig.maxCapitalInr).toBe(10000);
+    expect(tpl.defaultConfig.targetNetProfitInr).toBe(1200);
+
+    const candles = makeMockCandles(60, 24000, -10);
+    const cache = buildIndicatorCache(candles, tpl.astConfig);
+    expect(cache.indicatorSeries.has('ema_fast_panic')).toBe(true);
+    expect(cache.indicatorSeries.has('ema_slow_panic')).toBe(true);
+    expect(cache.indicatorSeries.has('vwap_panic')).toBe(true);
+    expect(cache.indicatorSeries.has('rsi_panic')).toBe(true);
+    expect(cache.indicatorSeries.has('atr_panic')).toBe(true);
+    expect(cache.indicatorSeries.has('vol_avg_panic')).toBe(true);
+
+    const res = evaluateStrategyAst(tpl.astConfig, 55, candles, cache);
+    expect(res.bullishSignal).toBe(false);
   });
 });
