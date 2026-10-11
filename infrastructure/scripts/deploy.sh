@@ -58,9 +58,13 @@ echo "⬇️ Pulling latest changes from Git..."
 git fetch origin main
 git reset --hard origin/main
 
-# 4. Build and start containers
+# 4. Clean up stale runtime lock & start containers
+echo "🧹 Removing any stale runtime lease lock from previous container..."
+${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop api 2>/dev/null || true
+${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm --no-deps --entrypoint rm api -f /app/.data/account-runtime.lock 2>/dev/null || true
+
 echo "🐳 Building and starting Docker containers..."
-${DOCKER_CMD} compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
+${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --build --remove-orphans
 
 # 5. Health Check: Verify API is answering
 echo "🩺 Performing health verification..."
@@ -72,7 +76,7 @@ for i in $(seq 1 ${MAX_ATTEMPTS}); do
   echo "   [Attempt $i/${MAX_ATTEMPTS}] Checking API responsiveness..."
   
   # Check if the container is running and responding on internal port 3000
-  if ${DOCKER_CMD} compose -f "${COMPOSE_FILE}" exec -T api node -e "
+  if ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T api node -e "
     const http = require('http');
     const req = http.get('http://127.0.0.1:3000/api/v1/strategies', (res) => {
       process.exit(res.statusCode === 200 || res.statusCode === 404 ? 0 : 1);
@@ -90,7 +94,7 @@ done
 if [ "${API_HEALTHY}" != "true" ]; then
   echo "❌ API failed health check after $((${MAX_ATTEMPTS} * ${SLEEP_INTERVAL})) seconds."
   echo "📋 Showing recent API container logs:"
-  ${DOCKER_CMD} compose -f "${COMPOSE_FILE}" logs --tail=50 api
+  ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" logs --tail=50 api
   exit 1
 fi
 
@@ -101,5 +105,5 @@ ${DOCKER_CMD} image prune -f >/dev/null 2>&1 || true
 echo "========================================================"
 echo "🎉 Deployment successfully completed!"
 echo "🐳 Active Containers:"
-${DOCKER_CMD} compose -f "${COMPOSE_FILE}" ps
+${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
 echo "========================================================"

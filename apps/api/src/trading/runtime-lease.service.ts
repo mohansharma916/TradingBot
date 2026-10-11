@@ -13,7 +13,32 @@ export class RuntimeLeaseService implements OnModuleInit, OnModuleDestroy {
     if (process.env.VITEST || this.descriptor !== null) return;
     fs.mkdirSync(path.dirname(this.filename), { recursive: true, mode: 0o700 });
     try { this.descriptor = fs.openSync(this.filename, 'wx', 0o600); }
-    catch { throw new Error('Account runtime is locked. Stop the other API process; after an unclean crash, verify no runtime is running before removing account-runtime.lock.'); }
+    catch {
+      if (fs.existsSync(this.filename)) {
+        try {
+          const raw = fs.readFileSync(this.filename, 'utf-8');
+          const data = JSON.parse(raw);
+          if (data && typeof data.pid === 'number') {
+            let isAlive = false;
+            try {
+              process.kill(data.pid, 0);
+              isAlive = true;
+            } catch (err: any) {
+              isAlive = err.code !== 'ESRCH';
+            }
+            if (!isAlive) {
+              fs.unlinkSync(this.filename);
+              this.descriptor = fs.openSync(this.filename, 'wx', 0o600);
+            }
+          }
+        } catch {
+          // Fall through to locked error
+        }
+      }
+      if (this.descriptor === null) {
+        throw new Error('Account runtime is locked. Stop the other API process; after an unclean crash, verify no runtime is running before removing account-runtime.lock.');
+      }
+    }
     fs.writeFileSync(this.descriptor, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
     fs.fsyncSync(this.descriptor);
   }
