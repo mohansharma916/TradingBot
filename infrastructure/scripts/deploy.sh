@@ -19,9 +19,13 @@ echo "========================================================"
 
 cd "${PROJECT_DIR}"
 
+CURRENT_USER="$(id -un 2>/dev/null || whoami)"
+CURRENT_GROUP="$(id -gn 2>/dev/null || echo "$CURRENT_USER")"
+
 # 1. Fix ownership and Git safe.directory to avoid permission issues
-if [ -n "${USER:-}" ] && command -v sudo >/dev/null 2>&1; then
-  sudo chown -R "$USER:$USER" "${PROJECT_DIR}" 2>/dev/null || true
+if command -v sudo >/dev/null 2>&1; then
+  sudo chown -R "${CURRENT_USER}:${CURRENT_GROUP}" "${PROJECT_DIR}" 2>/dev/null || true
+  sudo chmod -R u+rwX "${PROJECT_DIR}" 2>/dev/null || true
 fi
 git config --global --add safe.directory "${PROJECT_DIR}" 2>/dev/null || true
 git config --global --add safe.directory "*" 2>/dev/null || true

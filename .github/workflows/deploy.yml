@@ -102,12 +102,15 @@ jobs:
               TARGET_DIR="/opt/fo-trading"
             fi
 
-            # Automatically fix directory ownership to current SSH user if sudo is available
+            CURRENT_USER="$(id -un)"
+            CURRENT_GROUP="$(id -gn)"
+
+            # Automatically fix directory ownership to current SSH user
             if [ -d "$TARGET_DIR" ]; then
-              sudo chown -R $USER:$USER "$TARGET_DIR" 2>/dev/null || true
+              sudo chown -R "$CURRENT_USER:$CURRENT_GROUP" "$TARGET_DIR" 2>/dev/null || true
             else
               sudo mkdir -p "$TARGET_DIR" 2>/dev/null || mkdir -p "$TARGET_DIR"
-              sudo chown -R $USER:$USER "$TARGET_DIR" 2>/dev/null || true
+              sudo chown -R "$CURRENT_USER:$CURRENT_GROUP" "$TARGET_DIR" 2>/dev/null || true
             fi
 
             # Prevent Git dubious ownership errors in CI/CD
