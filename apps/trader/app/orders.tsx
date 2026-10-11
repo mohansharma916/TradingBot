@@ -10,6 +10,7 @@ import {
 } from '@trading-bot/contracts';
 import { useWorkstation } from '../src/hooks/useWorkstation';
 import { apiClient } from '../src/services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 import LiveChecklistReview from '../src/features/health/LiveChecklistReview';
 
 type TabType = 'POSITIONS' | 'ORDERS' | 'JOURNAL' | 'CHECKLIST';
@@ -49,7 +50,7 @@ export default function OrdersScreen() {
       const link = document.createElement('a'); link.href = url;
       link.download = 'daily_trading_report.csv'; link.click(); URL.revokeObjectURL(url);
       showNotification('Confirmed trade report downloaded.');
-    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Report export failed.'); }
+    } catch (failure) { setActiveAlert(formatErrorMessage(failure) || 'Report export failed.'); }
   };
 
   const handleClosePosition = async (instrumentKey: string) => {
@@ -61,7 +62,7 @@ export default function OrdersScreen() {
       const [positionList, orderList, fillList] = await Promise.all([apiClient.getPositions(), apiClient.getOrders(), apiClient.getOrderFills()]);
       setPositions(positionList); setOrders(orderList); setFills(fillList);
       showNotification(result.message);
-    } catch (failure) { setActiveAlert(failure instanceof Error ? failure.message : 'Close request was not confirmed.'); }
+    } catch (failure) { setActiveAlert(formatErrorMessage(failure) || 'Close request was not confirmed.'); }
     finally { setPendingAction(false); }
   };
 
@@ -88,7 +89,7 @@ export default function OrdersScreen() {
           }
         }
       } catch (failure) {
-        if (isMounted) { setIsLiveConnected(false); setActiveAlert(failure instanceof Error ? failure.message : 'Account data unavailable.'); }
+        if (isMounted) { setIsLiveConnected(false); setActiveAlert(formatErrorMessage(failure) || 'Account data unavailable.'); }
       }
     };
     syncOrdersData();

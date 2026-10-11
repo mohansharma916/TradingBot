@@ -158,4 +158,108 @@ describe('Historical Backtest Engine', () => {
       expect(c.timestamp.startsWith('2026-10-05')).toBe(true);
     }
   });
+
+  describe('Phase 2 Regressions: Historical Data, Multi-Year Calendar & Warmup', () => {
+    it('B07: allows simulation on verified historical year 2025', () => {
+      // 2025-10-06 is a Monday (regular trading day in 2025)
+      const candles = generateHistoricalMarketCandles('NIFTY', 5, 5, '2025-10-06', '2025-10-06');
+      expect(candles.length).toBe(75);
+      const result = runStrategyBacktest({
+        strategy: sampleStrategy,
+        candles,
+        request: { fromDate: '2025-10-06', toDate: '2025-10-06', days: 1, initialCapital: 15000 },
+      });
+      expect(result.error).toBeUndefined();
+    });
+
+    it('B07: explicitly rejects unverified calendar year with UNSUPPORTED_CALENDAR_YEAR', () => {
+      const candles = [
+        { timestamp: '2027-01-04T04:00:00.000Z', open: 22000, high: 22050, low: 21950, close: 22010, volume: 1000 },
+        { timestamp: '2027-01-04T04:05:00.000Z', open: 22010, high: 22060, low: 21960, close: 22020, volume: 1000 },
+        { timestamp: '2027-01-04T04:10:00.000Z', open: 22020, high: 22070, low: 21970, close: 22030, volume: 1000 },
+      ];
+      const result = runStrategyBacktest({
+        strategy: sampleStrategy,
+        candles,
+        request: { initialCapital: 10000 },
+      });
+      expect(result.error).toContain('UNSUPPORTED_CALENDAR_YEAR');
+    });
+
+    it('B11: decouples data loading window from trading window and validates warmup', () => {
+      // Strategy with EMA 20 and RSI 14 requires 20 warmup bars
+      const warmupBars = Array.from({ length: 25 }, (_, i) => ({
+        timestamp: new Date(Date.parse('2026-10-05T03:45:00.000Z') + i * 300000).toISOString(),
+        open: 20000 + i * 10,
+        high: 20005 + i * 10,
+        low: 19995 + i * 10,
+        close: 20002 + i * 10,
+        volume: 2000,
+      }));
+      const tradingBars = Array.from({ length: 20 }, (_, i) => ({
+        timestamp: new Date(Date.parse('2026-10-06T03:45:00.000Z') + i * 300000).toISOString(),
+        open: 20300 + i * 10,
+        high: 20305 + i * 10,
+        low: 20295 + i * 10,
+        close: 20302 + i * 10,
+        volume: 2000,
+      }));
+
+      // Combined candles: 25 warmup bars + 20 trading bars
+      const result = runStrategyBacktest({
+        strategy: sampleStrategy,
+        candles: [...warmupBars, ...tradingBars],
+        request: { fromDate: '2026-10-06', toDate: '2026-10-06' },
+      });
+
+      expect(result.error).toBeUndefined();
+      // Trades must not be entered during warmup bars on 2026-10-05
+      for (const t of result.trades) {
+        expect(t.entryTime.startsWith('2026-10-06')).toBe(true);
+      }
+    });
+
+    it('B11: returns INSUFFICIENT_WARMUP diagnostic when bars are fewer than required warmup', () => {
+      // Only 5 bars, but strategy requires at least 20 warmup bars
+      const fiveBars = Array.from({ length: 5 }, (_, i) => ({
+        timestamp: new Date(Date.parse('2026-10-06T03:45:00.000Z') + i * 300000).toISOString(),
+        open: 20000 + i * 10,
+        high: 20005 + i * 10,
+        low: 19995 + i * 10,
+        close: 20002 + i * 10,
+        volume: 2000,
+      }));
+
+      const result = runStrategyBacktest({
+        strategy: sampleStrategy,
+        candles: fiveBars,
+      });
+
+      expect(result.error).toContain('INSUFFICIENT_WARMUP');
+    });
+
+    it('B10 & B25: rejects unsupported underlyings, invalid date formats, and unsupported intervals in fetcher', async () => {
+      const { fetchRealHistoricalCandles } = await import('../backtest-engine');
+
+      // Unsupported underlying
+      await expect(
+        fetchRealHistoricalCandles({ underlying: 'UNSUPPORTED_INDEX', days: 7 }),
+      ).rejects.toThrow('Unsupported underlying instrument');
+
+      // Invalid date format
+      await expect(
+        fetchRealHistoricalCandles({ underlying: 'NIFTY', fromDate: '2026-10-05junk' }),
+      ).rejects.toThrow('Invalid fromDate format');
+
+      // fromDate after toDate
+      await expect(
+        fetchRealHistoricalCandles({ underlying: 'NIFTY', fromDate: '2026-10-10', toDate: '2026-10-05' }),
+      ).rejects.toThrow('fromDate (2026-10-10) cannot be after toDate (2026-10-05)');
+
+      // Unsupported interval
+      await expect(
+        fetchRealHistoricalCandles({ underlying: 'NIFTY', timeframe: '3m' }),
+      ).rejects.toThrow('Unsupported timeframe interval');
+    });
+  });
 });

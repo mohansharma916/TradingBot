@@ -86,7 +86,7 @@ export function buildIndicatorCache(
         const hasVolume = candles.some((c) => (c.volume ?? 0) > 0);
         const series = hasVolume
           ? calculateVWAP(candles)
-          : calculateVWAP(candles.map((c) => ({ ...c, volume: 1 })));
+          : new Array(candles.length).fill(NaN);
         cache.indicatorSeries.set(id, series);
         break;
       }
@@ -316,45 +316,33 @@ export function evaluateConditionRule(
   barIndex: number,
   candles: Candle[],
   cache: EvaluatorCache,
-): boolean {
+): boolean | null {
   if (rule.enabled === false) return true; // Disabled condition is considered pass
-
-  // On index spot feeds (NIFTY/BANKNIFTY), the exchange does not report traded volume.
-  // When backtesting on index spot data where volume is absent/0 across all bars,
-  // volume-dependent filters are treated as neutral/passing so they don't block 100% of signals.
-  const isVolumeCondition =
-    (rule.left?.type === 'CANDLE_FIELD' && rule.left?.field === 'volume') ||
-    (rule.right?.type === 'CANDLE_FIELD' && rule.right?.field === 'volume') ||
-    (rule.left?.type === 'INDICATOR' && rule.left?.indicatorId?.includes('vol')) ||
-    (rule.right?.type === 'INDICATOR' && rule.right?.indicatorId?.includes('vol'));
-
-  const datasetHasNoVolume = candles.length > 0 && candles.every((c) => (c.volume ?? 0) === 0 || (c.volume ?? 0) === 1);
-  if (isVolumeCondition && datasetHasNoVolume) {
-    return true;
-  }
 
   // Get current bar values
   const leftCurr = resolveOperandValue(rule.left, barIndex, candles, cache);
-  if (leftCurr === null) return false;
+  if (leftCurr === null) return null;
 
   const comp = rule.comparison;
 
   // Single-operand operators
   if (comp === ComparisonOperator.INCREASING) {
     const leftPrev = resolveOperandValue(rule.left, barIndex - 1, candles, cache);
-    return leftPrev !== null && leftCurr > leftPrev;
+    if (leftPrev === null) return null;
+    return leftCurr > leftPrev;
   }
 
   if (comp === ComparisonOperator.DECREASING) {
     const leftPrev = resolveOperandValue(rule.left, barIndex - 1, candles, cache);
-    return leftPrev !== null && leftCurr < leftPrev;
+    if (leftPrev === null) return null;
+    return leftCurr < leftPrev;
   }
 
   if (comp === ComparisonOperator.BETWEEN) {
     if (rule.right?.min !== undefined && rule.right?.max !== undefined) {
       return leftCurr >= rule.right.min && leftCurr <= rule.right.max;
     }
-    return false;
+    return null;
   }
 
   // Crosses Above / Below require barIndex and barIndex - 1
@@ -363,7 +351,7 @@ export function evaluateConditionRule(
     const leftPrev = resolveOperandValue(rule.left, barIndex - 1, candles, cache);
     const rightPrev = resolveOperandValue(rule.right, barIndex - 1, candles, cache);
 
-    if (rightCurr === null || leftPrev === null || rightPrev === null) return false;
+    if (rightCurr === null || leftPrev === null || rightPrev === null) return null;
     return leftPrev <= rightPrev && leftCurr > rightCurr;
   }
 
@@ -372,29 +360,29 @@ export function evaluateConditionRule(
     const leftPrev = resolveOperandValue(rule.left, barIndex - 1, candles, cache);
     const rightPrev = resolveOperandValue(rule.right, barIndex - 1, candles, cache);
 
-    if (rightCurr === null || leftPrev === null || rightPrev === null) return false;
+    if (rightCurr === null || leftPrev === null || rightPrev === null) return null;
     return leftPrev >= rightPrev && leftCurr < rightCurr;
   }
 
   if (comp === ComparisonOperator.PCT_CHANGE_ABOVE) {
-    const rightVal = resolveOperandValue(rule.right, barIndex, candles, cache) ?? 0;
+    const rightVal = resolveOperandValue(rule.right, barIndex, candles, cache);
     const leftPrev = resolveOperandValue(rule.left, barIndex - 1, candles, cache);
-    if (leftPrev === null || leftPrev === 0) return false;
+    if (rightVal === null || leftPrev === null || leftPrev === 0) return null;
     const pctChange = ((leftCurr - leftPrev) / leftPrev) * 100;
     return pctChange > rightVal;
   }
 
   if (comp === ComparisonOperator.PCT_CHANGE_BELOW) {
-    const rightVal = resolveOperandValue(rule.right, barIndex, candles, cache) ?? 0;
+    const rightVal = resolveOperandValue(rule.right, barIndex, candles, cache);
     const leftPrev = resolveOperandValue(rule.left, barIndex - 1, candles, cache);
-    if (leftPrev === null || leftPrev === 0) return false;
+    if (rightVal === null || leftPrev === null || leftPrev === 0) return null;
     const pctChange = ((leftCurr - leftPrev) / leftPrev) * 100;
     return pctChange < rightVal;
   }
 
   // Standard binary operators
   const rightCurr = resolveOperandValue(rule.right, barIndex, candles, cache);
-  if (rightCurr === null) return false;
+  if (rightCurr === null) return null;
 
   const tolerance = rule.tolerance ?? 1e-4;
 
@@ -412,7 +400,7 @@ export function evaluateConditionRule(
     case ComparisonOperator.NEQ:
       return Math.abs(leftCurr - rightCurr) > tolerance;
     default:
-      return false;
+      return null;
   }
 }
 
@@ -424,32 +412,36 @@ export function evaluateRuleGroup(
   barIndex: number,
   candles: Candle[],
   cache: EvaluatorCache,
-): boolean {
-  if (!group || group.enabled === false) return false;
-  if (!group.conditions || group.conditions.length === 0) return false;
+): boolean | null {
+  if (!group || group.enabled === false) return null;
+  if (!group.conditions || group.conditions.length === 0) return null;
 
   const op = group.operator || LogicalOperator.AND;
   const activeConditions = group.conditions.filter((c: any) => c.enabled !== false);
-  if (activeConditions.length === 0) return false;
+  if (activeConditions.length === 0) return null;
 
   if (op === LogicalOperator.AND) {
+    let hasNull = false;
     for (const item of activeConditions) {
       const passes = isRuleGroup(item)
         ? evaluateRuleGroup(item, barIndex, candles, cache)
         : evaluateConditionRule(item, barIndex, candles, cache);
-      if (!passes) return false;
+      if (passes === false) return false;
+      if (passes === null) hasNull = true;
     }
-    return true;
+    return hasNull ? null : true;
   }
 
   if (op === LogicalOperator.OR) {
+    let hasNull = false;
     for (const item of activeConditions) {
       const passes = isRuleGroup(item)
         ? evaluateRuleGroup(item, barIndex, candles, cache)
         : evaluateConditionRule(item, barIndex, candles, cache);
-      if (passes) return true;
+      if (passes === true) return true;
+      if (passes === null) hasNull = true;
     }
-    return false;
+    return hasNull ? null : false;
   }
 
   if (op === LogicalOperator.NOT) {
@@ -457,7 +449,8 @@ export function evaluateRuleGroup(
       const passes = isRuleGroup(item)
         ? evaluateRuleGroup(item, barIndex, candles, cache)
         : evaluateConditionRule(item, barIndex, candles, cache);
-      if (passes) return false;
+      if (passes === null) return null; // Missing/unavailable data does not invert to true!
+      if (passes === true) return false;
     }
     return true;
   }
@@ -499,21 +492,23 @@ export function evaluateStrategyAst(
 
   if (direction === TradeDirection.BULLISH || direction === TradeDirection.BOTH) {
     if (astConfig.bullishEntry) {
-      bullish = evaluateRuleGroup(astConfig.bullishEntry, barIndex, candles, cache);
+      bullish = evaluateRuleGroup(astConfig.bullishEntry, barIndex, candles, cache) === true;
     }
   }
 
   if (direction === TradeDirection.BEARISH || direction === TradeDirection.BOTH) {
     if (astConfig.bearishEntry) {
-      bearish = evaluateRuleGroup(astConfig.bearishEntry, barIndex, candles, cache);
+      bearish = evaluateRuleGroup(astConfig.bearishEntry, barIndex, candles, cache) === true;
     }
   }
 
   const confirming = astConfig.entryRules?.confirmingCandles ?? 1;
   if (confirming > 1) {
     for (let offset = 1; offset < confirming; offset++) {
-      bullish = bullish && barIndex - offset >= cache.warmupRequired && evaluateRuleGroup(astConfig.bullishEntry, barIndex - offset, candles, cache);
-      bearish = bearish && barIndex - offset >= cache.warmupRequired && evaluateRuleGroup(astConfig.bearishEntry, barIndex - offset, candles, cache);
+      const prevBullish = barIndex - offset >= cache.warmupRequired && evaluateRuleGroup(astConfig.bullishEntry, barIndex - offset, candles, cache) === true;
+      const prevBearish = barIndex - offset >= cache.warmupRequired && evaluateRuleGroup(astConfig.bearishEntry, barIndex - offset, candles, cache) === true;
+      bullish = bullish && prevBullish;
+      bearish = bearish && prevBearish;
     }
   }
 

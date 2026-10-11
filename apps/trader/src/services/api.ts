@@ -1,4 +1,5 @@
-import { TradingPlatformClient } from '@trading-bot/client-sdk';
+import { TradingPlatformClient, formatErrorMessage } from '@trading-bot/client-sdk';
+export { formatErrorMessage };
 import { resolveApiBaseUrl } from './api-url';
 
 /**

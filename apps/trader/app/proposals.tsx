@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
 import { AgentTask, ProposalStatus, TradeProposal } from '@trading-bot/contracts';
 import { apiClient } from '../src/services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 import { useWorkstation } from '../src/hooks/useWorkstation';
 
 export default function ProposalsScreen() {
@@ -34,7 +35,7 @@ export default function ProposalsScreen() {
             setTasks(taskList);
           }
         }
-      } catch (failure) { if (isMounted) { setIsLiveConnected(false); setStatusMessage(failure instanceof Error ? failure.message : 'Proposals unavailable.'); } }
+      } catch (failure) { if (isMounted) { setIsLiveConnected(false); setStatusMessage(formatErrorMessage(failure) || 'Proposals unavailable.'); } }
     };
     loadData();
     const interval = setInterval(loadData, 5000);
@@ -62,7 +63,7 @@ export default function ProposalsScreen() {
       if (!result.success) throw new Error('Proposal approval was not accepted.');
       setProposals(await apiClient.getPendingProposals());
       setStatusMessage(`Approval recorded. Intent ${result.intentId}; check the confirmed order ledger for execution and protection.`);
-    } catch (failure) { setStatusMessage(failure instanceof Error ? failure.message : 'Approval was not confirmed.'); }
+    } catch (failure) { setStatusMessage(formatErrorMessage(failure) || 'Approval was not confirmed.'); }
     finally { setPendingProposal(null); }
   };
   const handleReject = async (proposalId: string) => {
@@ -71,7 +72,7 @@ export default function ProposalsScreen() {
       const result = await apiClient.rejectProposal(proposalId, 'Rejected by owner in workstation');
       if (!result.success) throw new Error('Rejection was not accepted.');
       setProposals(await apiClient.getPendingProposals()); setStatusMessage('Proposal rejection recorded.');
-    } catch (failure) { setStatusMessage(failure instanceof Error ? failure.message : 'Rejection was not confirmed.'); }
+    } catch (failure) { setStatusMessage(formatErrorMessage(failure) || 'Rejection was not confirmed.'); }
     finally { setPendingProposal(null); }
   };
 

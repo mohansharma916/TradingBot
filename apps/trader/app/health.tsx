@@ -11,6 +11,7 @@ import {
   RiskState,
 } from '@trading-bot/contracts';
 import { apiClient } from '../src/services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 import LiveChecklistReview from '../src/features/health/LiveChecklistReview';
 
 export default function HealthScreen() {
@@ -105,7 +106,7 @@ export default function HealthScreen() {
         throw new Error('The API did not supply an Upstox authorization URL.');
       }
     } catch (err: any) {
-      showToast(`OAuth connection error: ${err?.message || 'Check API connection'}`);
+      showToast(`OAuth connection error: ${formatErrorMessage(err) || 'Check API connection'}`);
     }
   };
 
@@ -131,7 +132,7 @@ export default function HealthScreen() {
           })
           .catch((err) => {
             if (isMounted) {
-              showToast(`OAuth exchange failed: ${err.message || 'Invalid or expired state'}`);
+              showToast(`OAuth exchange failed: ${formatErrorMessage(err) || 'Invalid or expired state'}`);
             }
           });
       }
@@ -154,7 +155,7 @@ export default function HealthScreen() {
           if (alertList) setAlerts(alertList);
           setIsLiveConnected(true);
         }
-      } catch (failure) { if (isMounted) { setIsLiveConnected(false); showToast(failure instanceof Error ? failure.message : 'Health data unavailable.'); } }
+      } catch (failure) { if (isMounted) { setIsLiveConnected(false); showToast(formatErrorMessage(failure) || 'Health data unavailable.'); } }
     };
     syncHealth();
     const interval = setInterval(syncHealth, 4000);
@@ -169,29 +170,29 @@ export default function HealthScreen() {
       const result = await apiClient.disconnectUpstox();
       if (!result.success) throw new Error(result.message);
       setSession(await apiClient.getUpstoxSession()); showToast(result.message);
-    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Disconnect was not confirmed.'); }
+    } catch (failure) { showToast(formatErrorMessage(failure) || 'Disconnect was not confirmed.'); }
   };
   const handleRunReconciliation = async () => {
     try { const result = await apiClient.triggerReconciliation(); setReconciliation(result); showToast(`Reconciliation returned ${result.discrepancies.length} discrepancies.`); }
-    catch (failure) { showToast(failure instanceof Error ? failure.message : 'Reconciliation was not confirmed.'); }
+    catch (failure) { showToast(formatErrorMessage(failure) || 'Reconciliation was not confirmed.'); }
   };
   const handleTriggerIncidentDrill = async () => {
     try {
       const alert = await apiClient.triggerDrillAlert({ title: 'Incident Recovery Drill Alert', message: 'Operator-requested notification delivery drill.' });
       setAlerts((items) => [alert, ...items]); showToast('Test alert recorded by the API.');
-    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Test alert delivery was not confirmed.'); }
+    } catch (failure) { showToast(formatErrorMessage(failure) || 'Test alert delivery was not confirmed.'); }
   };
   const handleAcknowledgeAlert = async (id: string) => {
     try {
       const result = await apiClient.acknowledgeAlert(id);
       setAlerts((items) => items.map((item) => item.id === id ? result : item)); showToast('Alert acknowledgement recorded.');
-    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Acknowledgement was not confirmed.'); }
+    } catch (failure) { showToast(formatErrorMessage(failure) || 'Acknowledgement was not confirmed.'); }
   };
   const toggleScheduler = async () => {
     try {
       const result = schedulerStatus.schedulerActive ? await apiClient.stopReconciliationSchedule() : await apiClient.startReconciliationSchedule(60);
       setSchedulerStatus(result); showToast(result.schedulerActive ? 'Reconciliation scheduler started.' : 'Reconciliation scheduler paused.');
-    } catch (failure) { showToast(failure instanceof Error ? failure.message : 'Scheduler change was not confirmed.'); }
+    } catch (failure) { showToast(formatErrorMessage(failure) || 'Scheduler change was not confirmed.'); }
   };
 
   const hoursRemaining = Math.floor(session.secondsRemaining / 3600);

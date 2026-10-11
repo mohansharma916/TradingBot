@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { GoLiveChecklist } from '@trading-bot/contracts';
 import { Badge, colors, spacing, borderRadius, typography } from '@trading-bot/ui';
 import { apiClient } from '../../services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 
-const failureMessage = (failure: unknown) => failure instanceof Error ? failure.message : 'Checklist confirmation is unavailable.';
+const failureMessage = (failure: unknown) => formatErrorMessage(failure) || 'Checklist confirmation is unavailable.';
 
 export default function LiveChecklistReview() {
   const [checklist, setChecklist] = useState<GoLiveChecklist | null>(null);

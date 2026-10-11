@@ -11,6 +11,7 @@ import {
 } from '@trading-bot/contracts';
 import { ALL_STRATEGY_TEMPLATES, StrategyTemplateItem } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 import {
   loadSavedDraft,
   saveDraftToStorage,
@@ -127,7 +128,7 @@ export default function StrategiesScreen() {
         }
       }
     } catch (err: any) {
-      setFeedback({ message: `Failed to load strategies: ${err.message}`, type: 'error' });
+      setFeedback({ message: `Failed to load strategies: ${formatErrorMessage(err)}`, type: 'error' });
     } finally {
       setIsLoading(false);
     }
@@ -226,7 +227,7 @@ export default function StrategiesScreen() {
         backtestRef.current.scrollIntoView({ behavior: 'smooth' });
       }
     } catch (err: any) {
-      const msg = err.message || 'Unknown network or API error';
+      const msg = formatErrorMessage(err) || 'Unknown network or API error';
       setBacktestInlineError(`Backtest execution error: ${msg}`);
       showFeedback(`Backtest failed: ${msg}`, 'error');
     } finally {
@@ -263,7 +264,7 @@ export default function StrategiesScreen() {
       setSelectedStrategyId(dup.id);
       showFeedback(`Strategy duplicated as "${dup.name}"!`, 'success');
     } catch (err: any) {
-      showFeedback(`Failed to duplicate strategy: ${err.message}`, 'error');
+      showFeedback(`Failed to duplicate strategy: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
@@ -279,7 +280,7 @@ export default function StrategiesScreen() {
         'info'
       );
     } catch (err: any) {
-      showFeedback(`Failed to archive strategy: ${err.message}`, 'error');
+      showFeedback(`Failed to archive strategy: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
@@ -296,7 +297,7 @@ export default function StrategiesScreen() {
         'success'
       );
     } catch (err: any) {
-      showFeedback(`Failed to save template strategy: ${err.message}`, 'error');
+      showFeedback(`Failed to save template strategy: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
@@ -319,7 +320,7 @@ export default function StrategiesScreen() {
       setIsNoCodeModalOpen(false);
       setEditingStrategy(null);
     } catch (err: any) {
-      showFeedback(`Failed to save strategy: ${err.message}`, 'error');
+      showFeedback(`Failed to save strategy: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
@@ -332,7 +333,7 @@ export default function StrategiesScreen() {
       showFeedback(`Template "${template.name}" cloned into My Strategies!`, 'success');
       setCurrentTab('MY_STRATEGIES');
     } catch (err: any) {
-      showFeedback(`Failed to clone template: ${err.message}`, 'error');
+      showFeedback(`Failed to clone template: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
@@ -371,7 +372,7 @@ export default function StrategiesScreen() {
       setIsEditModalOpen(false);
       showFeedback(`Updated strategy "${updated.name}" to Revision v${updated.version}!`, 'success');
     } catch (err: any) {
-      showFeedback(`Failed to update strategy: ${err.message}`, 'error');
+      showFeedback(`Failed to update strategy: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
@@ -455,7 +456,7 @@ export default function StrategiesScreen() {
       });
       showFeedback(`Strategy "${created.name}" created successfully!`, 'success');
     } catch (err: any) {
-      showFeedback(`Failed to create strategy: ${err.message}`, 'error');
+      showFeedback(`Failed to create strategy: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
@@ -467,7 +468,7 @@ export default function StrategiesScreen() {
       setHistoryList(history);
       setIsHistoryModalOpen(true);
     } catch (error: any) {
-      showFeedback(`Strategy history is unavailable: ${error.message}`, 'error');
+      showFeedback(`Strategy history is unavailable: ${formatErrorMessage(error)}`, 'error');
     }
   };
 
@@ -482,7 +483,7 @@ export default function StrategiesScreen() {
         showFeedback(`Scan completed: Market checked. No setup confirmed at this minute.`, 'info');
       }
     } catch (err: any) {
-      showFeedback(`Agent scan failed: ${err.message}`, 'error');
+      showFeedback(`Agent scan failed: ${formatErrorMessage(err)}`, 'error');
     }
   };
 
