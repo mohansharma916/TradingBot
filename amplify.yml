@@ -1,0 +1,24 @@
+version: 1
+frontend:
+  phases:
+    preBuild:
+      commands:
+        - corepack enable
+        - corepack prepare pnpm@10.13.1 --activate
+        - pnpm install --frozen-lockfile=false
+        - pnpm --filter @trading-bot/contracts build
+        - pnpm --filter @trading-bot/domain build
+        - pnpm --filter @trading-bot/ui build
+        - pnpm --filter @trading-bot/client-sdk build
+    build:
+      commands:
+        - env | grep -e EXPO_PUBLIC_ >> apps/trader/.env || true
+        - pnpm --filter @trading-bot/trader build:web
+  artifacts:
+    baseDirectory: apps/trader/dist
+    files:
+      - '**/*'
+  cache:
+    paths:
+      - .pnpm-store/**/*
+      - node_modules/**/*

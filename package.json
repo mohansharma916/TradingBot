@@ -10,6 +10,8 @@
     "dev:worker": "pnpm --filter @trading-bot/contracts build && pnpm --filter @trading-bot/worker dev",
     "dev:trader": "pnpm --filter @trading-bot/trader dev:web",
     "build": "pnpm --filter @trading-bot/contracts build && pnpm --filter @trading-bot/domain build && pnpm --filter @trading-bot/ui build && pnpm --filter @trading-bot/client-sdk build && pnpm --filter @trading-bot/api build && pnpm --filter @trading-bot/worker build",
+    "build:trader": "pnpm --filter @trading-bot/contracts build && pnpm --filter @trading-bot/domain build && pnpm --filter @trading-bot/ui build && pnpm --filter @trading-bot/client-sdk build && pnpm --filter @trading-bot/trader build:web",
+    "build:web": "pnpm run build:trader",
     "test": "vitest run",
     "typecheck": "pnpm -r --parallel run typecheck",
     "db:migrate": "tsx infrastructure/scripts/migrate.ts"
