@@ -99,17 +99,40 @@ API_HEALTHY=false
 for i in $(seq 1 ${MAX_ATTEMPTS}); do
   echo "   [Attempt $i/${MAX_ATTEMPTS}] Checking API responsiveness..."
   
-  # Check if the container is running and responding on internal port 3000
-  if ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T api node -e "
+  # Probe internal API port 3000 and capture exact diagnostic output
+  CHECK_OUTPUT=$(${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T api node -e "
     const http = require('http');
     const req = http.get('http://127.0.0.1:3000/api/v1/health/live', (res) => {
-      process.exit(res.statusCode === 200 || res.statusCode === 401 || res.statusCode === 404 ? 0 : 1);
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        console.log('HTTP ' + res.statusCode + ': ' + data.trim().slice(0, 120));
+        process.exit(res.statusCode >= 200 && res.statusCode < 500 ? 0 : 1);
+      });
     });
-    req.on('error', () => process.exit(1));
-  " >/dev/null 2>&1; then
+    req.on('error', err => {
+      console.log('Connection error: ' + err.message);
+      process.exit(1);
+    });
+    req.setTimeout(4000, () => {
+      console.log('Request timeout (4s)');
+      req.destroy();
+      process.exit(1);
+    });
+  " 2>&1) && PROBE_EXIT=0 || PROBE_EXIT=$?
+
+  if [ ${PROBE_EXIT} -eq 0 ]; then
     API_HEALTHY=true
+    echo "   📡 Probe response: ${CHECK_OUTPUT}"
     echo "✅ API container is healthy and responding!"
     break
+  else
+    echo "   ⚠️ Probe: ${CHECK_OUTPUT:-No response / container unavailable}"
+    # Print container status and recent logs on attempts 1, 3, 6, 9... to diagnose failures immediately
+    if [ $((i % 3)) -eq 0 ] || [ $i -eq 1 ]; then
+      echo "   📋 Current container logs (tail 15):"
+      ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" logs --tail=15 api 2>/dev/null || true
+    fi
   fi
 
   sleep ${SLEEP_INTERVAL}
