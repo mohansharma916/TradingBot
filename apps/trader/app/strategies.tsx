@@ -9,7 +9,7 @@ import {
   MoneynessType,
   BacktestResult,
 } from '@trading-bot/contracts';
-import { PREDEFINED_STRATEGY_TEMPLATES, StrategyTemplateItem } from '@trading-bot/domain';
+import { ALL_STRATEGY_TEMPLATES, StrategyTemplateItem } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
 import {
   loadSavedDraft,
@@ -137,7 +137,7 @@ export default function StrategiesScreen() {
     loadStrategies();
   }, []);
 
-  const activeTemplate = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === selectedStrategyId);
+  const activeTemplate = ALL_STRATEGY_TEMPLATES.find((t) => t.id === selectedStrategyId);
   const activeStrategy: StrategyConfig | undefined = strategies.find((s) => s.id === selectedStrategyId)
     || (activeTemplate ? {
         ...(activeTemplate.defaultConfig as any),
@@ -653,7 +653,7 @@ export default function StrategiesScreen() {
         >
           {[
             { id: 'MY_STRATEGIES' as StrategyLabTab, label: 'My Strategies', icon: '🌟', count: strategies.filter((s) => !s.isArchived && s.status !== StrategyStatus.ARCHIVED).length },
-            { id: 'TEMPLATES' as StrategyLabTab, label: 'Predefined Templates', icon: '📑', count: PREDEFINED_STRATEGY_TEMPLATES.length },
+            { id: 'TEMPLATES' as StrategyLabTab, label: 'Predefined Templates', icon: '📑', count: ALL_STRATEGY_TEMPLATES.length },
             { id: 'DRAFTS' as StrategyLabTab, label: 'Draft Strategies', icon: '📝', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.DRAFT).length },
             { id: 'BACKTESTED' as StrategyLabTab, label: 'Backtested', icon: '🧪', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.BACKTESTED).length },
             { id: 'PAPER' as StrategyLabTab, label: 'Paper Strategies', icon: '📄', count: strategies.filter((s) => !s.isArchived && s.status === StrategyStatus.PAPER_ACTIVE).length },
@@ -764,7 +764,7 @@ export default function StrategiesScreen() {
         {/* TAB CONTENT: PREDEFINED TEMPLATES */}
         {currentTab === 'TEMPLATES' && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: spacing.md }}>
-            {PREDEFINED_STRATEGY_TEMPLATES.filter((tpl) => {
+            {ALL_STRATEGY_TEMPLATES.filter((tpl) => {
               if (searchQuery.trim()) {
                 const q = searchQuery.toLowerCase();
                 if (!tpl.name.toLowerCase().includes(q) && !tpl.description.toLowerCase().includes(q)) return false;
@@ -1069,7 +1069,7 @@ export default function StrategiesScreen() {
                 onChange={(e) => {
                   setSelectedStrategyId(e.target.value);
                   const found = strategies.find((s) => s.id === e.target.value)
-                    || PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === e.target.value);
+                    || ALL_STRATEGY_TEMPLATES.find((t) => t.id === e.target.value);
                   if (found) {
                     const u = 'underlying' in found ? found.underlying : (found as any).recommendedUnderlying;
                     const tf = 'timeframe' in found ? found.timeframe : (found as any).recommendedTimeframe;
@@ -1095,7 +1095,7 @@ export default function StrategiesScreen() {
                   ))}
                 </optgroup>
                 <optgroup label="Predefined Templates">
-                  {PREDEFINED_STRATEGY_TEMPLATES.map((t) => (
+                  {ALL_STRATEGY_TEMPLATES.map((t) => (
                     <option key={t.id} value={t.id}>
                       {t.name} ({t.recommendedUnderlying})
                     </option>

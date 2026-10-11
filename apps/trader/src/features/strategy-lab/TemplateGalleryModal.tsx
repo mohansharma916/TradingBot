@@ -1,6 +1,6 @@
 import { View, Text, TouchableOpacity, ScrollView, Modal } from 'react-native';
 import { colors, spacing, borderRadius, typography, Badge } from '@trading-bot/ui';
-import { PREDEFINED_STRATEGY_TEMPLATES, StrategyTemplateItem } from '@trading-bot/domain';
+import { ALL_STRATEGY_TEMPLATES, StrategyTemplateItem } from '@trading-bot/domain';
 
 interface TemplateGalleryModalProps {
   isOpen: boolean;
@@ -71,7 +71,7 @@ export function TemplateGalleryModal({
 
           {/* Templates Grid / List */}
           <ScrollView contentContainerStyle={{ padding: spacing.lg, gap: spacing.md }}>
-            {PREDEFINED_STRATEGY_TEMPLATES.map((tpl) => {
+            {ALL_STRATEGY_TEMPLATES.map((tpl) => {
               const indicators = tpl.astConfig.indicators || [];
               const categoryColor =
                 tpl.category === 'TREND'

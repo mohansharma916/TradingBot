@@ -1005,3 +1005,8 @@ export const PRICE_ACTION_MOMENTUM_TEMPLATE: StrategyTemplateItem = {
     requiresApproval: true,
   },
 };
+
+export const ALL_STRATEGY_TEMPLATES: StrategyTemplateItem[] = [
+  ...PREDEFINED_STRATEGY_TEMPLATES,
+  PRICE_ACTION_MOMENTUM_TEMPLATE,
+];

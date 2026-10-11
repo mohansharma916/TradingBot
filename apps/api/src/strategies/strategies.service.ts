@@ -15,7 +15,7 @@ import {
   TradeMode,
 } from '@trading-bot/contracts';
 import {
-  PREDEFINED_STRATEGY_TEMPLATES,
+  ALL_STRATEGY_TEMPLATES,
   PRICE_ACTION_MOMENTUM_TEMPLATE,
   StrategyTemplateItem,
   calculateStrategyVersionHash,
@@ -154,7 +154,7 @@ export class StrategiesService {
   }
 
   public getTemplates(): StrategyTemplateItem[] {
-    return [...PREDEFINED_STRATEGY_TEMPLATES, PRICE_ACTION_MOMENTUM_TEMPLATE];
+    return ALL_STRATEGY_TEMPLATES;
   }
 
   public validateStrategyAst(astConfig: any): { valid: boolean; errors: string[]; warnings: string[] } {
@@ -220,7 +220,7 @@ export class StrategiesService {
   }
 
   public createFromTemplate(templateId: string, overrides: any = {}): StrategyConfig {
-    const tpl = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === templateId);
+    const tpl = ALL_STRATEGY_TEMPLATES.find((t) => t.id === templateId);
     if (!tpl) {
       throw new NotFoundException(`Template '${templateId}' not found.`);
     }
@@ -335,7 +335,7 @@ export class StrategiesService {
     const parsedReq = BacktestRequestSchema.parse(reqDto || {});
     let strategy: StrategyConfig;
 
-    const tpl = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === id);
+    const tpl = ALL_STRATEGY_TEMPLATES.find((t) => t.id === id);
     if (tpl) {
       strategy = {
         ...tpl.defaultConfig,
@@ -462,5 +462,54 @@ export class StrategiesService {
     defaultStrategy.versionHash = calculateStrategyVersionHash(defaultStrategy);
     this.strategies.set(defaultStrategy.id, defaultStrategy);
     this.strategyVersionHistory.set(defaultStrategy.id, [defaultStrategy]);
+
+    const pamStrategy: StrategyConfig = {
+      id: '550e8400-e29b-41d4-a716-446655440003',
+      name: 'NIFTY Price Action Directional Momentum',
+      version: 1,
+      status: StrategyStatus.DRAFT,
+      tradeMode: TradeMode.PAPER,
+      market: 'NSE_FO',
+      underlying: 'NIFTY',
+      allowedInstruments: [AllowedOptionType.LONG_CALL, AllowedOptionType.LONG_PUT],
+      timeframe: '1m',
+      session: { start: '09:25', lastEntry: '14:45', timezone: 'Asia/Kolkata' },
+      astConfig: PRICE_ACTION_MOMENTUM_TEMPLATE.astConfig,
+      entry: {
+        emaPeriod: 20,
+        rsiPeriod: 14,
+        rsiThreshold: 50,
+        maxBidAskSpreadPct: 1.0,
+        minVolume: 1000,
+      },
+      selection: {
+        expiry: 'NEAREST_ELIGIBLE',
+        moneyness: MoneynessType.ATM,
+        minVolume: 1000,
+      },
+      risk: {
+        maxCapitalInr: 10000,
+        maxAllInTradeLossInr: 500,
+        maxAllInDailyLossInr: 600,
+        maxOpenPositions: 1,
+        maxTradesPerDay: 4,
+        targetNetProfitInr: 600,
+        maxRoundTripCostBudgetInr: 60,
+      },
+      exit: {
+        stopBasis: 'OPTION_PREMIUM',
+        marketCutoff: '15:10',
+      },
+      maxCapitalInr: 10000,
+      maxAllInTradeLossInr: 500,
+      maxAllInDailyLossInr: 600,
+      targetNetProfitInr: 600,
+      maxRoundTripCostBudgetInr: 60,
+      maxOpenPositions: 1,
+      requiresApproval: true,
+    };
+    pamStrategy.versionHash = calculateStrategyVersionHash(pamStrategy);
+    this.strategies.set(pamStrategy.id, pamStrategy);
+    this.strategyVersionHistory.set(pamStrategy.id, [pamStrategy]);
   }
 }
