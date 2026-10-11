@@ -332,20 +332,45 @@ export class StrategiesService {
   public async runBacktest(id: string, reqDto: Partial<BacktestRequest>): Promise<BacktestResult> {
     const parsedReq = BacktestRequestSchema.parse(reqDto || {});
     let strategy: StrategyConfig;
-    try {
-      strategy = this.getStrategy(id);
-    } catch (err) {
-      if (parsedReq.strategy) {
-        strategy = this.createStrategy({ ...parsedReq.strategy, id });
-      } else {
-        throw err;
+
+    const tpl = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === id);
+    if (tpl) {
+      strategy = {
+        ...tpl.defaultConfig,
+        id: tpl.id,
+        name: tpl.name,
+        description: tpl.description,
+        category: tpl.category,
+        templateId: tpl.id,
+        version: 1,
+        status: StrategyStatus.DRAFT,
+        tradeMode: TradeMode.PAPER,
+        underlying: tpl.recommendedUnderlying,
+        timeframe: tpl.recommendedTimeframe,
+        astConfig: tpl.astConfig,
+        ...(parsedReq.strategy || {}),
+      } as StrategyConfig;
+    } else {
+      try {
+        strategy = this.getStrategy(id);
+      } catch (err) {
+        if (parsedReq.strategy) {
+          strategy = parsedReq.strategy as StrategyConfig;
+        } else {
+          throw err;
+        }
       }
     }
 
     const underlying = reqDto?.underlying || strategy.underlying;
-    if (underlying !== strategy.underlying) throw new Error('Backtest underlying must match the strategy.');
     const interval = reqDto?.timeframe || strategy.timeframe;
-    if (interval !== strategy.timeframe) throw new Error('Backtest timeframe must match the strategy.');
+
+    // Keep strategy aligned with backtest request params for this run
+    strategy = {
+      ...strategy,
+      underlying,
+      timeframe: interval,
+    };
 
     // Underlying OHLC comes from a named provider; options premiums remain a disclosed model.
     const { candles, dataSource } = await fetchRealHistoricalCandles({

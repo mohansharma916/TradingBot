@@ -457,7 +457,7 @@ export const StrategyAstConfigSchema: z.ZodType<StrategyAstConfig, z.ZodTypeDef,
 
 // Strategy Config Schema
 export const StrategyConfigSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string().min(1),
   name: z.string().min(1),
   description: z.string().optional(),
   category: z.string().optional(),

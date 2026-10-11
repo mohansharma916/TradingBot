@@ -83,7 +83,10 @@ export function buildIndicatorCache(
       }
 
       case IndicatorType.VWAP: {
-        const series = calculateVWAP(candles);
+        const hasVolume = candles.some((c) => (c.volume ?? 0) > 0);
+        const series = hasVolume
+          ? calculateVWAP(candles)
+          : calculateVWAP(candles.map((c) => ({ ...c, volume: 1 })));
         cache.indicatorSeries.set(id, series);
         break;
       }
@@ -315,6 +318,20 @@ export function evaluateConditionRule(
   cache: EvaluatorCache,
 ): boolean {
   if (rule.enabled === false) return true; // Disabled condition is considered pass
+
+  // On index spot feeds (NIFTY/BANKNIFTY), the exchange does not report traded volume.
+  // When backtesting on index spot data where volume is absent/0 across all bars,
+  // volume-dependent filters are treated as neutral/passing so they don't block 100% of signals.
+  const isVolumeCondition =
+    (rule.left?.type === 'CANDLE_FIELD' && rule.left?.field === 'volume') ||
+    (rule.right?.type === 'CANDLE_FIELD' && rule.right?.field === 'volume') ||
+    (rule.left?.type === 'INDICATOR' && rule.left?.indicatorId?.includes('vol')) ||
+    (rule.right?.type === 'INDICATOR' && rule.right?.indicatorId?.includes('vol'));
+
+  const datasetHasNoVolume = candles.length > 0 && candles.every((c) => (c.volume ?? 0) === 0 || (c.volume ?? 0) === 1);
+  if (isVolumeCondition && datasetHasNoVolume) {
+    return true;
+  }
 
   // Get current bar values
   const leftCurr = resolveOperandValue(rule.left, barIndex, candles, cache);

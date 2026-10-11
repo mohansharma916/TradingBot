@@ -67,6 +67,7 @@ export default function StrategiesScreen() {
   const [backtestMaxDailyLoss, setBacktestMaxDailyLoss] = useState<number>(500);
   const [backtestLoading, setBacktestLoading] = useState<boolean>(false);
   const [backtestResult, setBacktestResult] = useState<BacktestResult | null>(null);
+  const [backtestInlineError, setBacktestInlineError] = useState<string | null>(null);
 
   // Legacy Modals state
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
@@ -136,7 +137,17 @@ export default function StrategiesScreen() {
     loadStrategies();
   }, []);
 
-  const activeStrategy = strategies.find((s) => s.id === selectedStrategyId) || strategies[0];
+  const activeTemplate = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === selectedStrategyId);
+  const activeStrategy: StrategyConfig | undefined = strategies.find((s) => s.id === selectedStrategyId)
+    || (activeTemplate ? {
+        ...(activeTemplate.defaultConfig as any),
+        id: activeTemplate.id,
+        name: activeTemplate.name,
+        underlying: activeTemplate.recommendedUnderlying,
+        timeframe: activeTemplate.recommendedTimeframe,
+        astConfig: activeTemplate.astConfig,
+      } as StrategyConfig : undefined)
+    || strategies[0];
 
   // Helper to flash notifications
   const showFeedback = (msg: string, type: 'success' | 'info' | 'error' = 'success') => {
@@ -176,6 +187,11 @@ export default function StrategiesScreen() {
 
     setBacktestLoading(true);
     setBacktestResult(null);
+    setBacktestInlineError(null);
+
+    // Sync state so controls reflect the active strategy
+    if (strat.underlying) setBacktestUnderlying(strat.underlying as any);
+    if (strat.timeframe) setBacktestTimeframe(strat.timeframe as any);
 
     const effectiveFrom = isCustomDateRange && (backtestFromDate || backtestToDate) ? (backtestFromDate || backtestToDate) : undefined;
     const effectiveTo = isCustomDateRange && (backtestToDate || backtestFromDate) ? (backtestToDate || backtestFromDate) : undefined;
@@ -184,8 +200,8 @@ export default function StrategiesScreen() {
     const backtestPayload = {
       days: backtestDays,
       initialCapital: backtestCapital,
-      underlying: backtestUnderlying,
-      timeframe: backtestTimeframe,
+      underlying: strat.underlying || backtestUnderlying,
+      timeframe: strat.timeframe || backtestTimeframe,
       fromDate: finalFrom,
       toDate: finalTo,
       useTrailingStop,
@@ -200,10 +216,19 @@ export default function StrategiesScreen() {
     try {
       const result = await apiClient.runBacktest(strat.id, backtestPayload as any);
       setBacktestResult(result);
-      if (result.error) { showFeedback(result.error, 'error'); return; }
+      if (result.error) {
+        setBacktestInlineError(result.error);
+        showFeedback(result.error, 'error');
+        return;
+      }
       showFeedback(`Backtest completed for ${strat.name}: ${result.totalTrades} simulated trades. Data source: ${result.dataSource}.`, 'success');
+      if (backtestRef.current) {
+        backtestRef.current.scrollIntoView({ behavior: 'smooth' });
+      }
     } catch (err: any) {
-      showFeedback(`Backtest failed: ${err.message}`, 'error');
+      const msg = err.message || 'Unknown network or API error';
+      setBacktestInlineError(`Backtest execution error: ${msg}`);
+      showFeedback(`Backtest failed: ${msg}`, 'error');
     } finally {
       setBacktestLoading(false);
     }
@@ -1043,8 +1068,14 @@ export default function StrategiesScreen() {
                 value={selectedStrategyId}
                 onChange={(e) => {
                   setSelectedStrategyId(e.target.value);
-                  const found = strategies.find((s) => s.id === e.target.value);
-                  if (found) setBacktestUnderlying((found.underlying as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
+                  const found = strategies.find((s) => s.id === e.target.value)
+                    || PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === e.target.value);
+                  if (found) {
+                    const u = 'underlying' in found ? found.underlying : (found as any).recommendedUnderlying;
+                    const tf = 'timeframe' in found ? found.timeframe : (found as any).recommendedTimeframe;
+                    setBacktestUnderlying((u as 'NIFTY' | 'BANKNIFTY') || 'NIFTY');
+                    setBacktestTimeframe(tf || '5m');
+                  }
                 }}
                 style={{
                   backgroundColor: colors.surface,
@@ -1056,11 +1087,20 @@ export default function StrategiesScreen() {
                   width: '100%',
                 }}
               >
-                {strategies.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} ({s.underlying})
-                  </option>
-                ))}
+                <optgroup label="My Strategies">
+                  {strategies.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.underlying})
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Predefined Templates">
+                  {PREDEFINED_STRATEGY_TEMPLATES.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name} ({t.recommendedUnderlying})
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </div>
 
@@ -1390,6 +1430,32 @@ export default function StrategiesScreen() {
             </div>
           </div>
         </div>
+
+        {/* Inline Backtest Error Banner */}
+        {backtestInlineError && (
+          <div
+            style={{
+              margin: `${spacing.md}px 0`,
+              padding: spacing.md,
+              backgroundColor: 'rgba(239, 68, 68, 0.1)',
+              border: `1.5px solid ${colors.loss}`,
+              borderRadius: borderRadius.md,
+              display: 'flex',
+              alignItems: 'flex-start',
+              gap: spacing.sm,
+            }}
+          >
+            <span style={{ fontSize: 22 }}>⚠️</span>
+            <div>
+              <div style={{ color: colors.loss, fontWeight: typography.fontWeight.bold, fontSize: typography.fontSize.sm }}>
+                Backtest Error
+              </div>
+              <div style={{ color: colors.textSecondary, fontSize: typography.fontSize.xs, marginTop: 2 }}>
+                {backtestInlineError}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Backtest Results Display */}
         {backtestResult && (
