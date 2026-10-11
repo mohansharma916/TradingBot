@@ -1173,4 +1173,56 @@ export const AutonomousExecutionLogSchema = z.object({
 
 export type AutonomousExecutionLog = z.infer<typeof AutonomousExecutionLogSchema>;
 
+// Price Action Directional Momentum Strategy Schemas
+export const PriceActionMomentumConfigSchema = z.object({
+  candleCount: z.number().int().min(4).max(20).default(6),
+  minimumEfficiency: z.number().min(0.1).max(1.0).default(0.60),
+  minimumStructureConfirmations: z.number().int().min(1).max(10).default(3),
+  useMultiTimeframeConfirmation: z.boolean().default(false),
+  mtfLookbackCandles: z.number().int().min(2).max(10).default(3),
+  underlying: z.enum(['NIFTY', 'BANKNIFTY']).default('NIFTY'),
+  moneyness: z.enum(['ATM', 'ITM', 'OTM']).default('ATM'),
+  strikeOffset: z.number().int().min(0).max(5).default(0),
+  stopLossType: z.enum(['STRUCTURE_BASED', 'FIXED_POINTS', 'PERCENTAGE']).default('STRUCTURE_BASED'),
+  stopLossValue: z.number().positive().default(25),
+  targetProfitType: z.enum(['RISK_REWARD', 'FIXED_POINTS', 'PERCENTAGE']).default('RISK_REWARD'),
+  riskRewardRatio: z.number().positive().default(2.0),
+  targetPoints: z.number().positive().default(50),
+  trailingStopEnabled: z.boolean().default(true),
+  trailingActivationProfitInr: z.number().positive().default(150),
+  trailingStepInr: z.number().positive().default(50),
+  maxTradesPerDay: z.number().int().positive().default(3),
+  maxAllInTradeLossInr: z.number().positive().default(500),
+  maxAllInDailyLossInr: z.number().positive().default(600),
+  cooldownMinutes: z.number().int().nonnegative().default(5),
+  tradeMode: z.nativeEnum(TradeMode).default(TradeMode.PAPER),
+  session: StrategySessionSchema.default({
+    start: '09:25',
+    lastEntry: '14:45',
+    timezone: 'Asia/Kolkata',
+  }),
+});
+
+export type PriceActionMomentumConfig = z.infer<typeof PriceActionMomentumConfigSchema>;
+
+export const PriceActionMomentumSignalResultSchema = z.object({
+  signal: z.enum(['BUY_CE', 'BUY_PE', 'NO_TRADE']),
+  direction: z.enum(['BULLISH', 'BEARISH', 'NEUTRAL']),
+  priceChange: z.number(),
+  totalMovement: z.number(),
+  trendEfficiency: z.number(),
+  bullishStructureConfirmations: z.number().int(),
+  bearishStructureConfirmations: z.number().int(),
+  mtfConfirmed: z.boolean(),
+  mtfPriceChange: z.number().optional(),
+  breakoutTriggered: z.boolean(),
+  setupCandleHigh: z.number(),
+  setupCandleLow: z.number(),
+  currentPrice: z.number(),
+  reasons: z.array(z.string()),
+  timestamp: z.string(),
+});
+
+export type PriceActionMomentumSignalResult = z.infer<typeof PriceActionMomentumSignalResultSchema>;
+
 

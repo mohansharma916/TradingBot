@@ -10,4 +10,4 @@ export * from './order-state-machine';
 export * from './backtest-engine';
 export * from './strategy-rule-evaluator';
 export * from './strategy-templates';
-
+export * from './price-action-momentum';

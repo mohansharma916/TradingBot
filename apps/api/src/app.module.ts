@@ -23,6 +23,7 @@ import { ReportsController } from './reports/reports.controller';
 import { ReportsService } from './reports/reports.service';
 import { StrategiesController } from './strategies/strategies.controller';
 import { StrategiesService } from './strategies/strategies.service';
+import { PriceActionMomentumService } from './strategies/price-action-momentum.service';
 import { AgentsController } from './agents/agents.controller';
 import { AgentToolsService } from './agents/agent-tools.service';
 import { MarketScannerAgent } from './agents/market-scanner.agent';
@@ -92,6 +93,7 @@ import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.servic
     StrategyAnalystAgent,
     AgentCoordinatorService,
     StrategiesService,
+    PriceActionMomentumService,
     RiskReservationManager,
     OrdersService,
     TokenStorageService,

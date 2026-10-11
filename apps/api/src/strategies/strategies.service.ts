@@ -16,6 +16,7 @@ import {
 } from '@trading-bot/contracts';
 import {
   PREDEFINED_STRATEGY_TEMPLATES,
+  PRICE_ACTION_MOMENTUM_TEMPLATE,
   StrategyTemplateItem,
   calculateStrategyVersionHash,
   fetchRealHistoricalCandles,
@@ -153,7 +154,7 @@ export class StrategiesService {
   }
 
   public getTemplates(): StrategyTemplateItem[] {
-    return PREDEFINED_STRATEGY_TEMPLATES;
+    return [...PREDEFINED_STRATEGY_TEMPLATES, PRICE_ACTION_MOMENTUM_TEMPLATE];
   }
 
   public validateStrategyAst(astConfig: any): { valid: boolean; errors: string[]; warnings: string[] } {

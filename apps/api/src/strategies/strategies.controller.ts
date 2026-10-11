@@ -1,9 +1,13 @@
 import { Controller, Get, Post, Put, Param, Body, Inject } from '@nestjs/common';
 import { StrategiesService } from './strategies.service';
+import { PriceActionMomentumService } from './price-action-momentum.service';
 
 @Controller('strategies')
 export class StrategiesController {
-  constructor(@Inject(StrategiesService) private readonly strategiesService: StrategiesService) {}
+  constructor(
+    @Inject(StrategiesService) private readonly strategiesService: StrategiesService,
+    @Inject(PriceActionMomentumService) private readonly pamService: PriceActionMomentumService,
+  ) {}
 
   @Get()
   getStrategies() {
@@ -63,6 +67,26 @@ export class StrategiesController {
   @Post(':id/backtest')
   runBacktest(@Param('id') id: string, @Body() body: any) {
     return this.strategiesService.runBacktest(id, body);
+  }
+
+  @Post('price-action-momentum/evaluate')
+  evaluatePriceActionMomentum(@Body() body: any) {
+    return this.pamService.evaluateSignal(
+      body.candles ?? [],
+      body.currentPrice ?? 0,
+      body.config,
+      body.fiveMinuteCandles,
+    );
+  }
+
+  @Post('price-action-momentum/backtest')
+  backtestPriceActionMomentum(@Body() body: any) {
+    return this.pamService.runBacktest(body);
+  }
+
+  @Post('price-action-momentum/optimize')
+  optimizePriceActionMomentum(@Body() body: any) {
+    return this.pamService.runParameterOptimization(body.candles ?? [], body.config);
   }
 }
 
