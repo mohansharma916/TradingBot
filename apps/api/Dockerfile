@@ -21,4 +21,4 @@ ENV PORT=3000
 
 EXPOSE 3000
 
-CMD ["pnpm", "--dir", "apps/api", "start"]
+CMD ["sh", "-c", "rm -f /app/.data/account-runtime.lock 2>/dev/null; exec pnpm --dir apps/api start"]

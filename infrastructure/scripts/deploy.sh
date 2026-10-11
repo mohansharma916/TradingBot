@@ -62,6 +62,8 @@ git reset --hard origin/main
 echo "🧹 Removing any stale runtime lease lock from previous container..."
 ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" stop api 2>/dev/null || true
 ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" run --rm --no-deps --entrypoint rm api -f /app/.data/account-runtime.lock 2>/dev/null || true
+${DOCKER_CMD} volume inspect fo-trading_api_state >/dev/null 2>&1 && \
+  ${DOCKER_CMD} run --rm -v fo-trading_api_state:/v alpine rm -f /v/account-runtime.lock 2>/dev/null || true
 
 echo "🐳 Building and starting Docker containers..."
 ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --build --remove-orphans
