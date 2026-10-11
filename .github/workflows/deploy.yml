@@ -102,14 +102,25 @@ jobs:
               TARGET_DIR="/opt/fo-trading"
             fi
 
+            # Automatically fix directory ownership to current SSH user if sudo is available
+            if [ -d "$TARGET_DIR" ]; then
+              sudo chown -R $USER:$USER "$TARGET_DIR" 2>/dev/null || true
+            else
+              sudo mkdir -p "$TARGET_DIR" 2>/dev/null || mkdir -p "$TARGET_DIR"
+              sudo chown -R $USER:$USER "$TARGET_DIR" 2>/dev/null || true
+            fi
+
+            # Prevent Git dubious ownership errors in CI/CD
+            git config --global --add safe.directory "$TARGET_DIR" 2>/dev/null || true
+            git config --global --add safe.directory "*" 2>/dev/null || true
+
             echo "=========================================================="
             echo " Connecting to target host: $(hostname)"
             echo " Navigating to app directory: $TARGET_DIR"
             echo "=========================================================="
             
-            if [ ! -d "$TARGET_DIR" ]; then
-              echo "Directory $TARGET_DIR does not exist. Creating and cloning..."
-              mkdir -p "$TARGET_DIR"
+            if [ ! -d "$TARGET_DIR/.git" ]; then
+              echo "Repository not found in $TARGET_DIR. Cloning..."
               git clone https://github.com/${{ github.repository }}.git "$TARGET_DIR"
             fi
             

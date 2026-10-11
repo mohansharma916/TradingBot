@@ -19,11 +19,23 @@ echo "========================================================"
 
 cd "${PROJECT_DIR}"
 
-# 1. Verify Prerequisites
-command -v docker >/dev/null 2>&1 || { echo "❌ Error: docker is not installed on this server."; exit 1; }
-if ! docker compose version >/dev/null 2>&1; then
-  echo "❌ Error: docker compose (v2) is not installed."
-  exit 1
+# 1. Fix ownership and Git safe.directory to avoid permission issues
+if [ -n "${USER:-}" ] && command -v sudo >/dev/null 2>&1; then
+  sudo chown -R "$USER:$USER" "${PROJECT_DIR}" 2>/dev/null || true
+fi
+git config --global --add safe.directory "${PROJECT_DIR}" 2>/dev/null || true
+git config --global --add safe.directory "*" 2>/dev/null || true
+
+# Determine Docker command (supports sudo if user is not in docker group)
+DOCKER_CMD="docker"
+if ! docker info >/dev/null 2>&1; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n docker info >/dev/null 2>&1; then
+    echo "ℹ️ Using sudo for Docker commands."
+    DOCKER_CMD="sudo docker"
+  else
+    echo "❌ Error: Cannot connect to Docker daemon. Make sure docker is running and current user has access."
+    exit 1
+  fi
 fi
 
 # 2. Check for production environment file
@@ -44,7 +56,7 @@ git reset --hard origin/main
 
 # 4. Build and start containers
 echo "🐳 Building and starting Docker containers..."
-docker compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
+${DOCKER_CMD} compose -f "${COMPOSE_FILE}" up -d --build --remove-orphans
 
 # 5. Health Check: Verify API is answering
 echo "🩺 Performing health verification..."
@@ -56,7 +68,7 @@ for i in $(seq 1 ${MAX_ATTEMPTS}); do
   echo "   [Attempt $i/${MAX_ATTEMPTS}] Checking API responsiveness..."
   
   # Check if the container is running and responding on internal port 3000
-  if docker compose -f "${COMPOSE_FILE}" exec -T api node -e "
+  if ${DOCKER_CMD} compose -f "${COMPOSE_FILE}" exec -T api node -e "
     const http = require('http');
     const req = http.get('http://127.0.0.1:3000/api/v1/strategies', (res) => {
       process.exit(res.statusCode === 200 || res.statusCode === 404 ? 0 : 1);
@@ -74,16 +86,16 @@ done
 if [ "${API_HEALTHY}" != "true" ]; then
   echo "❌ API failed health check after $((${MAX_ATTEMPTS} * ${SLEEP_INTERVAL})) seconds."
   echo "📋 Showing recent API container logs:"
-  docker compose -f "${COMPOSE_FILE}" logs --tail=50 api
+  ${DOCKER_CMD} compose -f "${COMPOSE_FILE}" logs --tail=50 api
   exit 1
 fi
 
 # 6. Cleanup dangling Docker images to preserve server disk space
 echo "🧹 Cleaning up unused build images..."
-docker image prune -f >/dev/null 2>&1 || true
+${DOCKER_CMD} image prune -f >/dev/null 2>&1 || true
 
 echo "========================================================"
 echo "🎉 Deployment successfully completed!"
 echo "🐳 Active Containers:"
-docker compose -f "${COMPOSE_FILE}" ps
+${DOCKER_CMD} compose -f "${COMPOSE_FILE}" ps
 echo "========================================================"
