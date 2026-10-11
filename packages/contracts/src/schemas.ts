@@ -36,7 +36,7 @@ export const EnvSchema = z.object({
   OWNER_USERNAME: z.string().min(1).default('owner'),
   OWNER_PASSWORD: z.preprocess(
     (value) => value === '' ? undefined : value,
-    z.string().min(12).max(512).optional(),
+    z.string().min(8).max(512).optional(),
   ),
   API_HOST: z.string().default('127.0.0.1'),
   STATE_DIRECTORY: z.string().min(1).default('.data'),

@@ -8,6 +8,8 @@ import {
   HttpCode,
   HttpStatus,
   Optional,
+  Req,
+  Res,
 } from '@nestjs/common';
 import { EnvService } from '../config/env.service';
 import {
@@ -75,14 +77,69 @@ export class BrokerController {
   async handleCallbackGet(
     @Query('code') code: string,
     @Query('state') state: string,
+    @Req() req: any,
+    @Res() res: any,
   ) {
+    const isBrowser = Boolean(req?.headers?.accept?.includes('text/html'));
     if (!code || !state) {
-      return {
+      if (isBrowser) {
+        return res.status(400).send(`
+          <!DOCTYPE html>
+          <html><body style="font-family:sans-serif;background:#0B0E14;color:#EF4444;text-align:center;padding:50px;">
+            <h2>OAuth Connection Error</h2>
+            <p>Missing code or state parameter from Upstox.</p>
+            <p><a href="http://localhost:8081/health" style="color:#06B6D4">Return to Workstation</a></p>
+          </body></html>
+        `);
+      }
+      return res.status(400).json({
         success: false,
         message: 'Missing code or state in OAuth callback query parameters.',
-      };
+      });
     }
-    return this.oauthService.exchangeAuthorizationCode(code, state);
+
+    try {
+      const result = await this.oauthService.exchangeAuthorizationCode(code, state);
+      if (isBrowser) {
+        return res.status(200).send(`
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Upstox Connected</title>
+            <meta http-equiv="refresh" content="2;url=http://localhost:8081/health" />
+            <style>
+              body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0B0E14; color: #10B981; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+              .card { background: #151922; border: 1px solid #232936; padding: 36px; border-radius: 12px; text-align: center; max-width: 440px; box-shadow: 0 8px 30px rgba(0,0,0,0.6); }
+              h2 { margin: 0 0 12px; font-size: 22px; }
+              p { color: #94A3B8; font-size: 14px; line-height: 1.5; margin: 8px 0; }
+              .btn { display: inline-block; margin-top: 16px; background: #06B6D4; color: #082F49; padding: 10px 20px; border-radius: 6px; font-weight: bold; text-decoration: none; }
+            </style>
+          </head>
+          <body>
+            <div class="card">
+              <h2>✓ Upstox Broker Connected!</h2>
+              <p>Your session token was encrypted and stored successfully.</p>
+              <p>Redirecting to your Trading Workstation in 2 seconds...</p>
+              <a class="btn" href="http://localhost:8081/health">Return to Workstation</a>
+            </div>
+          </body>
+          </html>
+        `);
+      }
+      return res.json(result);
+    } catch (err: any) {
+      if (isBrowser) {
+        return res.status(400).send(`
+          <!DOCTYPE html>
+          <html><body style="font-family:sans-serif;background:#0B0E14;color:#EF4444;text-align:center;padding:50px;">
+            <h2>Upstox Connection Failed</h2>
+            <p>${err?.message || 'Token exchange failed'}</p>
+            <p><a href="http://localhost:8081/health" style="color:#06B6D4">Return to Workstation</a></p>
+          </body></html>
+        `);
+      }
+      return res.status(400).json({ success: false, message: err?.message || 'Token exchange failed' });
+    }
   }
 
   @Post('upstox/disconnect')
