@@ -14,10 +14,12 @@
   },
   "dependencies": {
     "@babel/runtime": "^8.0.7",
+    "@expo/env": "~0.4.2",
     "@trading-bot/client-sdk": "workspace:*",
     "@trading-bot/contracts": "workspace:*",
     "@trading-bot/domain": "workspace:*",
     "@trading-bot/ui": "workspace:*",
+    "dotenv": "^16.6.1",
     "expo": "~52.0.0",
     "expo-constants": "~17.0.3",
     "expo-linking": "~7.0.3",

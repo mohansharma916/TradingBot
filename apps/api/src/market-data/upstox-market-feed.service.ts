@@ -49,7 +49,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     this.stopped = false;
-    this.subscribe(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank', 'NSE_INDEX|Nifty Fin Service']);
+    this.subscribe(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank', 'NSE_INDEX|Nifty Fin Service', 'NSE_INDEX|NIFTY MID SELECT']);
     this.staleCheckTimer = setInterval(() => this.checkStaleFeed(), 1000);
     await this.initiateConnection();
   }

@@ -50,6 +50,10 @@ services:
       PORT: 3000
       DB_HOST: postgres
       DB_PORT: 5432
+      STATE_DIRECTORY: /app/.data
+
+    volumes:
+      - api_state:/app/.data
 
     depends_on:
       postgres:
@@ -115,6 +119,7 @@ services:
 
 volumes:
   postgres_data:
+  api_state:
   caddy_data:
   caddy_config:
 

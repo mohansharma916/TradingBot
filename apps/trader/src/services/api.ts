@@ -1,12 +1,12 @@
 import { TradingPlatformClient } from '@trading-bot/client-sdk';
+import { resolveApiBaseUrl } from './api-url';
 
 /**
  * Universal singleton TradingPlatformClient connecting to the live NestJS API.
- * Uses EXPO_PUBLIC_API_URL or defaults to localhost:4000/api/v1.
+ * Uses the public Expo API URL or the local development API.
  */
-export const API_BASE_URL =
-  (typeof process !== 'undefined' && process.env?.EXPO_PUBLIC_API_URL) ||
-  'http://localhost:4000/api/v1';
+// Expo only inlines public variables accessed with direct dot notation.
+export const API_BASE_URL = resolveApiBaseUrl(process.env.EXPO_PUBLIC_API_URL);
 
 export const apiClient = new TradingPlatformClient({
   baseUrl: API_BASE_URL,

@@ -4,7 +4,10 @@ import { Instrument, InstrumentType, OptionChainResult, QuoteSnapshot, SearchIns
 
 export const UPSTOX_INSTRUMENT_MASTER_URL = 'https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz';
 const UNDERLYING_BY_KEY: Record<string, string> = {
-  'NSE_INDEX|Nifty 50': 'NIFTY', 'NSE_INDEX|Nifty Bank': 'BANKNIFTY', 'NSE_INDEX|Nifty Fin Service': 'FINNIFTY',
+  'NSE_INDEX|Nifty 50': 'NIFTY',
+  'NSE_INDEX|Nifty Bank': 'BANKNIFTY',
+  'NSE_INDEX|Nifty Fin Service': 'FINNIFTY',
+  'NSE_INDEX|NIFTY MID SELECT': 'MIDCPNIFTY',
 };
 
 /** Calendar formatting only. Contract expiries come from the broker master. */
