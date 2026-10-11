@@ -19,6 +19,7 @@ import {
   StrategyTemplateItem,
   calculateStrategyVersionHash,
   fetchRealHistoricalCandles,
+  getStandardLotSize,
   requiresVersionBump,
   runStrategyBacktest,
 } from '@trading-bot/domain';
@@ -365,11 +366,31 @@ export class StrategiesService {
     const underlying = reqDto?.underlying || strategy.underlying;
     const interval = reqDto?.timeframe || strategy.timeframe;
 
-    // Keep strategy aligned with backtest request params for this run
+    // Minimum loss budget needed to afford 1 exchange lot under the strategy's configured stop loss
+    const lotSize = getStandardLotSize(underlying);
+    const stopPts = strategy.astConfig?.exitRules?.stopLossValue ?? strategy.exit?.stopLossPoints ?? 8;
+    const minLotRisk = Math.ceil(stopPts * (lotSize > 0 ? lotSize : 65) + 100);
+    const maxTradeLoss = Math.max(parsedReq.maxTradeLossInr ?? 0, strategy.risk?.maxAllInTradeLossInr ?? 0, minLotRisk);
+    const maxDailyLoss = Math.max(parsedReq.maxDailyLossInr ?? 0, strategy.risk?.maxAllInDailyLossInr ?? 0, maxTradeLoss * 2);
+
+    // Keep strategy aligned with backtest request params and exchange lot sizing
     strategy = {
       ...strategy,
       underlying,
       timeframe: interval,
+      risk: {
+        ...strategy.risk,
+        maxAllInTradeLossInr: maxTradeLoss,
+        maxAllInDailyLossInr: maxDailyLoss,
+        maxRoundTripCostBudgetInr: Math.max(100, strategy.risk?.maxRoundTripCostBudgetInr ?? 100),
+      },
+      maxRoundTripCostBudgetInr: Math.max(100, strategy.maxRoundTripCostBudgetInr ?? 100),
+    };
+
+    const effectiveReq: BacktestRequest = {
+      ...parsedReq,
+      maxTradeLossInr: maxTradeLoss,
+      maxDailyLossInr: maxDailyLoss,
     };
 
     // Underlying OHLC comes from a named provider; options premiums remain a disclosed model.
@@ -378,6 +399,7 @@ export class StrategiesService {
       days: parsedReq.days,
       interval,
       authToken: this.tokens?.hasValidToken() ? this.tokens.getToken()?.accessToken : undefined,
+      preferUpstox: true,
       fromDate: parsedReq.fromDate,
       toDate: parsedReq.toDate,
     });
@@ -385,7 +407,7 @@ export class StrategiesService {
     return runStrategyBacktest({
       strategy,
       candles,
-      request: parsedReq,
+      request: effectiveReq,
       dataSource,
     });
   }

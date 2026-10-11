@@ -51,7 +51,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const activation = request?.trailingActivationProfitInr ?? ast.trailingProfit?.activationProfitInr ?? 150;
   const gap = request?.trailingStepInr ?? ast.trailingProfit?.trailingGapInr ?? ast.trailingProfit?.adjustmentStepInr ?? 50;
   const trades:BacktestTradeRecord[]=[];
-  let capital=initialCapital,peak=initialCapital,drawdown=0,drawdownPct=0,day='',dailyPnl=0,count=0,lastExitIndex=-Infinity,lastEntrySignal=false;
+  let capital=initialCapital,peak=initialCapital,drawdown=0,drawdownPct=0,day='',dailyPnl=0,count=0,lastExitIndex=-Infinity,signalWaveEntered=false;
   let active: {entryIndex:number;entryTime:string;entry:number;premium:number;spot:number;quantity:number;stop:number;initialStop:number;target:number;type:'CE'|'PE';trailing:boolean;peakClose:number} | null=null;
   const prices=(c:Candle)=>{
     const t=active!; const sign=t.type==='CE'?1:-1;
@@ -83,7 +83,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     const c=candles[i]!;const currentDay=iso(c.timestamp).slice(0,10);
     if (currentDay!==day) {
       if (active && i>0) {const prev=candles[i-1]!;settle(prices(prev).close,new Date(Number(new Date(prev.timestamp))+interval).toISOString(),'SESSION_DATA_END',i-1);}
-      day=currentDay;dailyPnl=0;count=0;lastEntrySignal=false;
+      day=currentDay;dailyPnl=0;count=0;signalWaveEntered=false;
     }
     if (!isMarketOpenForTrading(new Date(c.timestamp))) continue;
     const time=istTime(c.timestamp);
@@ -91,14 +91,16 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     const bullish=evaluated.bullishSignal && !evaluated.bearishSignal;
     const bearish=evaluated.bearishSignal && !evaluated.bullishSignal;
     const hasSignal=bullish||bearish;
+    if (!hasSignal) {
+      signalWaveEntered = false;
+    }
     if (active) {
       const opposite=active.type==='CE'?bearish:bullish;
       if (time>=cutoff || ast.exitRules?.exitOnOppositeSignal && opposite) settle(prices(c).open,iso(c.timestamp),time>=cutoff?'TIME_CUTOFF':'OPPOSITE_SIGNAL',i);
       else protect(c,i);
     }
-    if (active || lastExitIndex===i) {lastEntrySignal=hasSignal;continue;}
-    if (!hasSignal || !evaluated.isWarmedUp || time<(strategy.session?.start ?? '09:25') || time>(strategy.session?.lastEntry ?? '14:45') || time>=cutoff || count>=maxTrades || dailyPnl<=-maxDaily || i-lastExitIndex<=(ast.entryRules?.cooldownBars ?? 0) || ast.entryRules?.allowReentry===false && lastEntrySignal) {lastEntrySignal=hasSignal;continue;}
-    lastEntrySignal=hasSignal;
+    if (active || lastExitIndex===i) continue;
+    if (!hasSignal || !evaluated.isWarmedUp || time<(strategy.session?.start ?? '09:25') || time>(strategy.session?.lastEntry ?? '14:45') || time>=cutoff || count>=maxTrades || dailyPnl<=-maxDaily || i-lastExitIndex<=(ast.entryRules?.cooldownBars ?? 0) || (ast.entryRules?.allowReentry===false && signalWaveEntered)) continue;
     const type=bullish?'CE':'PE';
     if (strategy.allowedInstruments && !strategy.allowedInstruments.includes(type==='CE'?AllowedOptionType.LONG_CALL:AllowedOptionType.LONG_PUT)) continue;
     if (ast.contractSelection?.optionSide==='LONG_CE' && type!=='CE' || ast.contractSelection?.optionSide==='LONG_PE' && type!=='PE') continue;
@@ -119,6 +121,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     }
     if (!selected) continue;
     active={entryIndex:i,entryTime:iso(c.timestamp),entry,premium,spot:c.open,quantity:selected.quantity,stop:selected.stop,initialStop:selected.stop,target:selected.target,type,trailing:false,peakClose:entry};count++;
+    signalWaveEntered = true;
     protect(c,i);
   }
   if (active && candles.at(-1)) {const last=candles.at(-1)!;settle(prices(last).close,new Date(Number(new Date(last.timestamp))+interval).toISOString(),'DATASET_END',candles.length-1);}
@@ -130,7 +133,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
 /**
  * Fetches historical underlying candles from named external providers; unavailable data fails closed.
  * Supports Yahoo Finance chart API for NIFTY (^NSEI) and BANKNIFTY (^NSEBANK),
- * or Upstox historical-candle API when authenticated.
+ * or Upstox historical-candle API when authenticated or requested.
  */
 export async function fetchRealHistoricalCandles(options: {
   underlying: string;
@@ -140,8 +143,9 @@ export async function fetchRealHistoricalCandles(options: {
   fromDate?: string;
   toDate?: string;
   authToken?: string;
+  preferUpstox?: boolean;
 }): Promise<{ candles: Candle[]; dataSource: string }> {
-  const { underlying, days = 14, fromDate, toDate, authToken } = options;
+  const { underlying, days = 14, fromDate, toDate, authToken, preferUpstox } = options;
   const requestedTf = options.timeframe || options.interval || '5m';
   const upperUnderlying = underlying.toUpperCase();
   const yahooSymbol = upperUnderlying === 'BANKNIFTY' ? '%5ENSEBANK' : '%5ENSEI';
@@ -165,16 +169,20 @@ export async function fetchRealHistoricalCandles(options: {
     startMs = endMs - days * 86400000;
   }
 
-  // 1. Try Upstox Historical Candle API if token available
-  if (authToken) {
+  // 1. Try Upstox Historical Candle API if token available or preferUpstox specified
+  if (authToken || preferUpstox) {
     try {
       const upstoxInstrumentKey = upperUnderlying === 'BANKNIFTY' ? 'NSE_INDEX|Nifty Bank' : 'NSE_INDEX|Nifty 50';
       const toStr = new Date(endMs).toISOString().slice(0, 10);
       const fromStr = new Date(startMs).toISOString().slice(0, 10);
       const upstoxInterval = interval === '1d' ? 'days/1' : `minutes/${strategyTimeframeMinutes(interval)}`;
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (authToken && authToken !== 'public_market_data') {
+        headers.Authorization = `Bearer ${authToken}`;
+      }
       const res = await fetch(
         `https://api.upstox.com/v3/historical-candle/${encodeURIComponent(upstoxInstrumentKey)}/${upstoxInterval}/${toStr}/${fromStr}`,
-        { headers: { Authorization: `Bearer ${authToken}`, Accept: 'application/json' } },
+        { headers },
       );
       if (res.ok) {
         const json = (await res.json()) as any;

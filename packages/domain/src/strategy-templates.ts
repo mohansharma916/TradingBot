@@ -292,15 +292,15 @@ export const PREDEFINED_STRATEGY_TEMPLATES: StrategyTemplateItem[] = [
         id: 'group_rsi_rev_bull',
         operator: LogicalOperator.AND,
         enabled: true,
-        description: 'RSI crosses above 30 AND Close > EMA 50',
+        description: 'RSI crosses above 40 AND Close > EMA 50',
         conditions: [
           {
             id: 'c_rsi_oversold_cross',
             left: { type: 'INDICATOR', indicatorId: 'rsi_rev', offset: 0 },
             comparison: ComparisonOperator.CROSSES_ABOVE,
-            right: { type: 'NUMBER', value: 30 },
+            right: { type: 'NUMBER', value: 40 },
             enabled: true,
-            description: 'RSI crosses above 30 (Oversold bounce)',
+            description: 'RSI crosses above 40 (Oversold dip bounce in trend)',
           },
           {
             id: 'c_price_above_trend',
@@ -316,15 +316,15 @@ export const PREDEFINED_STRATEGY_TEMPLATES: StrategyTemplateItem[] = [
         id: 'group_rsi_rev_bear',
         operator: LogicalOperator.AND,
         enabled: true,
-        description: 'RSI crosses below 70 AND Close < EMA 50',
+        description: 'RSI crosses below 60 AND Close < EMA 50',
         conditions: [
           {
             id: 'c_rsi_overbought_cross',
             left: { type: 'INDICATOR', indicatorId: 'rsi_rev', offset: 0 },
             comparison: ComparisonOperator.CROSSES_BELOW,
-            right: { type: 'NUMBER', value: 70 },
+            right: { type: 'NUMBER', value: 60 },
             enabled: true,
-            description: 'RSI crosses below 70 (Overbought reversal)',
+            description: 'RSI crosses below 60 (Overbought pullback turn in trend)',
           },
           {
             id: 'c_price_below_trend',

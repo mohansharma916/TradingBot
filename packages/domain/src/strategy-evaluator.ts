@@ -64,10 +64,7 @@ export function strategyExitLevels(input: { strategy: StrategyConfig; entryPrice
   const basicCharges = calculateOptionCharges({ buyPrice: entryPrice, sellPrice: entryPrice, quantity }).totalRoundTripCharges;
   let stopPoints = exits?.stopLossValue ?? strategy.exit?.stopLossPoints;
   if (stopBasis === 'PERCENTAGE') stopPoints = entryPrice * (stopPoints ?? 0) / 100;
-  const maxAffordableStopPoints = Math.max(1, (riskCap - basicCharges - slippageBufferInr - 5) / quantity);
-  if (stopPoints === undefined || stopPoints > maxAffordableStopPoints) {
-    stopPoints = maxAffordableStopPoints;
-  }
+  if (stopPoints === undefined) stopPoints = (riskCap - basicCharges - slippageBufferInr) / quantity;
   if (!Number.isFinite(stopPoints) || stopPoints <= 0 || stopPoints >= entryPrice) return { error: 'No affordable positive protective stop fits the all-in risk budget.' };
   // Round the stop upward (tighter risk), target upward (required net proceeds).
   const stopPrice = Math.ceil((entryPrice - stopPoints) / tickSize - 1e-9) * tickSize;
