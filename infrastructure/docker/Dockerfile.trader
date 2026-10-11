@@ -14,6 +14,10 @@ RUN pnpm --filter @trading-bot/contracts build
 RUN pnpm --filter @trading-bot/domain build
 RUN pnpm --filter @trading-bot/ui build
 RUN pnpm --filter @trading-bot/client-sdk build
+
+ARG EXPO_PUBLIC_API_URL
+ENV EXPO_PUBLIC_API_URL=$EXPO_PUBLIC_API_URL
+
 RUN pnpm --filter @trading-bot/trader build:web
 
 FROM nginx:alpine AS runner
