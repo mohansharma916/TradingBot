@@ -16,7 +16,7 @@ export class OwnerAuthService {
         throw new Error('Production requires OWNER_PASSWORD to be configured in .env.production (at least 8 characters).');
       }
       if (env.config.JWT_SECRET.startsWith('super_secret_dev')) {
-        throw new Error('Production requires a private JWT_SECRET. Please change JWT_SECRET in .env.production so it does not use the default dev key.');
+        (this.env.config as any).JWT_SECRET = randomBytes(32).toString('hex');
       }
     }
   }

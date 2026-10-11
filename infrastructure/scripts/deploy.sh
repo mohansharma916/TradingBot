@@ -54,11 +54,11 @@ if [ ! -f "${ENV_FILE}" ]; then
 fi
 
 # Ensure JWT_SECRET is not using the development placeholder in production
-if grep -q "JWT_SECRET=super_secret_dev" "${ENV_FILE}" 2>/dev/null; then
+if grep -E -q "JWT_SECRET=[^a-zA-Z0-9]*super_secret_dev" "${ENV_FILE}" 2>/dev/null; then
   echo "⚠️ Notice: JWT_SECRET in .env.production is using the default dev placeholder."
   echo "🔑 Generating a private secure JWT_SECRET..."
   GEN_SECRET=$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | head -c 64)
-  sed -i "s|JWT_SECRET=super_secret_dev.*|JWT_SECRET=${GEN_SECRET}|g" "${ENV_FILE}" 2>/dev/null || true
+  sed -i -E "s|^[[:space:]]*JWT_SECRET=.*|JWT_SECRET=${GEN_SECRET}|g" "${ENV_FILE}" 2>/dev/null || true
 fi
 
 # Ensure OWNER_PASSWORD is configured
