@@ -28,7 +28,7 @@ import { BrokerRouterService } from './broker-router.service';
 @Controller('broker')
 export class BrokerController {
   constructor(
-    @Inject(EnvService) _envService: EnvService,
+    @Inject(EnvService) private readonly envService: EnvService,
     @Inject(PaperBrokerAdapter) private readonly paperBroker: PaperBrokerAdapter,
     @Inject(UpstoxBrokerAdapter) _upstoxBroker: UpstoxBrokerAdapter,
     @Inject(UpstoxOAuthService) private readonly oauthService: UpstoxOAuthService,
@@ -36,6 +36,12 @@ export class BrokerController {
     @Inject(ReconciliationSchedulerService) private readonly reconciliationScheduler: ReconciliationSchedulerService,
     @Optional() @Inject(BrokerRouterService) private readonly router?: BrokerRouterService,
   ) {}
+
+  private getFrontendRedirectUrl(path: string = '/health'): string {
+    const origins = this.envService.config.CORS_ORIGIN.split(',').map((s) => s.trim());
+    const prodOrigin = origins.find((o) => o.startsWith('https://')) || origins[0] || 'http://localhost:8081';
+    return `${prodOrigin}${path}`;
+  }
 
   private getActiveAdapter() {
     return this.router?.getBroker() || this.paperBroker;
@@ -100,13 +106,14 @@ export class BrokerController {
 
     try {
       const result = await this.oauthService.exchangeAuthorizationCode(code, state);
+      const redirectUrl = this.getFrontendRedirectUrl('/health');
       if (isBrowser) {
         return res.status(200).send(`
           <!DOCTYPE html>
           <html>
           <head>
             <title>Upstox Connected</title>
-            <meta http-equiv="refresh" content="2;url=http://localhost:8081/health" />
+            <meta http-equiv="refresh" content="2;url=${redirectUrl}" />
             <style>
               body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0B0E14; color: #10B981; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
               .card { background: #151922; border: 1px solid #232936; padding: 36px; border-radius: 12px; text-align: center; max-width: 440px; box-shadow: 0 8px 30px rgba(0,0,0,0.6); }
@@ -120,7 +127,7 @@ export class BrokerController {
               <h2>✓ Upstox Broker Connected!</h2>
               <p>Your session token was encrypted and stored successfully.</p>
               <p>Redirecting to your Trading Workstation in 2 seconds...</p>
-              <a class="btn" href="http://localhost:8081/health">Return to Workstation</a>
+              <a class="btn" href="${redirectUrl}">Return to Workstation</a>
             </div>
           </body>
           </html>
@@ -128,13 +135,14 @@ export class BrokerController {
       }
       return res.json(result);
     } catch (err: any) {
+      const redirectUrl = this.getFrontendRedirectUrl('/health');
       if (isBrowser) {
         return res.status(400).send(`
           <!DOCTYPE html>
           <html><body style="font-family:sans-serif;background:#0B0E14;color:#EF4444;text-align:center;padding:50px;">
             <h2>Upstox Connection Failed</h2>
             <p>${err?.message || 'Token exchange failed'}</p>
-            <p><a href="http://localhost:8081/health" style="color:#06B6D4">Return to Workstation</a></p>
+            <p><a href="${redirectUrl}" style="color:#06B6D4">Return to Workstation</a></p>
           </body></html>
         `);
       }
