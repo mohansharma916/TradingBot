@@ -17,8 +17,7 @@ export class WorkerService implements OnModuleInit, OnModuleDestroy {
   private error: string | null = null;
   async onModuleInit() {
     await this.observe();
-    this.timer = setInterval(() => { void this.observe(); },10000);
-    this.timer.unref();
+    this.timer = setInterval(() => { void this.observe(); }, 10000);
   }
   onModuleDestroy() { if (this.timer) clearInterval(this.timer); }
   public async observe(): Promise<void> {

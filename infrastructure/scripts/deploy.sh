@@ -22,8 +22,8 @@ cd "${PROJECT_DIR}"
 CURRENT_USER="$(id -un 2>/dev/null || whoami)"
 CURRENT_GROUP="$(id -gn 2>/dev/null || echo "$CURRENT_USER")"
 
-# 1. Fix ownership and Git safe.directory to avoid permission issues
-if command -v sudo >/dev/null 2>&1; then
+# 1. Fix ownership and Git safe.directory to avoid permission issues (on Linux servers)
+if [ "$(uname -s)" = "Linux" ] && command -v sudo >/dev/null 2>&1; then
   sudo chown -R "${CURRENT_USER}:${CURRENT_GROUP}" "${PROJECT_DIR}" 2>/dev/null || true
   sudo chmod -R u+rwX "${PROJECT_DIR}" 2>/dev/null || true
 fi
@@ -57,8 +57,12 @@ fi
 if grep -E -q "JWT_SECRET=[^a-zA-Z0-9]*super_secret_dev" "${ENV_FILE}" 2>/dev/null; then
   echo "⚠️ Notice: JWT_SECRET in .env.production is using the default dev placeholder."
   echo "🔑 Generating a private secure JWT_SECRET..."
-  GEN_SECRET=$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | head -c 64)
-  sed -i -E "s|^[[:space:]]*JWT_SECRET=.*|JWT_SECRET=${GEN_SECRET}|g" "${ENV_FILE}" 2>/dev/null || true
+  GEN_SECRET=$(openssl rand -hex 32 2>/dev/null || date +%s%N | (sha256sum 2>/dev/null || shasum -a 256) | head -c 64)
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    sed -i '' -E "s|^[[:space:]]*JWT_SECRET=.*|JWT_SECRET=${GEN_SECRET}|g" "${ENV_FILE}" 2>/dev/null || true
+  else
+    sed -i -E "s|^[[:space:]]*JWT_SECRET=.*|JWT_SECRET=${GEN_SECRET}|g" "${ENV_FILE}" 2>/dev/null || true
+  fi
 fi
 
 # Ensure OWNER_PASSWORD is configured
@@ -67,10 +71,14 @@ if ! grep -q "^OWNER_PASSWORD=" "${ENV_FILE}" 2>/dev/null || grep -q "^OWNER_PAS
   echo "OWNER_PASSWORD=OwnerSecure@2026" >> "${ENV_FILE}"
 fi
 
-# 3. Pull latest Git changes
-echo "⬇️ Pulling latest changes from Git..."
-git fetch origin main
-git reset --hard origin/main
+# 3. Pull latest Git changes (skip if running locally or with --local/--skip-git)
+if [ "${SKIP_GIT_PULL:-false}" = "true" ] || [ "${1:-}" = "--local" ] || [ "${1:-}" = "--skip-git" ]; then
+  echo "⏩ Skipping git fetch/reset (running in local mode)..."
+else
+  echo "⬇️ Pulling latest changes from Git..."
+  git fetch origin main
+  git reset --hard origin/main
+fi
 
 # 4. Clean up stale runtime lock & start containers
 echo "🧹 Removing any stale runtime lease lock from previous container..."
@@ -94,8 +102,8 @@ for i in $(seq 1 ${MAX_ATTEMPTS}); do
   # Check if the container is running and responding on internal port 3000
   if ${DOCKER_CMD} compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T api node -e "
     const http = require('http');
-    const req = http.get('http://127.0.0.1:3000/api/v1/strategies', (res) => {
-      process.exit(res.statusCode === 200 || res.statusCode === 404 ? 0 : 1);
+    const req = http.get('http://127.0.0.1:3000/api/v1/health/live', (res) => {
+      process.exit(res.statusCode === 200 || res.statusCode === 401 || res.statusCode === 404 ? 0 : 1);
     });
     req.on('error', () => process.exit(1));
   " >/dev/null 2>&1; then
