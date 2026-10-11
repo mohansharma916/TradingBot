@@ -11,7 +11,14 @@ export class OwnerAuthService {
   private failures = new Map<string, { count: number; until: number }>();
   constructor(@Inject(EnvService) private readonly env: EnvService) {
     this.passwordHash = env.config.OWNER_PASSWORD ? scryptSync(env.config.OWNER_PASSWORD, this.salt, 64) : null;
-    if (env.config.NODE_ENV === 'production' && (!this.passwordHash || env.config.JWT_SECRET.startsWith('super_secret_dev'))) throw new Error('Production requires OWNER_PASSWORD and a private JWT_SECRET.');
+    if (env.config.NODE_ENV === 'production') {
+      if (!this.passwordHash) {
+        throw new Error('Production requires OWNER_PASSWORD to be configured in .env.production (at least 8 characters).');
+      }
+      if (env.config.JWT_SECRET.startsWith('super_secret_dev')) {
+        throw new Error('Production requires a private JWT_SECRET. Please change JWT_SECRET in .env.production so it does not use the default dev key.');
+      }
+    }
   }
   login(username: string, password: string, address = 'local'): { token: string; expiresAt: string } {
     if (!this.passwordHash) throw new ServiceUnavailableException('Configure OWNER_PASSWORD (at least 12 characters) in the server environment, then restart.');

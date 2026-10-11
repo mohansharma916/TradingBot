@@ -42,7 +42,7 @@ if ! docker info >/dev/null 2>&1; then
   fi
 fi
 
-# 2. Check for production environment file
+# 2. Check for production environment file and validate required secrets
 if [ ! -f "${ENV_FILE}" ]; then
   if [ -f "${PROJECT_DIR}/.env" ]; then
     echo "⚠️ Warning: .env.production not found; copying from .env"
@@ -51,6 +51,20 @@ if [ ! -f "${ENV_FILE}" ]; then
     echo "⚠️ Warning: .env.production not found; copying from .env.example"
     cp "${PROJECT_DIR}/.env.example" "${ENV_FILE}"
   fi
+fi
+
+# Ensure JWT_SECRET is not using the development placeholder in production
+if grep -q "JWT_SECRET=super_secret_dev" "${ENV_FILE}" 2>/dev/null; then
+  echo "⚠️ Notice: JWT_SECRET in .env.production is using the default dev placeholder."
+  echo "🔑 Generating a private secure JWT_SECRET..."
+  GEN_SECRET=$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | head -c 64)
+  sed -i "s|JWT_SECRET=super_secret_dev.*|JWT_SECRET=${GEN_SECRET}|g" "${ENV_FILE}" 2>/dev/null || true
+fi
+
+# Ensure OWNER_PASSWORD is configured
+if ! grep -q "^OWNER_PASSWORD=" "${ENV_FILE}" 2>/dev/null || grep -q "^OWNER_PASSWORD=[[:space:]]*$" "${ENV_FILE}" 2>/dev/null; then
+  echo "⚠️ Notice: OWNER_PASSWORD is not set in .env.production. Adding default owner password..."
+  echo "OWNER_PASSWORD=OwnerSecure@2026" >> "${ENV_FILE}"
 fi
 
 # 3. Pull latest Git changes
