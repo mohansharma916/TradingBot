@@ -1,0 +1,115 @@
+name: Deploy Backend (EC2/VPS)
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      - '.gitignore'
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip running tests before deploying (Emergency deploy only)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: production-backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Run Quality & Test Suite
+    if: ${{ github.event.inputs.skip_tests != 'true' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Run Test Suite
+        run: pnpm run test
+
+      - name: Build Packages & Applications
+        run: pnpm run build
+
+  deploy:
+    name: Deploy to EC2 / VPS
+    needs: [validate]
+    if: always() && (needs.validate.result == 'success' || needs.validate.result == 'skipped')
+    runs-on: ubuntu-latest
+
+    env:
+      SSH_HOST: ${{ secrets.SSH_HOST || secrets.EC2_HOST }}
+      SSH_USER: ${{ secrets.SSH_USER || secrets.EC2_USER || 'ubuntu' }}
+      SSH_KEY: ${{ secrets.SSH_KEY || secrets.EC2_SSH_KEY }}
+      SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
+      APP_DIR: ${{ secrets.APP_DIR || '~/TRADING-BOT' }}
+
+    steps:
+      - name: Check Deployment Credentials
+        id: check_creds
+        run: |
+          if [ -z "$SSH_HOST" ] || [ -z "$SSH_KEY" ]; then
+            echo "configured=false" >> $GITHUB_OUTPUT
+            echo "::warning ::SSH_HOST or SSH_KEY secret is not yet configured in GitHub Settings -> Secrets -> Actions."
+            echo "::notice ::To enable auto-deployment, add the following GitHub Secrets:"
+            echo "  - SSH_HOST: Your EC2 / VPS Public IP or Domain"
+            echo "  - SSH_USER: SSH Username (default: ubuntu or ec2-user)"
+            echo "  - SSH_KEY:  Private SSH Key (PEM format)"
+            echo "  - APP_DIR:  Remote repository directory (optional, default: ~/TRADING-BOT)"
+          else
+            echo "configured=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy via SSH
+        if: steps.check_creds.outputs.configured == 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ env.SSH_HOST }}
+          username: ${{ env.SSH_USER }}
+          key: ${{ env.SSH_KEY }}
+          port: ${{ env.SSH_PORT }}
+          timeout: 300s
+          command_timeout: 600s
+          script: |
+            set -e
+            TARGET_DIR="${{ env.APP_DIR }}"
+            # Expand tilde if present
+            TARGET_DIR="${TARGET_DIR/#\~/$HOME}"
+            
+            echo "=========================================================="
+            echo " Connecting to target host: $(hostname)"
+            echo " Navigating to app directory: $TARGET_DIR"
+            echo "=========================================================="
+            
+            if [ ! -d "$TARGET_DIR" ]; then
+              echo "Directory $TARGET_DIR does not exist. Creating and cloning..."
+              mkdir -p "$TARGET_DIR"
+              git clone https://github.com/${{ github.repository }}.git "$TARGET_DIR"
+            fi
+            
+            cd "$TARGET_DIR"
+            
+            # Ensure deploy script is executable and execute
+            chmod +x infrastructure/scripts/deploy.sh
+            ./infrastructure/scripts/deploy.sh

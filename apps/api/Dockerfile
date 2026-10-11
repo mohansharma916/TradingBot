@@ -9,7 +9,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
 COPY apps ./apps
 COPY packages ./packages
 
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --frozen-lockfile=false
 
 COPY infrastructure/scripts/copy-api-assets.cjs ./infrastructure/scripts/copy-api-assets.cjs
 
