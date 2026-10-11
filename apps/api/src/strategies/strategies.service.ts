@@ -20,7 +20,6 @@ import {
   StrategyTemplateItem,
   calculateStrategyVersionHash,
   fetchRealHistoricalCandles,
-  getStandardLotSize,
   requiresVersionBump,
   runStrategyBacktest,
 } from '@trading-bot/domain';
@@ -365,16 +364,14 @@ export class StrategiesService {
     }
 
     const underlying = reqDto?.underlying || strategy.underlying;
-    const interval = reqDto?.timeframe || strategy.timeframe;
+    const interval = (reqDto?.timeframe || strategy.timeframe || '5m') as BacktestRequest['timeframe'];
 
-    // Minimum loss budget needed to afford 1 exchange lot under the strategy's configured stop loss
-    const lotSize = getStandardLotSize(underlying);
-    const stopPts = strategy.astConfig?.exitRules?.stopLossValue ?? strategy.exit?.stopLossPoints ?? 8;
-    const minLotRisk = Math.ceil(stopPts * (lotSize > 0 ? lotSize : 65) + 100);
-    const maxTradeLoss = Math.max(parsedReq.maxTradeLossInr ?? 0, strategy.risk?.maxAllInTradeLossInr ?? 0, minLotRisk);
-    const maxDailyLoss = Math.max(parsedReq.maxDailyLossInr ?? 0, strategy.risk?.maxAllInDailyLossInr ?? 0, maxTradeLoss * 2);
+    // Respect requested and configured limits strictly without synthetic inflation
+    const maxTradeLoss = parsedReq.maxTradeLossInr ?? strategy.risk?.maxAllInTradeLossInr ?? 500;
+    const maxDailyLoss = parsedReq.maxDailyLossInr ?? strategy.risk?.maxAllInDailyLossInr ?? 1500;
+    const maxRoundTripCostBudget = strategy.risk?.maxRoundTripCostBudgetInr ?? strategy.maxRoundTripCostBudgetInr ?? 60;
 
-    // Keep strategy aligned with backtest request params and exchange lot sizing
+    // Keep strategy aligned with backtest request params and timeframe
     strategy = {
       ...strategy,
       underlying,
@@ -383,13 +380,14 @@ export class StrategiesService {
         ...strategy.risk,
         maxAllInTradeLossInr: maxTradeLoss,
         maxAllInDailyLossInr: maxDailyLoss,
-        maxRoundTripCostBudgetInr: Math.max(100, strategy.risk?.maxRoundTripCostBudgetInr ?? 100),
+        maxRoundTripCostBudgetInr: maxRoundTripCostBudget,
       },
-      maxRoundTripCostBudgetInr: Math.max(100, strategy.maxRoundTripCostBudgetInr ?? 100),
+      maxRoundTripCostBudgetInr: maxRoundTripCostBudget,
     };
 
     const effectiveReq: BacktestRequest = {
       ...parsedReq,
+      timeframe: interval,
       maxTradeLossInr: maxTradeLoss,
       maxDailyLossInr: maxDailyLoss,
     };

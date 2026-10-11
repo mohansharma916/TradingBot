@@ -129,8 +129,8 @@ export function aggregateTo5MinuteCandles(candles: Candle[]): Candle[] {
 
   const result: Candle[] = [];
   for (const [bucketTime, bucketCandles] of buckets.entries()) {
-    // Only count completed 5m bars (must contain 5 1m candles if fully closed, or at least 1)
-    if (bucketCandles.length > 0) {
+    // Only count completed 5m bars (must contain 5 1m candles to be considered complete)
+    if (bucketCandles.length >= 5) {
       const open = bucketCandles[0]!.open;
       const close = bucketCandles[bucketCandles.length - 1]!.close;
       const high = Math.max(...bucketCandles.map((b) => b.high));
@@ -553,10 +553,15 @@ export function runPriceActionMomentumBacktest(
     }
 
     // Evaluate signal using completed candles up to i-1, and breakout on candle i
+    const decisionTimeMs = Number(new Date(currentCandle.timestamp));
+    const causalFiveMinCandles = config.useMultiTimeframeConfirmation
+      ? fiveMinCandles.filter((c) => Number(new Date(c.timestamp)) + 300000 <= decisionTimeMs)
+      : [];
+
     const completedWindow = candles.slice(i - candleCount, i);
     const evalResult = evaluatePriceActionMomentum({
       oneMinuteCandles: completedWindow,
-      fiveMinuteCandles: fiveMinCandles,
+      fiveMinuteCandles: causalFiveMinCandles,
       currentPrice: currentCandle.close,
       config,
     });
@@ -566,6 +571,12 @@ export function runPriceActionMomentumBacktest(
       const spotEntry = currentCandle.close;
       const initialPremium = Number(Math.max(25, spotEntry * 0.0055).toFixed(2));
       const entryPrice = initialPremium;
+      const requiredCapital = entryPrice * lotSize;
+
+      // 1. Funding check: cannot enter if position premium exceeds available capital
+      if (requiredCapital > capital) {
+        continue;
+      }
 
       // Determine Stop Loss
       let stopLossPoints = config.stopLossValue;
@@ -577,10 +588,37 @@ export function runPriceActionMomentumBacktest(
         // Delta 0.5 conversion
         stopLossPoints = Number((spotRisk * 0.5).toFixed(2));
       }
-      // Risk budget cap check
-      const maxStopPoints = config.maxAllInTradeLossInr / lotSize;
-      stopLossPoints = Math.min(stopLossPoints, maxStopPoints);
+
+      // 2. All-in trade cap check with estimated round-trip charges
+      const estimatedRoundTripCharges = calculateOptionCharges({
+        buyPrice: entryPrice,
+        sellPrice: Math.max(tickSize, entryPrice - stopLossPoints),
+        quantity: lotSize,
+      }).totalRoundTripCharges;
+
+      const maxGrossRiskInr = Math.max(0, config.maxAllInTradeLossInr - estimatedRoundTripCharges);
+      let maxAllowedStopPoints = Math.floor((maxGrossRiskInr / lotSize) / tickSize) * tickSize;
+      
+      const actualChargesAtStop = calculateOptionCharges({
+        buyPrice: entryPrice,
+        sellPrice: Math.max(tickSize, entryPrice - maxAllowedStopPoints),
+        quantity: lotSize,
+      }).totalRoundTripCharges;
+
+      while (maxAllowedStopPoints >= tickSize && maxAllowedStopPoints * lotSize + actualChargesAtStop > config.maxAllInTradeLossInr) {
+        maxAllowedStopPoints = Math.max(0, Number((maxAllowedStopPoints - tickSize).toFixed(2)));
+      }
+      if (maxAllowedStopPoints < tickSize) {
+        continue;
+      }
+      stopLossPoints = Math.min(stopLossPoints, maxAllowedStopPoints);
       const stopLossPrice = Math.max(tickSize, Number((entryPrice - stopLossPoints).toFixed(2)));
+
+      // 3. Daily loss allowance check
+      const remainingDailyBudget = config.maxAllInDailyLossInr + dailyPnl;
+      if (stopLossPoints * lotSize + estimatedRoundTripCharges > remainingDailyBudget) {
+        continue;
+      }
 
       // Determine Target Profit
       const targetPoints = config.targetProfitType === 'RISK_REWARD'

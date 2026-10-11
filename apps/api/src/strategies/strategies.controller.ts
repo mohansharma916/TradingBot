@@ -59,16 +59,6 @@ export class StrategiesController {
     return this.strategiesService.archiveStrategy(id);
   }
 
-  @Post(':id/scan')
-  runAgentScan(@Param('id') id: string) {
-    return this.strategiesService.runAgentScan(id);
-  }
-
-  @Post(':id/backtest')
-  runBacktest(@Param('id') id: string, @Body() body: any) {
-    return this.strategiesService.runBacktest(id, body);
-  }
-
   @Post('price-action-momentum/evaluate')
   evaluatePriceActionMomentum(@Body() body: any) {
     return this.pamService.evaluateSignal(
@@ -87,6 +77,16 @@ export class StrategiesController {
   @Post('price-action-momentum/optimize')
   optimizePriceActionMomentum(@Body() body: any) {
     return this.pamService.runParameterOptimization(body.candles ?? [], body.config);
+  }
+
+  @Post(':id/scan')
+  runAgentScan(@Param('id') id: string) {
+    return this.strategiesService.runAgentScan(id);
+  }
+
+  @Post(':id/backtest')
+  runBacktest(@Param('id') id: string, @Body() body: any) {
+    return this.strategiesService.runBacktest(id, body);
   }
 }
 
