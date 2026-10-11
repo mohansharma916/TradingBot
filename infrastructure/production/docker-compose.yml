@@ -18,6 +18,7 @@ services:
 
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ../scripts/001_initial_schema.sql:/docker-entrypoint-initdb.d/001_initial_schema.sql:ro
 
     healthcheck:
       test:
