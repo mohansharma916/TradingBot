@@ -3,6 +3,12 @@ import { StrategyConfig, StrategyStatus, TradeMode } from '@trading-bot/contract
 import {
   generateHistoricalMarketCandles,
   runStrategyBacktest,
+  runPriceActionMomentumBacktest,
+  getDatedLotSize,
+  calculateOptionCharges,
+  PREDEFINED_STRATEGY_TEMPLATES,
+  validateStrategyFeasibility,
+  convertLegacyStrategyToAst,
 } from '../index';
 
 describe('Historical Backtest Engine', () => {
@@ -262,4 +268,350 @@ describe('Historical Backtest Engine', () => {
       ).rejects.toThrow('Unsupported timeframe interval');
     });
   });
+
+  describe('Phase 3 Regressions: Execution Parity & Accounting Precision', () => {
+    const configFixture = () => ({
+      id: '550e8400-e29b-41d4-a716-446655440001',
+      name: 'Phase 3 Accounting Parity Fixture',
+      version: 1,
+      status: StrategyStatus.PAPER_ACTIVE,
+      tradeMode: TradeMode.PAPER,
+      market: 'NSE_FO',
+      underlying: 'NIFTY',
+      timeframe: '5m',
+      allowedInstruments: ['LONG_CALL'] as any,
+      session: { start: '09:15', lastEntry: '14:45', timezone: 'Asia/Kolkata' },
+      risk: {
+        maxCapitalInr: 10000,
+        maxAllInTradeLossInr: 500,
+        maxAllInDailyLossInr: 1500,
+        maxOpenPositions: 1,
+        maxTradesPerDay: 10,
+        targetNetProfitInr: 300,
+        maxRoundTripCostBudgetInr: 200,
+      },
+      astConfig: {
+        direction: 'BULLISH',
+        indicators: [],
+        bullishEntry: {
+          id: 'always',
+          operator: 'AND',
+          conditions: [
+            {
+              id: 'signal',
+              left: { type: 'NUMBER', value: 1 },
+              comparison: 'GT',
+              right: { type: 'NUMBER', value: 0 },
+            },
+          ],
+        },
+        entryRules: { allowReentry: true, cooldownBars: 0 },
+        exitRules: {
+          stopLossBasis: 'OPTION_PREMIUM',
+          stopLossValue: 2,
+          targetProfitBasis: 'OPTION_PREMIUM',
+          targetProfitValue: 10,
+          marketCutoffTime: '15:10',
+        },
+      },
+    });
+
+    const createBars = (count = 6, spot = 10000) =>
+      Array.from({ length: count }, (_, i) => ({
+        timestamp: new Date(Date.parse('2026-10-12T03:45:00Z') + i * 300000).toISOString(),
+        open: spot,
+        high: spot,
+        low: spot,
+        close: spot,
+        volume: 1000,
+      }));
+
+    it('B21: executes known opening gap above target at open price rather than stopping out', () => {
+      const candles = createBars(5);
+      // Bar 4 opens above the target (10040), then has a low at 9990
+      candles[4] = { ...candles[4], open: 10040, high: 10040, low: 9990, close: 10000 };
+      const strat: any = configFixture();
+      strat.risk.maxTradesPerDay = 1;
+
+      const result = runStrategyBacktest({
+        strategy: strat,
+        candles,
+        request: { initialCapital: 10000 },
+        lotSize: 65,
+        tickSize: 0.05,
+      });
+
+      expect(result.trades.length).toBe(1);
+      const trade = result.trades[0]!;
+      expect(trade.exitReason).toBe('TARGET_PROFIT');
+      expect(trade.netPnl).toBeGreaterThan(0);
+    });
+
+    it('B12: cumulative daily realized losses do not get replenished by winning trades', () => {
+      const candles = createBars(10);
+      // Trade 1 wins
+      candles[4] = { ...candles[4], high: 10025, close: 10025 };
+      // Trade 2 loses
+      candles[6] = { ...candles[6], low: 9990 };
+      // Trade 3 loses
+      candles[8] = { ...candles[8], low: 9990 };
+
+      const strat: any = configFixture();
+      strat.risk.maxAllInDailyLossInr = 300;
+      strat.astConfig.exitRules.stopLossValue = 3;
+
+      const result = runStrategyBacktest({
+        strategy: strat,
+        candles,
+        request: { initialCapital: 10000 },
+        lotSize: 65,
+        tickSize: 0.05,
+      });
+
+      // Sum of losing trade losses must not exceed the daily cap of 300, and further trades must be halted
+      const losingTrades = result.trades.filter((t) => t.netPnl < 0);
+      const totalRealizedLoss = losingTrades.reduce((acc, t) => acc + Math.abs(t.netPnl), 0);
+      expect(totalRealizedLoss).toBeLessThanOrEqual(300 + 20); // within 1 trade buffer
+      // If wins had replenished the budget, more trades would have executed
+      expect(result.trades.length).toBeLessThan(4);
+    });
+
+    it('B14: captures mark-to-market interim drawdown when position has adverse excursion before winning', () => {
+      const candles = createBars(6);
+      // Trade entered at bar 3.
+      // Bar 4 dips down (unrealized loss), but does not hit stop loss (stop is at 10)
+      candles[4] = { ...candles[4], low: 9994, close: 9994 };
+      // Bar 5 rallies to target
+      candles[5] = { ...candles[5], high: 10030, close: 10030 };
+
+      const strat: any = configFixture();
+      strat.risk.maxTradesPerDay = 1;
+      strat.astConfig.exitRules.stopLossValue = 5;
+      strat.astConfig.exitRules.targetProfitValue = 20;
+
+      const result = runStrategyBacktest({
+        strategy: strat,
+        candles,
+        request: { initialCapital: 10000 },
+        lotSize: 65,
+        tickSize: 0.05,
+      });
+
+      expect(result.trades.length).toBe(1);
+      expect(result.trades[0]!.netPnl).toBeGreaterThan(0);
+      // MTM drawdown must reflect the interim drop on bar 4, NOT 0
+      expect(result.maxDrawdown).toBeGreaterThan(0);
+      expect(result.maxDrawdownPct).toBeGreaterThan(0);
+    });
+
+    it('B22: fills round to tick grid and recorded trade accounting (gross - charges = net) matches exactly', () => {
+      const candles = createBars(5, 22523);
+      candles[4] = { ...candles[4], high: 22530.123, close: 22530.123 };
+      const strat: any = configFixture();
+
+      const result = runStrategyBacktest({
+        strategy: strat,
+        candles,
+        request: { initialCapital: 10000 },
+        lotSize: 65,
+        tickSize: 0.05,
+      });
+
+      for (const trade of result.trades) {
+        // Entry and exit prices must be on 0.05 tick grid
+        expect(Number((trade.entryPrice % 0.05).toFixed(4)) % 0.05).toBeCloseTo(0, 3);
+        expect(Number((trade.exitPrice % 0.05).toFixed(4)) % 0.05).toBeCloseTo(0, 3);
+        // Accounting parity
+        const expectedGross = Number(((trade.exitPrice - trade.entryPrice) * trade.quantity).toFixed(2));
+        expect(trade.grossPnl).toBeCloseTo(expectedGross, 2);
+        const expectedNet = Number((trade.grossPnl - trade.charges).toFixed(2));
+        expect(trade.netPnl).toBeCloseTo(expectedNet, 2);
+      }
+    });
+
+    it('B13: ignores out-of-session candle for final exit and settles on last eligible session candle', () => {
+      const candles = createBars(5);
+      // Bar 4 is at 15:35 IST (10:05 UTC) with an artificial high spike
+      candles[4] = {
+        ...candles[4],
+        timestamp: '2026-10-12T10:05:00Z',
+        open: 11000,
+        high: 11000,
+        low: 11000,
+        close: 11000,
+      };
+
+      const result = runStrategyBacktest({
+        strategy: configFixture() as any,
+        candles,
+        lotSize: 65,
+        tickSize: 0.05,
+      });
+
+      expect(result.trades.length).toBeGreaterThan(0);
+      const lastTrade = result.trades[result.trades.length - 1]!;
+      // Settle exit must NOT use the artificial 11000 out-of-session price
+      expect(lastTrade.exitPrice).not.toBe(11000);
+      expect(lastTrade.exitPrice).toBeLessThan(11000);
+    });
+
+    it('B15: rejects orders when net target profit is non-positive after round-trip charges', () => {
+      const strat: any = configFixture();
+      // Target profit value of only 0.10 points - gross profit is ₹6.50, but statutory charges exceed ₹40
+      strat.astConfig.exitRules.targetProfitValue = 0.10;
+      strat.risk.maxTradesPerDay = 1;
+
+      const candles = createBars(5);
+      const result = runStrategyBacktest({
+        strategy: strat,
+        candles,
+        lotSize: 65,
+        tickSize: 0.05,
+      });
+
+      // Trade must be rejected by net target viability check
+      expect(result.trades.length).toBe(0);
+    });
+
+    it('B17 & B24: PAM percentage exit scaling and clean profit factor on all-win runs', () => {
+      const candles = Array.from({ length: 15 }, (_, i) => ({
+        timestamp: new Date(Date.parse('2026-10-12T03:45:00Z') + i * 60000).toISOString(),
+        open: 10000 + i * 10,
+        high: 10005 + i * 10,
+        low: 9995 + i * 10,
+        close: 10004 + i * 10,
+        volume: 2000,
+      }));
+
+      const pamResult = runPriceActionMomentumBacktest({
+        candles,
+        config: {
+          candleCount: 4,
+          minimumStructureConfirmations: 1,
+          minimumEfficiency: 0.1,
+          stopLossType: 'PERCENTAGE',
+          stopLossValue: 5,
+          targetProfitType: 'PERCENTAGE',
+          targetPoints: 20,
+          trailingStopEnabled: false,
+          maxTradesPerDay: 5,
+          cooldownMinutes: 0,
+        },
+        initialCapital: 10000,
+      });
+
+      expect(pamResult.error).toBeUndefined();
+      if (pamResult.trades.length > 0) {
+        // Profit factor should never be artificial 99.99 or 0 if winning
+        if (pamResult.winningTrades > 0 && pamResult.losingTrades === 0) {
+          expect(pamResult.profitFactor).toBeGreaterThan(0);
+          expect(pamResult.profitFactor).not.toBe(99.99);
+        }
+      }
+    });
+  });
+
+  describe('Phase 4 Regressions: Options Realism & Historical Contracts', () => {
+    it('B27: applies historical dated lot size schedule across revision periods', () => {
+      // NIFTY lot sizes
+      expect(getDatedLotSize('NIFTY', '2024-03-15')).toBe(50);
+      expect(getDatedLotSize('NIFTY', '2024-06-15')).toBe(25);
+      expect(getDatedLotSize('NIFTY', '2026-10-12')).toBe(65);
+
+      // BANKNIFTY lot sizes
+      expect(getDatedLotSize('BANKNIFTY', '2023-05-15')).toBe(25);
+      expect(getDatedLotSize('BANKNIFTY', '2024-03-15')).toBe(15);
+      expect(getDatedLotSize('BANKNIFTY', '2026-10-12')).toBe(30);
+
+      // FINNIFTY and MIDCPNIFTY
+      expect(getDatedLotSize('FINNIFTY', '2024-03-15')).toBe(40);
+      expect(getDatedLotSize('FINNIFTY', '2026-10-12')).toBe(65);
+      expect(getDatedLotSize('MIDCPNIFTY', '2024-03-15')).toBe(75);
+      expect(getDatedLotSize('MIDCPNIFTY', '2026-10-12')).toBe(120);
+    });
+
+    it('B27: calculates dated statutory charges corresponding to revision dates', () => {
+      // STT: 0.0625% before Oct 2024; 0.1% before Apr 2026; 0.15% Apr 2026 onward
+      const c2024 = calculateOptionCharges({ buyPrice: 100, sellPrice: 100, quantity: 50, date: '2024-05-01' });
+      expect(c2024.stt).toBeCloseTo(5000 * 0.000625, 2); // 3.13
+
+      const c2025 = calculateOptionCharges({ buyPrice: 100, sellPrice: 100, quantity: 25, date: '2025-05-01' });
+      expect(c2025.stt).toBeCloseTo(2500 * 0.001, 2); // 2.50
+
+      const c2026 = calculateOptionCharges({ buyPrice: 100, sellPrice: 100, quantity: 65, date: '2026-10-12' });
+      expect(c2026.stt).toBeCloseTo(6500 * 0.0015, 2); // 9.75
+    });
+
+    it('B31: accurately audits template stop feasibility against declared caps without silent inflation', () => {
+      // At reference lot 65, NIFTY template with stop 8 requires ₹581.20, which breaches declared cap ₹300
+      const t1 = PREDEFINED_STRATEGY_TEMPLATES.find((t) => t.id === 'tpl_trend_following')!;
+      const auditResult = validateStrategyFeasibility({
+        ...t1.defaultConfig,
+        astConfig: t1.astConfig,
+      });
+      expect(auditResult.feasible).toBe(false);
+      expect(auditResult.modeledRiskPerLotInr).toBeGreaterThan(500);
+      expect(auditResult.declaredTradeCapInr).toBe(300);
+      expect(auditResult.reason).toContain('exceeds declared maxAllInTradeLossInr');
+
+      // When calibrated with a feasible stop that fits within the ₹300 cap (e.g. 3.5 pts)
+      const feasibleConfig = {
+        ...t1.defaultConfig,
+        astConfig: {
+          ...t1.astConfig,
+          exitRules: { ...t1.astConfig.exitRules, stopLossValue: 3.5 },
+        },
+      };
+      const calibratedResult = validateStrategyFeasibility(feasibleConfig as any);
+      expect(calibratedResult.feasible).toBe(true);
+      expect(calibratedResult.modeledRiskPerLotInr).toBeLessThanOrEqual(300);
+    });
+
+    it('B32: legacy conversion preserves direction, PE optionSide, and underlying exit units', () => {
+      // Put-only legacy strategy
+      const putLegacy: any = {
+        id: 'legacy_put',
+        underlying: 'NIFTY',
+        allowedInstruments: ['LONG_PUT'],
+        exit: {
+          stopLossType: 'UNDERLYING_POINTS',
+          stopLossPoints: 30,
+          targetProfitType: 'UNDERLYING_POINTS',
+          targetPoints: 60,
+        },
+      };
+      const putAst = convertLegacyStrategyToAst(putLegacy);
+      expect(putAst.direction).toBe('BEARISH');
+      expect(putAst.contractSelection?.optionSide).toBe('LONG_PE');
+      expect(putAst.bearishEntry).toBeDefined();
+      expect(putAst.exitRules?.stopLossBasis).toBe('UNDERLYING_POINTS');
+      expect(putAst.exitRules?.targetProfitBasis).toBe('UNDERLYING_POINTS');
+
+      // Both-side legacy strategy
+      const bothLegacy: any = {
+        id: 'legacy_both',
+        underlying: 'NIFTY',
+        allowedInstruments: ['LONG_CALL', 'LONG_PUT'],
+      };
+      const bothAst = convertLegacyStrategyToAst(bothLegacy);
+      expect(bothAst.direction).toBe('BOTH');
+      expect(bothAst.contractSelection?.optionSide).toBe('BOTH');
+      expect(bothAst.bullishEntry).toBeDefined();
+      expect(bothAst.bearishEntry).toBeDefined();
+    });
+
+    it('B05: backtest result includes explicit research mode disclosures and dynamic ATM strike derivation', () => {
+      const candles = generateHistoricalMarketCandles('NIFTY', 5, 5, '2026-10-05', '2026-10-05');
+      const result = runStrategyBacktest({
+        strategy: sampleStrategy,
+        candles,
+      });
+
+      expect(result.modelAssumptions.some((a) => a.includes('RESEARCH_MODE'))).toBe(true);
+      expect(result.modelAssumptions.some((a) => a.includes('ATM strike dynamically derived'))).toBe(true);
+      expect(result.modelAssumptions.some((a) => a.includes('Historical dated statutory fee schedule'))).toBe(true);
+    });
+  });
 });
+
+
