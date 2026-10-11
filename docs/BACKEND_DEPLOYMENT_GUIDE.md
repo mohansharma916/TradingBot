@@ -61,8 +61,8 @@ exit
 Log back into your server:
 ```bash
 # Clone the repository
-git clone https://github.com/<YOUR_GITHUB_USER_OR_ORG>/TRADING-BOT.git ~/TRADING-BOT
-cd ~/TRADING-BOT
+git clone https://github.com/<YOUR_GITHUB_USER_OR_ORG>/TRADING-BOT.git ~/opt/fo-trading
+cd ~/opt/fo-trading
 
 # Configure your production environment file
 cp .env.example .env.production
@@ -100,7 +100,7 @@ Add the following 3 secrets:
 | `SSH_HOST` | `13.xxx.xxx.xxx` or `api.yourdomain.com` | Your EC2 Public IP or DNS |
 | `SSH_USER` | `ubuntu` | SSH login username (usually `ubuntu` or `ec2-user`) |
 | `SSH_KEY` | `-----BEGIN OPENSSH PRIVATE KEY-----...` | Your private SSH key (contents of your `.pem` file) |
-| `APP_DIR` | `~/TRADING-BOT` | *(Optional)* Path to the repo on the server |
+| `APP_DIR` | `~/opt/fo-trading` | *(Optional, default: `~/opt/fo-trading` or `/opt/fo-trading`)* |
 
 ---
 
@@ -116,6 +116,7 @@ Whenever you push code to `main` (or trigger the **Deploy Backend (EC2/VPS)** wo
 
 2. **Deployment Stage (`deploy`):**
    - Connects to your EC2 instance via encrypted SSH.
+   - Navigates to your app directory (`~/opt/fo-trading` or `/opt/fo-trading`).
    - Executes [`infrastructure/scripts/deploy.sh`](file:///Users/user/Documents/Projects/TRADING-BOT/infrastructure/scripts/deploy.sh).
    - Fetches and resets to the latest commit on `main`.
    - Runs `docker compose -f infrastructure/production/docker-compose.yml up -d --build --remove-orphans`.
@@ -128,7 +129,7 @@ Whenever you push code to `main` (or trigger the **Deploy Backend (EC2/VPS)** wo
 
 You can also trigger a deployment manually on the server at any time:
 ```bash
-cd ~/TRADING-BOT
+cd ~/opt/fo-trading   # or cd /opt/fo-trading
 ./infrastructure/scripts/deploy.sh
 ```
 

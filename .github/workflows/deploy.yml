@@ -63,7 +63,7 @@ jobs:
       SSH_USER: ${{ secrets.SSH_USER || secrets.EC2_USER || 'ubuntu' }}
       SSH_KEY: ${{ secrets.SSH_KEY || secrets.EC2_SSH_KEY }}
       SSH_PORT: ${{ secrets.SSH_PORT || '22' }}
-      APP_DIR: ${{ secrets.APP_DIR || '~/TRADING-BOT' }}
+      APP_DIR: ${{ secrets.APP_DIR || '~/opt/fo-trading' }}
 
     steps:
       - name: Check Deployment Credentials
@@ -76,7 +76,7 @@ jobs:
             echo "  - SSH_HOST: Your EC2 / VPS Public IP or Domain"
             echo "  - SSH_USER: SSH Username (default: ubuntu or ec2-user)"
             echo "  - SSH_KEY:  Private SSH Key (PEM format)"
-            echo "  - APP_DIR:  Remote repository directory (optional, default: ~/TRADING-BOT)"
+            echo "  - APP_DIR:  Remote repository directory (default: ~/opt/fo-trading or /opt/fo-trading)"
           else
             echo "configured=true" >> $GITHUB_OUTPUT
           fi
@@ -97,6 +97,13 @@ jobs:
             # Expand tilde if present
             TARGET_DIR="${TARGET_DIR/#\~/$HOME}"
             
+            # If specified directory doesn't exist, but /opt/fo-trading exists, fall back to /opt/fo-trading
+            if [ ! -d "$TARGET_DIR" ] && [ -d "/opt/fo-trading" ]; then
+              TARGET_DIR="/opt/fo-trading"
+            elif [ ! -d "$TARGET_DIR" ] && [ -d "$HOME/opt/fo-trading" ]; then
+              TARGET_DIR="$HOME/opt/fo-trading"
+            fi
+
             echo "=========================================================="
             echo " Connecting to target host: $(hostname)"
             echo " Navigating to app directory: $TARGET_DIR"
