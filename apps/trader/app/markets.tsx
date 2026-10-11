@@ -3,6 +3,7 @@ import { colors, spacing, borderRadius, typography } from '@trading-bot/ui';
 import { Badge } from '@trading-bot/ui';
 import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 
 interface OptionStrikeRow {
   strikePrice: number;
@@ -88,7 +89,7 @@ export default function MarketsScreen() {
           setFeedLatencyMs(diag.lastTickReceivedAt ? diag.feedLatencyMs : null);
           setIsFeedStale(diag.provenance !== 'LIVE' || diag.staleCount > 0);
         }
-      } catch (failure) { if (isMounted) { setIsLiveConnected(false); setDataSource('UNAVAILABLE'); setConnectionError(failure instanceof Error ? failure.message : 'Market data unavailable.'); } } finally {
+      } catch (failure) { if (isMounted) { setIsLiveConnected(false); setDataSource('UNAVAILABLE'); setConnectionError(formatErrorMessage(failure) || 'Market data unavailable.'); } } finally {
         if (isMounted) setIsRefreshing(false);
       }
     };
@@ -124,7 +125,7 @@ export default function MarketsScreen() {
           setSearchResults(res);
         }
       })
-      .catch((failure) => { if (isMounted) { setSearchResults([]); setConnectionError(failure instanceof Error ? failure.message : 'Instrument search unavailable.'); } });
+      .catch((failure) => { if (isMounted) { setSearchResults([]); setConnectionError(formatErrorMessage(failure) || 'Instrument search unavailable.'); } });
     return () => {
       isMounted = false;
     };

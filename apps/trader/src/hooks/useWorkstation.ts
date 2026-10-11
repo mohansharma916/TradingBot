@@ -1,6 +1,7 @@
 import { createContext, createElement, useState, useCallback, useEffect, useContext, useRef, ReactNode } from 'react';
 import { TradeMode, RiskState, RiskStatus, TradingModeSnapshot, FlattenPositionsResult } from '@trading-bot/contracts';
 import { apiClient } from '../services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 
 export interface WorkstationState {
   mode: TradeMode; riskState: RiskState; egressIpVerified: boolean;
@@ -29,7 +30,7 @@ function storeSession(session: { token: string; expiresAt: string } | null): voi
     }
   } catch { /* A browser that blocks storage keeps the session in memory. */ }
 }
-const message = (error: unknown) => error instanceof Error ? error.message : 'The trading API could not confirm this request.';
+const message = (error: unknown) => formatErrorMessage(error) || 'The trading API could not confirm this request.';
 
 function useWorkstationController() {
   const [state, setState] = useState<WorkstationState>(initialState);
@@ -67,7 +68,7 @@ function useWorkstationController() {
       if (currentRevision !== revision.current) return;
       setError(message(failure)); setState((current) => ({ ...current, isLiveSynced: false }));
       setSnapshot((current) => current ? { ...current, funds: { ...current.funds, availableCash: 0, status: 'UNAVAILABLE', source: 'UNAVAILABLE', verifiedAt: null } } : null);
-      if (message(failure).includes('API error 401')) clearSession();
+      if ((failure as any)?.status === 401 || (failure as any)?.statusCode === 401 || String(failure).includes('401')) clearSession();
     }
   }, [isAuthenticated, applyRiskStatus, clearSession]);
 

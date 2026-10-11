@@ -5,6 +5,7 @@ import {
 } from '@trading-bot/contracts';
 import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { apiClient } from '../services/api';
+import { formatErrorMessage } from '@trading-bot/client-sdk';
 
 export function useDailyBot() {
   const [today, setToday] = useState<DailyBotToday | null>(null);
@@ -27,7 +28,7 @@ export function useDailyBot() {
       }
     } catch (failure) {
       if (mounted.current && version === requestVersion.current) {
-        setConnectionError(failure instanceof Error ? failure.message : 'Could not connect to the trading API.');
+        setConnectionError(formatErrorMessage(failure) || 'Could not connect to the trading API.');
       }
     } finally {
       if (mounted.current && version === requestVersion.current) setLoading(false);
@@ -54,7 +55,7 @@ export function useDailyBot() {
       await refresh();
       return result;
     } catch (failure) {
-      if (mounted.current) setActionError(failure instanceof Error ? failure.message : 'The request failed.');
+      if (mounted.current) setActionError(formatErrorMessage(failure) || 'The request failed.');
       return null;
     } finally {
       mutationLock.current = false;

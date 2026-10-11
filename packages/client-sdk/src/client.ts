@@ -48,6 +48,61 @@ export interface ClientConfig {
   fetchFn?: typeof fetch;
 }
 
+/**
+ * Safely extracts a clean, human-readable error message from an API error or response payload,
+ * unpacking embedded JSON objects, joining validation arrays, and avoiding raw JSON display.
+ */
+export function formatErrorMessage(error: unknown): string {
+  if (!error) return 'An unexpected error occurred.';
+
+  // If error is an object with message/error/details properties directly
+  if (typeof error === 'object' && error !== null) {
+    const errObj = error as Record<string, any>;
+    if (Array.isArray(errObj.message) && errObj.message.length > 0) {
+      return errObj.message.join('; ');
+    }
+    if (typeof errObj.message === 'string' && errObj.message.trim()) {
+      return formatErrorMessage(errObj.message);
+    }
+    if (typeof errObj.error === 'string' && errObj.error.trim()) {
+      return formatErrorMessage(errObj.error);
+    }
+    if (typeof errObj.details === 'string' && errObj.details.trim()) {
+      return formatErrorMessage(errObj.details);
+    }
+  }
+
+  const raw = error instanceof Error ? error.message : String(error);
+
+  // Check if the message contains an embedded JSON block (e.g. `{"message":"...","statusCode":400}`)
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]);
+      if (parsed && typeof parsed === 'object') {
+        if (Array.isArray(parsed.message) && parsed.message.length > 0) {
+          return parsed.message.join('; ');
+        }
+        if (typeof parsed.message === 'string' && parsed.message.trim()) {
+          return parsed.message.trim();
+        }
+        if (typeof parsed.error === 'string' && parsed.error.trim()) {
+          return parsed.error.trim();
+        }
+        if (typeof parsed.details === 'string' && parsed.details.trim()) {
+          return parsed.details.trim();
+        }
+      }
+    } catch {
+      // Ignore JSON parse failure
+    }
+  }
+
+  // Strip generic "API error <status> on <endpoint>:" prefix if present
+  const cleaned = raw.replace(/^API error \d{3} on [^:]+:\s*/i, '').trim();
+  return cleaned || raw;
+}
+
 export class TradingPlatformClient {
   private baseUrl: string;
   private authToken?: string;
@@ -115,7 +170,35 @@ export class TradingPlatformClient {
 
     if (!response.ok) {
       const errorBody = await response.text().catch(() => '');
-      throw new Error(`API error ${response.status} on ${endpoint}: ${errorBody}`);
+      let cleanMessage: string | null = null;
+      try {
+        const parsed = JSON.parse(errorBody);
+        if (parsed && typeof parsed === 'object') {
+          if (Array.isArray(parsed.message) && parsed.message.length > 0) {
+            cleanMessage = parsed.message.join('; ');
+          } else if (typeof parsed.message === 'string' && parsed.message.trim()) {
+            cleanMessage = parsed.message.trim();
+          } else if (typeof parsed.error === 'string' && parsed.error.trim()) {
+            cleanMessage = parsed.error.trim();
+          } else if (typeof parsed.details === 'string' && parsed.details.trim()) {
+            cleanMessage = parsed.details.trim();
+          }
+        }
+      } catch {
+        if (errorBody.includes('<html') || errorBody.includes('<!DOCTYPE')) {
+          cleanMessage = response.statusText || 'Server gateway error';
+        } else if (errorBody.trim()) {
+          cleanMessage = errorBody.trim();
+        }
+      }
+
+      const finalMessage = cleanMessage || response.statusText || `Request failed with status ${response.status}`;
+      const err = new Error(`API error ${response.status} on ${endpoint}: ${finalMessage}`);
+      (err as any).status = response.status;
+      (err as any).statusCode = response.status;
+      (err as any).endpoint = endpoint;
+      (err as any).rawBody = errorBody;
+      throw err;
     }
 
     return response.json() as Promise<T>;
