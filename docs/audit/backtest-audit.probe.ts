@@ -38,7 +38,7 @@ describe('Backtest Phase 1: verified regressions for causality and risk protecti
 
   it('PAM rejects unfunded positions and respects all-in loss cap', () => {
     const candles = bars(7);
-    candles.push({ ...bars(1)[0]!, timestamp: '2026-10-12T03:52:00Z', open: 9800, high: 9801, low: 9799, close: 9800 });
+    candles.push({ ...bars(1)[0]!, timestamp: '2026-10-12T03:52:00Z', open: 10065, high: 10070, low: 10045, close: 10050 });
     const unfunded = runPriceActionMomentumBacktest({ candles, config: pamConfig, initialCapital: 1 });
     expect(unfunded.trades.length).toBe(0);
 

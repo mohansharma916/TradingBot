@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject, Optional } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional, BadRequestException } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import {
   AgentType,
@@ -245,12 +245,24 @@ export class PriceActionMomentumService {
   }
 
   /**
-   * Phase 9 Parameter optimization matrix across lookback windows, efficiency, and MTF confirmation.
+   * Parameter optimization matrix across lookback windows, efficiency, and MTF confirmation.
+   * Includes chronological walk-forward out-of-sample (OOS) validation (B29) to detect overfitting.
    */
   public runParameterOptimization(
     candles: Candle[],
     baseConfig?: Partial<PriceActionMomentumConfig>,
+    options?: { inSampleRatio?: number },
   ) {
+    if (candles.length > 10000) {
+      throw new BadRequestException(`Input dataset exceeds maximum bound of 10,000 candles (${candles.length} provided).`);
+    }
+
+    const inSampleRatio = Math.min(0.9, Math.max(0.5, options?.inSampleRatio ?? 0.7));
+    const canSplit = candles.length >= 20;
+    const splitIndex = canSplit ? Math.floor(candles.length * inSampleRatio) : candles.length;
+    const inSampleCandles = candles.slice(0, splitIndex);
+    const outOfSampleCandles = canSplit ? candles.slice(splitIndex) : [];
+
     const candleWindows = [4, 6, 8, 10];
     const efficiencyThresholds = [0.5, 0.6, 0.7, 0.8];
     const mtfOptions = [false, true];
@@ -264,20 +276,73 @@ export class PriceActionMomentumService {
       netPnl: number;
       maxDrawdownPct: number;
       expectancy: number;
+      inSample?: {
+        netPnl: number;
+        winRatePct: number;
+        profitFactor: number;
+        totalTrades: number;
+      };
+      outOfSample?: {
+        netPnl: number;
+        winRatePct: number;
+        profitFactor: number;
+        totalTrades: number;
+      };
+      degradationRatio?: number;
+      overfitWarning?: boolean;
     }> = [];
 
     for (const count of candleWindows) {
       for (const eff of efficiencyThresholds) {
         for (const mtf of mtfOptions) {
+          const cfg = {
+            ...baseConfig,
+            candleCount: count,
+            minimumEfficiency: eff,
+            useMultiTimeframeConfirmation: mtf,
+          };
+
           const run = runPriceActionMomentumBacktest({
             candles,
-            config: {
-              ...baseConfig,
-              candleCount: count,
-              minimumEfficiency: eff,
-              useMultiTimeframeConfirmation: mtf,
-            },
+            config: cfg,
           });
+
+          let inSampleData: any = undefined;
+          let oosData: any = undefined;
+          let degradationRatio = 1;
+          let overfitWarning = false;
+
+          if (canSplit && outOfSampleCandles.length >= 5) {
+            const inRun = runPriceActionMomentumBacktest({
+              candles: inSampleCandles,
+              config: cfg,
+            });
+            const oosRun = runPriceActionMomentumBacktest({
+              candles: outOfSampleCandles,
+              config: cfg,
+            });
+
+            inSampleData = {
+              netPnl: inRun.netPnl,
+              winRatePct: inRun.winRatePct,
+              profitFactor: inRun.profitFactor,
+              totalTrades: inRun.totalTrades,
+            };
+            oosData = {
+              netPnl: oosRun.netPnl,
+              winRatePct: oosRun.winRatePct,
+              profitFactor: oosRun.profitFactor,
+              totalTrades: oosRun.totalTrades,
+            };
+
+            if (inRun.netPnl > 0) {
+              degradationRatio = Number((oosRun.netPnl / inRun.netPnl).toFixed(2));
+              overfitWarning = oosRun.netPnl <= 0 || degradationRatio < 0.2;
+            } else {
+              degradationRatio = 0;
+              overfitWarning = false;
+            }
+          }
 
           results.push({
             candleCount: count,
@@ -289,6 +354,10 @@ export class PriceActionMomentumService {
             netPnl: run.netPnl,
             maxDrawdownPct: run.maxDrawdownPct,
             expectancy: run.expectancy,
+            inSample: inSampleData,
+            outOfSample: oosData,
+            degradationRatio,
+            overfitWarning,
           });
         }
       }

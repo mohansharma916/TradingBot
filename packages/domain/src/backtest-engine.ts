@@ -27,6 +27,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     `ATM strike dynamically derived from underlying spot (${strategy.underlying === 'BANKNIFTY' ? '100-pt' : '50-pt'} grid); delta fixed at 0.5.`,
     'Historical dated statutory fee schedule applied based on trade session timestamp.',
     'Intrabar known opening gaps execute at open; stops precede targets under intrabar ambiguity.',
+    'Market cutoff is strictly enforced; candles spanning cutoff exit at cutoff boundary rather than claiming post-cutoff targets.',
     'Simulated performance on modeled options does not establish a verified profitable live trading edge.',
   ];
   let tradeStartMs = -Infinity;
@@ -204,7 +205,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     drawdownPct = Math.max(drawdownPct, peakEquity > 0 ? ((peakEquity - currentEquity) / peakEquity) * 100 : 0);
   };
 
-  const protect = (c: Candle, index: number) => {
+  const protect = (c: Candle, index: number, splitsCutoff = false) => {
     if (!active) return;
     const p = prices(c);
     const closeTime = new Date(Number(new Date(c.timestamp)) + interval).toISOString();
@@ -222,6 +223,11 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     // 2. Intrabar price extremes
     if (p.low <= active.stop) {
       settle(active.stop, closeTime, active.trailing ? 'TRAILING_STOP_LOSS' : 'STOP_LOSS', index);
+      return;
+    }
+    // B33: If candle spans across cutoff, do not claim target occurring after cutoff boundary
+    if (splitsCutoff) {
+      settle(p.close, closeTime, 'TIME_CUTOFF', index);
       return;
     }
     if (p.high >= active.target) {
@@ -277,10 +283,13 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     }
     if (active) {
       const opposite = active.type === 'CE' ? bearish : bullish;
+      const closeTimeIst = istTime(Number(new Date(c.timestamp)) + interval);
       if (time >= cutoff || (ast.exitRules?.exitOnOppositeSignal && opposite)) {
         settle(prices(c).open, iso(c.timestamp), time >= cutoff ? 'TIME_CUTOFF' : 'OPPOSITE_SIGNAL', i);
+      } else if (time < cutoff && closeTimeIst > cutoff) {
+        protect(c, i, true);
       } else {
-        protect(c, i);
+        protect(c, i, false);
       }
     }
     if (active || lastExitIndex === i) continue;

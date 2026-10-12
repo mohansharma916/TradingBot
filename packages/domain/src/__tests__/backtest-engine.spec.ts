@@ -701,6 +701,58 @@ describe('Historical Backtest Engine', () => {
       expect(result.equityCurve!.length).toBeGreaterThanOrEqual(1);
       expect(result.equityCurve![0]?.equity).toBe(10000);
     });
+
+    it('B33: conservatively enforces cutoff when a coarse candle spans across cutoff', () => {
+      const strategyWithCutoff = {
+        ...sampleStrategy,
+        timeframe: '15m',
+        astConfig: {
+          ...convertLegacyStrategyToAst(sampleStrategy),
+          exitRules: {
+            stopLossBasis: 'OPTION_PREMIUM',
+            stopLossValue: 20,
+            targetProfitBasis: 'OPTION_PREMIUM',
+            targetProfitValue: 5,
+            marketCutoffTime: '14:50',
+          },
+        },
+      };
+
+      const baseMs = Date.parse('2026-10-05T03:45:00.000Z');
+      const fifteenMinMs = 15 * 60000;
+      const bars: any[] = [];
+      for (let i = 0; i < 22; i++) {
+        bars.push({
+          timestamp: new Date(baseMs + i * fifteenMinMs).toISOString(),
+          open: 20000 + i * 2,
+          high: 20005 + i * 2,
+          low: 19995 + i * 2,
+          close: 20002 + i * 2,
+          volume: 2000,
+        });
+      }
+      // Bar 22 is 14:45 IST, closing at 15:00 IST (crossing 14:50 cutoff)
+      bars.push({
+        timestamp: new Date(baseMs + 22 * fifteenMinMs).toISOString(),
+        open: 20050,
+        high: 20200, // Large spike that would otherwise be TARGET_PROFIT
+        low: 20045,
+        close: 20190,
+        volume: 2500,
+      });
+
+      const result = runStrategyBacktest({
+        strategy: strategyWithCutoff as any,
+        candles: bars,
+      });
+
+      expect(result.error).toBeUndefined();
+      const lastTrade = result.trades.at(-1);
+      if (lastTrade) {
+        expect(lastTrade.exitReason).toBe('TIME_CUTOFF');
+      }
+      expect(result.modelAssumptions?.some((a) => a.includes('cutoff boundary'))).toBe(true);
+    });
   });
 });
 

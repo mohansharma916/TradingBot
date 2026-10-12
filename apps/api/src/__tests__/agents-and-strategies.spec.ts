@@ -211,7 +211,53 @@ describe('Agents, Tools & Strategy Engine (Phase 2)', () => {
       vi.stubGlobal('fetch',vi.fn().mockRejectedValue(new Error('Historical provider unavailable')));
       await expect(strategiesService.runBacktest(created.id,{days:7,initialCapital:10000,underlying:'BANKNIFTY'})).rejects.toThrow('No synthetic data was substituted');
       vi.unstubAllGlobals();
+    });
 
+    it('B30: rejects backtest request date range exceeding 90 days', async () => {
+      await expect(
+        strategiesService.runBacktest('tpl_price_action_momentum', {
+          fromDate: '2026-01-01',
+          toDate: '2026-06-01',
+        }),
+      ).rejects.toThrow('exceeds maximum allowable synchronous duration of 90 days');
+    });
+
+    it('B06: dispatches PAM template to canonical price-action-momentum simulator', async () => {
+      const fromDate = '2026-10-05';
+      const toDate = '2026-10-05';
+      const baseMs = Date.parse('2026-10-05T03:45:00.000Z');
+      const upstoxCandles = Array.from({ length: 30 }, (_, i) => [
+        new Date(baseMs + i * 300000).toISOString(),
+        24000 + i * 5,
+        24010 + i * 5,
+        23995 + i * 5,
+        24005 + i * 5,
+        2000,
+        0,
+      ]);
+
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            status: 'success',
+            data: {
+              candles: upstoxCandles,
+            },
+          }),
+        }),
+      );
+
+      const res = await strategiesService.runBacktest('tpl_price_action_momentum', {
+        initialCapital: 10000,
+        fromDate,
+        toDate,
+      });
+
+      expect(res.strategyId).toBe('tpl_price_action_momentum');
+      expect(res).toHaveProperty('expectancy');
+      vi.unstubAllGlobals();
     });
   });
 });

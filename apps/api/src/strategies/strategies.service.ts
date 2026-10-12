@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, Inject, Optional } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Inject, Optional } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -20,7 +20,9 @@ import {
   StrategyTemplateItem,
   calculateStrategyVersionHash,
   fetchRealHistoricalCandles,
+  getDatedLotSize,
   requiresVersionBump,
+  runPriceActionMomentumBacktest,
   runStrategyBacktest,
 } from '@trading-bot/domain';
 import { TokenStorageService } from '../broker/token-storage.service';
@@ -374,6 +376,18 @@ export class StrategiesService {
     const underlying = reqDto?.underlying || strategy.underlying;
     const interval = (reqDto?.timeframe || strategy.timeframe || '5m') as BacktestRequest['timeframe'];
 
+    // B30: Bound input date ranges to prevent synchronous event-loop starvation
+    if (parsedReq.fromDate && parsedReq.toDate) {
+      const spanMs = Date.parse(parsedReq.toDate) - Date.parse(parsedReq.fromDate);
+      if (spanMs < 0) {
+        throw new BadRequestException('fromDate must be earlier than or equal to toDate.');
+      }
+      const spanDays = Math.ceil(spanMs / 86400000);
+      if (spanDays > 90) {
+        throw new BadRequestException(`Requested backtest range (${spanDays} days) exceeds maximum allowable synchronous duration of 90 days.`);
+      }
+    }
+
     // Respect requested and configured limits strictly without synthetic inflation
     const maxTradeLoss = parsedReq.maxTradeLossInr ?? strategy.risk?.maxAllInTradeLossInr ?? 500;
     const maxDailyLoss = parsedReq.maxDailyLossInr ?? strategy.risk?.maxAllInDailyLossInr ?? 1500;
@@ -410,6 +424,26 @@ export class StrategiesService {
       fromDate: parsedReq.fromDate,
       toDate: parsedReq.toDate,
     });
+
+    if (candles.length > 10000) {
+      throw new BadRequestException(`Historical candle count (${candles.length}) exceeds safe single-run execution limit of 10,000 bars.`);
+    }
+
+    // B06: Canonical PAM strategy dispatch ensuring genuine trend efficiency and structure rules
+    if (strategy.id === 'tpl_price_action_momentum' || strategy.templateId === 'tpl_price_action_momentum') {
+      const lotSize = getDatedLotSize(underlying, candles[0]?.timestamp);
+      const pamResult = runPriceActionMomentumBacktest({
+        candles,
+        initialCapital: parsedReq.initialCapital,
+        lotSize,
+      });
+      return {
+        ...pamResult,
+        strategyId: strategy.id,
+        strategyName: strategy.name,
+        dataSource,
+      };
+    }
 
     return runStrategyBacktest({
       strategy,
