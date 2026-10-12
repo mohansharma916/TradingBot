@@ -45,7 +45,6 @@ export function buildIndicatorCache(
     warmupRequired: 20,
   };
 
-  const closes = candles.map((c) => c.close);
   const volumes = candles.map((c) => c.volume);
 
   let maxWarmup = 2;
@@ -75,7 +74,8 @@ export function buildIndicatorCache(
       }
 
       case IndicatorType.RSI: {
-        const series = calculateRSI(closes, period);
+        const sourceData = getSourceSeries(candles, ind.source);
+        const series = calculateRSI(sourceData, period);
         const padded = padSeries(series, candles.length);
         cache.indicatorSeries.set(id, padded);
         if (period + 1 > maxWarmup) maxWarmup = period + 1;
@@ -93,7 +93,8 @@ export function buildIndicatorCache(
 
       case IndicatorType.BOLLINGER_BANDS: {
         const mult = ind.stdDevMultiplier ?? 2;
-        const bb = calculateBollingerBands(closes, period, mult);
+        const sourceData = getSourceSeries(candles, ind.source);
+        const bb = calculateBollingerBands(sourceData, period, mult);
         cache.multiFieldSeries.set(id, {
           upper: padSeries(bb.upper, candles.length),
           middle: padSeries(bb.middle, candles.length),
@@ -107,7 +108,8 @@ export function buildIndicatorCache(
         const fast = ind.fastPeriod ?? 12;
         const slow = ind.slowPeriod ?? 26;
         const signal = ind.signalPeriod ?? 9;
-        const macd = calculateMACD(closes, fast, slow, signal);
+        const sourceData = getSourceSeries(candles, ind.source);
+        const macd = calculateMACD(sourceData, fast, slow, signal);
         cache.multiFieldSeries.set(id, {
           macd: padSeries(macd.macd, candles.length),
           signal: padSeries(macd.signal, candles.length),
@@ -249,7 +251,7 @@ export function resolveOperandValue(
 
   if (operand.type === 'NUMBER') {
     const base = operand.value ?? 0;
-    return operand.multiplier ? base * operand.multiplier : base;
+    return operand.multiplier !== undefined ? base * operand.multiplier : base;
   }
 
   const offset = operand.offset ?? 0;
@@ -305,7 +307,7 @@ export function resolveOperandValue(
     return null;
   }
 
-  return operand.multiplier ? value * operand.multiplier : value;
+  return operand.multiplier !== undefined ? value * operand.multiplier : value;
 }
 
 /**
@@ -532,9 +534,107 @@ export function convertLegacyStrategyToAst(strategy: StrategyConfig): StrategyAs
   const rsiPeriod = strategy.entry?.rsiPeriod ?? 14;
   const rsiThreshold = strategy.entry?.rsiThreshold ?? 55;
 
+  const allowed = (strategy.allowedInstruments as any[]) ?? [];
+  const hasCall = allowed.some((i) => String(i).toUpperCase().includes('CALL') || String(i).toUpperCase().includes('CE'));
+  const hasPut = allowed.some((i) => String(i).toUpperCase().includes('PUT') || String(i).toUpperCase().includes('PE'));
+  const rawSelection = (strategy.selection as any) ?? {};
+  const optionType = rawSelection.optionType?.toUpperCase();
+
+  let direction = TradeDirection.BULLISH;
+  let optionSide: 'LONG_CE' | 'LONG_PE' | 'BOTH' = 'LONG_CE';
+
+  if ((hasPut && !hasCall) || optionType === 'PE') {
+    direction = TradeDirection.BEARISH;
+    optionSide = 'LONG_PE';
+  } else if ((hasPut && hasCall) || optionType === 'BOTH') {
+    direction = TradeDirection.BOTH;
+    optionSide = 'BOTH';
+  }
+
+  const bullishEntry = (direction === TradeDirection.BULLISH || direction === TradeDirection.BOTH)
+    ? {
+        id: 'legacy_bullish_group',
+        operator: LogicalOperator.AND,
+        enabled: true,
+        conditions: [
+          {
+            id: 'cond_price_gt_ema',
+            left: { type: 'CANDLE_FIELD' as const, field: 'close' as const, offset: 0 },
+            comparison: ComparisonOperator.GT,
+            right: { type: 'INDICATOR' as const, indicatorId: 'ema_trend', offset: 0 },
+            enabled: true,
+            description: `Close above EMA ${emaPeriod}`,
+          },
+          {
+            id: 'cond_rsi_threshold',
+            left: { type: 'INDICATOR' as const, indicatorId: 'rsi_filter', offset: 0 },
+            comparison: ComparisonOperator.GTE,
+            right: { type: 'NUMBER' as const, value: rsiThreshold },
+            enabled: true,
+            description: `RSI >= ${rsiThreshold}`,
+          },
+        ],
+      }
+    : undefined;
+
+  const bearishEntry = (direction === TradeDirection.BEARISH || direction === TradeDirection.BOTH)
+    ? {
+        id: 'legacy_bearish_group',
+        operator: LogicalOperator.AND,
+        enabled: true,
+        conditions: [
+          {
+            id: 'cond_price_lt_ema',
+            left: { type: 'CANDLE_FIELD' as const, field: 'close' as const, offset: 0 },
+            comparison: ComparisonOperator.LT,
+            right: { type: 'INDICATOR' as const, indicatorId: 'ema_trend', offset: 0 },
+            enabled: true,
+            description: `Close below EMA ${emaPeriod}`,
+          },
+          {
+            id: 'cond_rsi_bear_threshold',
+            left: { type: 'INDICATOR' as const, indicatorId: 'rsi_filter', offset: 0 },
+            comparison: ComparisonOperator.LTE,
+            right: { type: 'NUMBER' as const, value: 100 - rsiThreshold },
+            enabled: true,
+            description: `RSI <= ${100 - rsiThreshold}`,
+          },
+        ],
+      }
+    : undefined;
+
+  const rawExit = (strategy.exit as any) ?? {};
+  let stopLossBasis: any = rawExit.stopLossBasis;
+  if (!stopLossBasis) {
+    if (
+      rawExit.stopLossType === 'UNDERLYING_POINTS' ||
+      rawExit.stopBasis === 'UNDERLYING_LEVEL'
+    ) {
+      stopLossBasis = 'UNDERLYING_POINTS';
+    } else if (rawExit.stopLossType === 'PERCENTAGE') {
+      stopLossBasis = 'PERCENTAGE';
+    } else {
+      stopLossBasis = 'OPTION_PREMIUM';
+    }
+  }
+
+  let targetProfitBasis: any = rawExit.targetProfitBasis;
+  if (!targetProfitBasis) {
+    if (
+      rawExit.targetProfitType === 'UNDERLYING_POINTS' ||
+      rawExit.targetBasis === 'UNDERLYING_LEVEL'
+    ) {
+      targetProfitBasis = 'UNDERLYING_POINTS';
+    } else if (rawExit.targetProfitType === 'PERCENTAGE') {
+      targetProfitBasis = 'PERCENTAGE';
+    } else {
+      targetProfitBasis = 'OPTION_PREMIUM';
+    }
+  }
+
   return {
     category: 'TREND',
-    direction: TradeDirection.BULLISH,
+    direction,
     indicators: [
       {
         id: 'ema_trend',
@@ -549,38 +649,22 @@ export function convertLegacyStrategyToAst(strategy: StrategyConfig): StrategyAs
         source: 'close',
       },
     ],
-    bullishEntry: {
+    bullishEntry: bullishEntry ?? {
       id: 'legacy_bullish_group',
       operator: LogicalOperator.AND,
-      enabled: true,
-      conditions: [
-        {
-          id: 'cond_price_gt_ema',
-          left: { type: 'CANDLE_FIELD', field: 'close', offset: 0 },
-          comparison: ComparisonOperator.GT,
-          right: { type: 'INDICATOR', indicatorId: 'ema_trend', offset: 0 },
-          enabled: true,
-          description: `Close above EMA ${emaPeriod}`,
-        },
-        {
-          id: 'cond_rsi_threshold',
-          left: { type: 'INDICATOR', indicatorId: 'rsi_filter', offset: 0 },
-          comparison: ComparisonOperator.GTE,
-          right: { type: 'NUMBER', value: rsiThreshold },
-          enabled: true,
-          description: `RSI >= ${rsiThreshold}`,
-        },
-      ],
+      enabled: false,
+      conditions: [],
     },
+    bearishEntry,
     entryRules: {
       candleCloseConfirmation: true,
       confirmingCandles: 1,
     },
     contractSelection: {
       instrumentType: 'OPTIONS',
-      optionSide: 'LONG_CE',
+      optionSide,
       underlying: strategy.underlying || 'NIFTY',
-      expiry: strategy.selection?.expiry as any || 'NEAREST_ELIGIBLE',
+      expiry: (strategy.selection?.expiry as any) || 'NEAREST_ELIGIBLE',
       strikeSelection: StrikeSelection.ATM,
       strikeDistance: 0,
       minVolume: strategy.selection?.minVolume ?? 1000,
@@ -589,10 +673,10 @@ export function convertLegacyStrategyToAst(strategy: StrategyConfig): StrategyAs
       maxPremium: 600,
     },
     exitRules: {
-      stopLossBasis: 'OPTION_PREMIUM',
-      stopLossValue: strategy.exit?.stopLossPoints,
-      targetProfitBasis: 'OPTION_PREMIUM',
-      targetProfitValue: strategy.exit?.targetPoints,
+      stopLossBasis,
+      stopLossValue: rawExit.stopLossPoints ?? rawExit.stopLossPct,
+      targetProfitBasis,
+      targetProfitValue: rawExit.targetPoints ?? rawExit.profitTargetPct,
       marketCutoffTime: strategy.exit?.marketCutoff ?? '15:10',
       exitOnOppositeSignal: false,
       exitOnIndicatorReversal: false,

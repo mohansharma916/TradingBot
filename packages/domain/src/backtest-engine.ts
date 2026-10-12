@@ -1,7 +1,7 @@
 import { AllowedOptionType, BacktestRequest, BacktestResult, BacktestTradeRecord, StrategyConfig, TrailingProfitMode } from '@trading-bot/contracts';
 import { calculateOptionCharges } from './charges';
 import { Candle } from './indicators';
-import { getStandardLotSize } from './lot-size';
+import { getDatedLotSize } from './lot-size';
 import { buildIndicatorCache, convertLegacyStrategyToAst, evaluateStrategyAst } from './strategy-rule-evaluator';
 import { strategyExitLevels, strategyTimeframeMinutes } from './strategy-evaluator';
 import { isMarketOpenForTrading, isCalendarVerifiedForDate, getIstDateTime } from './market-calendar';
@@ -13,15 +13,23 @@ const istTime = (timestamp:string | number) => new Date(Number(new Date(timestam
 /** Research simulation of option premiums from underlying candles; never historical option fills. */
 export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const {strategy,request} = options;
-  const lotSize = options.lotSize ?? getStandardLotSize(strategy.underlying);
-  const tickSize = options.tickSize ?? 0.05;
   const timeframe = request?.timeframe ?? strategy.timeframe ?? '5m';
   const interval = strategyTimeframeMinutes(timeframe) * 60000;
   const initialCapital = request?.initialCapital ?? strategy.risk?.maxCapitalInr ?? strategy.maxCapitalInr ?? 10000;
   const source = options.dataSource ?? 'CALLER_SUPPLIED_UNVERIFIED_CANDLES';
   const dataSource = `MODELED_OPTIONS_ON_${source}`;
-  const modelAssumptions = ['Underlying candles are input data; all option contracts, prices and fills are modeled.', 'ATM premium = 0.55% of spot, fixed delta = 0.5; IV, theta, expiry and real option depth are absent.', 'One tick each side models spread; intrabar stops precede targets and trailing updates only after the bar closes.', 'Current fee rates are estimates; simulated performance does not establish a profitable trading edge.'];
   let candles = [...(options.candles ?? [])].sort((a,b)=>Number(new Date(a.timestamp))-Number(new Date(b.timestamp)));
+  const firstCandleDate = candles[0]?.timestamp;
+  const lotSize = options.lotSize ?? getDatedLotSize(strategy.underlying, firstCandleDate);
+  const tickSize = options.tickSize ?? 0.05;
+  const modelAssumptions = [
+    'RESEARCH_MODE: Underlying candles drive simulation; all option contracts, prices and fills are modeled.',
+    `ATM strike dynamically derived from underlying spot (${strategy.underlying === 'BANKNIFTY' ? '100-pt' : '50-pt'} grid); delta fixed at 0.5.`,
+    'Historical dated statutory fee schedule applied based on trade session timestamp.',
+    'Intrabar known opening gaps execute at open; stops precede targets under intrabar ambiguity.',
+    'Market cutoff is strictly enforced; candles spanning cutoff exit at cutoff boundary rather than claiming post-cutoff targets.',
+    'Simulated performance on modeled options does not establish a verified profitable live trading edge.',
+  ];
   let tradeStartMs = -Infinity;
   let tradeEndMs = Infinity;
   let fromDate = candles[0] ? iso(candles[0].timestamp) : new Date().toISOString();
@@ -34,7 +42,38 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     fromDate = `${dates[0]}T00:00:00.000Z`;
     toDate = `${dates[1]}T23:59:59.999Z`;
   }
-  const empty:BacktestResult = {strategyId:strategy.id,strategyName:strategy.name,version:strategy.version,periodDays:Math.max(1,Math.ceil((Date.parse(toDate)-Date.parse(fromDate))/86400000)),timeframe,fromDate,toDate,dataSource,modelAssumptions,initialCapital,finalCapital:initialCapital,totalTrades:0,winningTrades:0,losingTrades:0,winRatePct:0,grossPnl:0,totalCharges:0,netPnl:0,maxDrawdown:0,maxDrawdownPct:0,profitFactor:0,trades:[]};
+  const runId = `bt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const dataFingerprint = `${candles.length}_bars:${candles[0]?.timestamp ?? 'none'}..${candles.at(-1)?.timestamp ?? 'none'}`;
+  const empty:BacktestResult = {
+    strategyId:strategy.id,
+    strategyName:strategy.name,
+    version:strategy.version,
+    periodDays:Math.max(1,Math.ceil((Date.parse(toDate)-Date.parse(fromDate))/86400000)),
+    timeframe,
+    fromDate,
+    toDate,
+    dataSource,
+    modelAssumptions,
+    runId,
+    dataFingerprint,
+    effectiveLotSize: lotSize,
+    effectiveTickSize: tickSize,
+    effectiveStrategyConfig: strategy as any,
+    equityCurve: [{ timestamp: fromDate, equity: initialCapital }],
+    initialCapital,
+    finalCapital:initialCapital,
+    totalTrades:0,
+    winningTrades:0,
+    losingTrades:0,
+    winRatePct:0,
+    grossPnl:0,
+    totalCharges:0,
+    netPnl:0,
+    maxDrawdown:0,
+    maxDrawdownPct:0,
+    profitFactor:0,
+    trades:[],
+  };
   if (!Number.isInteger(lotSize) || lotSize<=0 || !Number.isFinite(tickSize) || tickSize<=0 || !interval || !Number.isFinite(initialCapital) || initialCapital<=0) return {...empty,error:'Valid timeframe, capital and authoritative lot/tick metadata are required.'};
   if (candles.some((c,i)=>!Number.isFinite(Number(new Date(c.timestamp))) || ![c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite) || c.low<=0 || c.high<Math.max(c.open,c.close) || c.low>Math.min(c.open,c.close) || c.volume<0 || (i>0 && Number(new Date(c.timestamp))===Number(new Date(candles[i-1]!.timestamp))))) return {...empty,error:'Invalid or duplicate underlying candles.'};
   if (candles.length<3) return empty;
@@ -51,12 +90,12 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
 
   if (interval >= 86400000) return {...empty,error:'This intraday premium model requires intraday candles; daily bars cannot determine session entry and exits.'};
   const minimumPremium=Math.min(...candles.map(c=>money(Math.max(25,c.open*0.0055)+tickSize)));
-  const minimumCharges=calculateOptionCharges({buyPrice:minimumPremium,sellPrice:minimumPremium,quantity:lotSize}).totalRoundTripCharges;
+  const minimumCharges=calculateOptionCharges({buyPrice:minimumPremium,sellPrice:minimumPremium,quantity:lotSize,date:firstCandleDate}).totalRoundTripCharges;
   if (initialCapital<minimumPremium*lotSize+minimumCharges+2*tickSize*lotSize) return {...empty,error:'Insufficient capital for one reference lot including estimated round-trip charges and spread reserve.'};
   const ast = convertLegacyStrategyToAst(strategy);
   if ((ast.indicators ?? []).some(ind=>ind.timeframe && ind.timeframe!==timeframe)) return {...empty,error:'Mixed indicator timeframes are unsupported; aligned source data is required.'};
   if (ast.contractSelection?.instrumentType==='FUTURES' || ast.exitRules?.exitOnIndicatorReversal) return {...empty,error:'Futures and generic indicator-reversal exits require a dedicated price/execution model.'};
-  const useTrailing = request?.useTrailingStop ?? ast.trailingProfit?.enabled ?? false;
+  const useTrailing = request?.useTrailingStop !== undefined ? request.useTrailingStop : (ast.trailingProfit?.enabled ?? false);
   if (useTrailing && ast.trailingProfit?.mode && ast.trailingProfit.mode!==TrailingProfitMode.FIXED_STEP) return {...empty,error:'Only fixed-step trailing is supported by this modeled backtest.'};
 
   // Build indicator cache over the full dataset (including warmup padding)
@@ -74,89 +113,312 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const maxTrades = Math.min(request?.maxTradesPerDay ?? Infinity,strategy.risk?.maxTradesPerDay ?? 3);
   const maxCapital = strategy.risk?.maxCapitalInr ?? strategy.maxCapitalInr ?? initialCapital;
   const cutoff = ast.exitRules?.marketCutoffTime ?? strategy.exit?.marketCutoff ?? '15:10';
-  const activation = request?.trailingActivationProfitInr ?? ast.trailingProfit?.activationProfitInr ?? 150;
-  const gap = request?.trailingStepInr ?? ast.trailingProfit?.trailingGapInr ?? ast.trailingProfit?.adjustmentStepInr ?? 50;
-  const trades:BacktestTradeRecord[]=[];
-  let capital=initialCapital,peak=initialCapital,drawdown=0,drawdownPct=0,day='',dailyPnl=0,count=0,lastExitIndex=-Infinity,signalWaveEntered=false;
-  let active: {entryIndex:number;entryTime:string;entry:number;premium:number;spot:number;quantity:number;stop:number;initialStop:number;target:number;type:'CE'|'PE';trailing:boolean;peakClose:number} | null=null;
-  const prices=(c:Candle)=>{
-    const t=active!; const sign=t.type==='CE'?1:-1;
-    const premium=(spot:number)=>Math.max(tickSize,t.premium+sign*(spot-t.spot)*0.5-tickSize);
-    return {open:premium(c.open),high:premium(t.type==='CE'?c.high:c.low),low:premium(t.type==='CE'?c.low:c.high),close:premium(c.close)};
+  const activation = request?.trailingActivationProfitInr !== undefined ? request.trailingActivationProfitInr : (ast.trailingProfit?.activationProfitInr ?? 150);
+  const gap = request?.trailingStepInr !== undefined ? request.trailingStepInr : (ast.trailingProfit?.trailingGapInr ?? ast.trailingProfit?.adjustmentStepInr ?? 50);
+  const toTick = (price: number, tick = tickSize) => Number((Math.round(price / tick) * tick).toFixed(2));
+
+  const trades: BacktestTradeRecord[] = [];
+  const equityCurve: { timestamp: string; equity: number }[] = [
+    { timestamp: fromDate, equity: initialCapital },
+  ];
+  let capital = initialCapital,
+    peakEquity = initialCapital,
+    drawdown = 0,
+    drawdownPct = 0,
+    day = '',
+    dailyRealizedLoss = 0,
+    count = 0,
+    lastExitIndex = -Infinity,
+    signalWaveEntered = false,
+    lastEligibleCandle: Candle | null = null;
+
+  let active: {
+    entryIndex: number;
+    entryTime: string;
+    entry: number;
+    premium: number;
+    spot: number;
+    quantity: number;
+    stop: number;
+    initialStop: number;
+    target: number;
+    type: 'CE' | 'PE';
+    trailing: boolean;
+    peakClose: number;
+  } | null = null;
+
+  const prices = (c: Candle) => {
+    const t = active!;
+    const sign = t.type === 'CE' ? 1 : -1;
+    const premium = (spot: number) => Math.max(tickSize, t.premium + sign * (spot - t.spot) * 0.5 - tickSize);
+    return {
+      open: toTick(premium(c.open)),
+      high: toTick(premium(t.type === 'CE' ? c.high : c.low)),
+      low: toTick(premium(t.type === 'CE' ? c.low : c.high)),
+      close: toTick(premium(c.close)),
+    };
   };
-  const settle=(price:number,timestamp:string,reason:string,index:number)=>{
-    const t=active!;const grossPnl=money((price-t.entry)*t.quantity);
-    const charges=calculateOptionCharges({buyPrice:t.entry,sellPrice:price,quantity:t.quantity}).totalRoundTripCharges;
-    const netPnl=money(grossPnl-charges);capital=money(capital+netPnl);dailyPnl=money(dailyPnl+netPnl);
-    peak=Math.max(peak,capital);drawdown=Math.max(drawdown,peak-capital);drawdownPct=Math.max(drawdownPct,peak>0?(peak-capital)/peak*100:0);
-    trades.push({id:`bt_${trades.length+1}`,entryTime:t.entryTime,exitTime:timestamp,durationMinutes:Math.max(0,(Date.parse(timestamp)-Date.parse(t.entryTime))/60000),symbol:`${strategy.underlying} MODELED ATM ${t.type}`,side:'BUY',entryPrice:t.entry,exitPrice:money(price),quantity:t.quantity,grossPnl,charges,netPnl,exitReason:reason,initialStopPrice:t.initialStop,trailingStopPrice:t.trailing?t.stop:undefined});
-    active=null;lastExitIndex=index;
-  };
-  const protect=(c:Candle,index:number)=>{
-    if (!active) return;
-    const p=prices(c);const closeTime=new Date(Number(new Date(c.timestamp))+interval).toISOString();
-    // Only a stop established BEFORE this bar may trigger on this bar's extremes.
-    if (p.low<=active.stop) {settle(Math.min(active.stop,p.open),closeTime,active.trailing?'TRAILING_STOP_LOSS':'STOP_LOSS',index);return;}
-    if (p.high>=active.target) {settle(active.target,closeTime,'TARGET_PROFIT',index);return;}
-    if (ast.exitRules?.maxHoldingBars && index-active.entryIndex+1>=ast.exitRules.maxHoldingBars) {settle(p.close,closeTime,'MAX_HOLDING_BARS',index);return;}
-    if (useTrailing) {
-      active.peakClose=Math.max(active.peakClose,p.close);
-      const netPeak=(active.peakClose-active.entry)*active.quantity-calculateOptionCharges({buyPrice:active.entry,sellPrice:active.peakClose,quantity:active.quantity}).totalRoundTripCharges;
-      if (netPeak>=activation) {active.trailing=true;active.stop=Math.max(active.stop,Math.floor((active.peakClose-gap/active.quantity)/tickSize+1e-9)*tickSize);}
+
+  const settle = (rawPrice: number, timestamp: string, reason: string, index: number) => {
+    const t = active!;
+    const price = toTick(rawPrice);
+    const grossPnl = money((price - t.entry) * t.quantity);
+    const charges = calculateOptionCharges({ buyPrice: t.entry, sellPrice: price, quantity: t.quantity, date: timestamp }).totalRoundTripCharges;
+    const netPnl = money(grossPnl - charges);
+    capital = money(capital + netPnl);
+    if (netPnl < 0) {
+      dailyRealizedLoss = money(dailyRealizedLoss + Math.abs(netPnl));
     }
+    peakEquity = Math.max(peakEquity, capital);
+    drawdown = Math.max(drawdown, peakEquity - capital);
+    drawdownPct = Math.max(drawdownPct, peakEquity > 0 ? ((peakEquity - capital) / peakEquity) * 100 : 0);
+    equityCurve.push({ timestamp, equity: capital });
+    trades.push({
+      id: `bt_${trades.length + 1}`,
+      entryTime: t.entryTime,
+      exitTime: timestamp,
+      durationMinutes: Math.max(0, (Date.parse(timestamp) - Date.parse(t.entryTime)) / 60000),
+      symbol: `${strategy.underlying} MODELED ATM ${t.type}`,
+      side: 'BUY',
+      entryPrice: t.entry,
+      exitPrice: price,
+      quantity: t.quantity,
+      grossPnl,
+      charges,
+      netPnl,
+      exitReason: reason,
+      initialStopPrice: t.initialStop,
+      trailingStopPrice: t.trailing ? t.stop : undefined,
+    });
+    active = null;
+    lastExitIndex = index;
   };
-  for (let i=0;i<candles.length;i++) {
-    const c=candles[i]!;
+
+  const updateMtmDrawdown = (c: Candle) => {
+    if (!active) return;
+    const p = prices(c);
+    const currentCharges = calculateOptionCharges({ buyPrice: active.entry, sellPrice: p.close, quantity: active.quantity, date: c.timestamp }).totalRoundTripCharges;
+    const unrealizedNet = money((p.close - active.entry) * active.quantity - currentCharges);
+    const currentEquity = money(capital + unrealizedNet);
+    peakEquity = Math.max(peakEquity, currentEquity);
+    drawdown = Math.max(drawdown, peakEquity - currentEquity);
+    drawdownPct = Math.max(drawdownPct, peakEquity > 0 ? ((peakEquity - currentEquity) / peakEquity) * 100 : 0);
+  };
+
+  const protect = (c: Candle, index: number, splitsCutoff = false) => {
+    if (!active) return;
+    const p = prices(c);
+    const closeTime = new Date(Number(new Date(c.timestamp)) + interval).toISOString();
+
+    // 1. Opening gaps (known at candle open - B21)
+    if (p.open >= active.target) {
+      settle(p.open, iso(c.timestamp), 'TARGET_PROFIT', index);
+      return;
+    }
+    if (p.open <= active.stop) {
+      settle(p.open, iso(c.timestamp), active.trailing ? 'TRAILING_STOP_LOSS' : 'STOP_LOSS', index);
+      return;
+    }
+
+    // 2. Intrabar price extremes
+    if (p.low <= active.stop) {
+      settle(active.stop, closeTime, active.trailing ? 'TRAILING_STOP_LOSS' : 'STOP_LOSS', index);
+      return;
+    }
+    // B33: If candle spans across cutoff, do not claim target occurring after cutoff boundary
+    if (splitsCutoff) {
+      settle(p.close, closeTime, 'TIME_CUTOFF', index);
+      return;
+    }
+    if (p.high >= active.target) {
+      settle(active.target, closeTime, 'TARGET_PROFIT', index);
+      return;
+    }
+    if (ast.exitRules?.maxHoldingBars && index - active.entryIndex + 1 >= ast.exitRules.maxHoldingBars) {
+      settle(p.close, closeTime, 'MAX_HOLDING_BARS', index);
+      return;
+    }
+    if (useTrailing) {
+      active.peakClose = Math.max(active.peakClose, p.close);
+      const netPeak =
+        (active.peakClose - active.entry) * active.quantity -
+        calculateOptionCharges({ buyPrice: active.entry, sellPrice: active.peakClose, quantity: active.quantity, date: c.timestamp }).totalRoundTripCharges;
+      if (netPeak >= activation) {
+        active.trailing = true;
+        active.stop = Math.max(active.stop, toTick(active.peakClose - gap / active.quantity));
+      }
+    }
+    updateMtmDrawdown(c);
+  };
+
+  for (let i = 0; i < candles.length; i++) {
+    const c = candles[i]!;
     const candleMs = Number(new Date(c.timestamp));
     const inTradingWindow = candleMs >= tradeStartMs && candleMs <= tradeEndMs;
-    const currentDay=iso(c.timestamp).slice(0,10);
-    if (currentDay!==day) {
-      if (active && i>0) {const prev=candles[i-1]!;settle(prices(prev).close,new Date(Number(new Date(prev.timestamp))+interval).toISOString(),'SESSION_DATA_END',i-1);}
-      day=currentDay;dailyPnl=0;count=0;signalWaveEntered=false;
+    const currentDay = iso(c.timestamp).slice(0, 10);
+    if (currentDay !== day) {
+      if (active && lastEligibleCandle) {
+        settle(
+          prices(lastEligibleCandle).close,
+          new Date(Number(new Date(lastEligibleCandle.timestamp)) + interval).toISOString(),
+          'SESSION_DATA_END',
+          i - 1,
+        );
+      }
+      day = currentDay;
+      dailyRealizedLoss = 0;
+      count = 0;
+      signalWaveEntered = false;
     }
     if (!isMarketOpenForTrading(new Date(c.timestamp))) continue;
-    const time=istTime(c.timestamp);
-    const evaluated=i>0?evaluateStrategyAst(ast,i-1,candles,cache):{bullishSignal:false,bearishSignal:false,isWarmedUp:false};
-    const bullish=evaluated.bullishSignal && !evaluated.bearishSignal;
-    const bearish=evaluated.bearishSignal && !evaluated.bullishSignal;
-    const hasSignal=bullish||bearish;
+    lastEligibleCandle = c;
+
+    const time = istTime(c.timestamp);
+    const evaluated = i > 0 ? evaluateStrategyAst(ast, i - 1, candles, cache) : { bullishSignal: false, bearishSignal: false, isWarmedUp: false };
+    const bullish = evaluated.bullishSignal && !evaluated.bearishSignal;
+    const bearish = evaluated.bearishSignal && !evaluated.bullishSignal;
+    const hasSignal = bullish || bearish;
     if (!hasSignal) {
       signalWaveEntered = false;
     }
     if (active) {
-      const opposite=active.type==='CE'?bearish:bullish;
-      if (time>=cutoff || ast.exitRules?.exitOnOppositeSignal && opposite) settle(prices(c).open,iso(c.timestamp),time>=cutoff?'TIME_CUTOFF':'OPPOSITE_SIGNAL',i);
-      else protect(c,i);
+      const opposite = active.type === 'CE' ? bearish : bullish;
+      const closeTimeIst = istTime(Number(new Date(c.timestamp)) + interval);
+      if (time >= cutoff || (ast.exitRules?.exitOnOppositeSignal && opposite)) {
+        settle(prices(c).open, iso(c.timestamp), time >= cutoff ? 'TIME_CUTOFF' : 'OPPOSITE_SIGNAL', i);
+      } else if (time < cutoff && closeTimeIst > cutoff) {
+        protect(c, i, true);
+      } else {
+        protect(c, i, false);
+      }
     }
-    if (active || lastExitIndex===i) continue;
-    if (!inTradingWindow || !hasSignal || !evaluated.isWarmedUp || time<(strategy.session?.start ?? '09:25') || time>(strategy.session?.lastEntry ?? '14:45') || time>=cutoff || count>=maxTrades || dailyPnl<=-maxDaily || i-lastExitIndex<=(ast.entryRules?.cooldownBars ?? 0) || (ast.entryRules?.allowReentry===false && signalWaveEntered)) continue;
-    const type=bullish?'CE':'PE';
-    if (strategy.allowedInstruments && !strategy.allowedInstruments.includes(type==='CE'?AllowedOptionType.LONG_CALL:AllowedOptionType.LONG_PUT)) continue;
-    if (ast.contractSelection?.optionSide==='LONG_CE' && type!=='CE' || ast.contractSelection?.optionSide==='LONG_PE' && type!=='PE') continue;
-    const premium=money(Math.max(25,c.open*0.0055));const entry=money(premium+tickSize);
-    if (entry<(ast.contractSelection?.minPremium ?? 0) || entry>(ast.contractSelection?.maxPremium ?? Infinity)) continue;
-    let lots=Math.floor(Math.min(maxCapital,capital)/(entry*lotSize));
-    let selected: {quantity:number;stop:number;target:number}|undefined;
-    while(lots>=1) {
-      const quantity=lots*lotSize;
-      const adjusted:StrategyConfig={...strategy,risk:{...strategy.risk,maxAllInTradeLossInr:Math.min(maxTrade,maxDaily+dailyPnl)} as StrategyConfig['risk']};
-      const levels=strategyExitLevels({strategy:adjusted,entryPrice:entry,quantity,slippageBufferInr:2*tickSize*quantity,tickSize});
-      if (levels.error || levels.stopPrice===undefined || levels.targetPrice===undefined) {lots--;continue;}
-      const charges=Math.max(calculateOptionCharges({buyPrice:entry,sellPrice:levels.stopPrice,quantity}).totalRoundTripCharges,calculateOptionCharges({buyPrice:entry,sellPrice:levels.targetPrice,quantity}).totalRoundTripCharges);
-      const allIn=(entry-levels.stopPrice)*quantity+calculateOptionCharges({buyPrice:entry,sellPrice:levels.stopPrice,quantity}).totalRoundTripCharges+2*tickSize*quantity;
-      const reserve=entry*quantity+charges+2*tickSize*quantity;
-      if (reserve<=Math.min(maxCapital,capital) && allIn<=Math.min(maxTrade,maxDaily+dailyPnl) && charges<=(strategy.risk?.maxRoundTripCostBudgetInr ?? strategy.maxRoundTripCostBudgetInr ?? Infinity)) {selected={quantity,stop:levels.stopPrice,target:levels.targetPrice};break;}
+    if (active || lastExitIndex === i) continue;
+
+    // Daily loss budget: cumulative realized loss cannot exceed maxDaily (B12)
+    const remainingDailyBudget = Math.max(0, maxDaily - dailyRealizedLoss);
+
+    if (
+      !inTradingWindow ||
+      !hasSignal ||
+      !evaluated.isWarmedUp ||
+      time < (strategy.session?.start ?? '09:25') ||
+      time > (strategy.session?.lastEntry ?? '14:45') ||
+      time >= cutoff ||
+      count >= maxTrades ||
+      remainingDailyBudget <= 0 ||
+      i - lastExitIndex <= (ast.entryRules?.cooldownBars ?? 0) ||
+      (ast.entryRules?.allowReentry === false && signalWaveEntered)
+    ) {
+      continue;
+    }
+
+    const type = bullish ? 'CE' : 'PE';
+    if (strategy.allowedInstruments && !strategy.allowedInstruments.includes(type === 'CE' ? AllowedOptionType.LONG_CALL : AllowedOptionType.LONG_PUT)) {
+      continue;
+    }
+    if ((ast.contractSelection?.optionSide === 'LONG_CE' && type !== 'CE') || (ast.contractSelection?.optionSide === 'LONG_PE' && type !== 'PE')) {
+      continue;
+    }
+
+    const premium = toTick(Math.max(25, c.open * 0.0055));
+    const entry = toTick(premium + tickSize);
+    if (entry < (ast.contractSelection?.minPremium ?? 0) || entry > (ast.contractSelection?.maxPremium ?? Infinity)) {
+      continue;
+    }
+
+    let lots = Math.floor(Math.min(maxCapital, capital) / (entry * lotSize));
+    let selected: { quantity: number; stop: number; target: number } | undefined;
+    while (lots >= 1) {
+      const quantity = lots * lotSize;
+      const adjusted: StrategyConfig = {
+        ...strategy,
+        risk: { ...strategy.risk, maxAllInTradeLossInr: Math.min(maxTrade, remainingDailyBudget) } as StrategyConfig['risk'],
+      };
+      const levels = strategyExitLevels({ strategy: adjusted, entryPrice: entry, quantity, slippageBufferInr: 2 * tickSize * quantity, tickSize });
+      if (levels.error || levels.stopPrice === undefined || levels.targetPrice === undefined) {
+        lots--;
+        continue;
+      }
+
+      const targetCharges = calculateOptionCharges({ buyPrice: entry, sellPrice: levels.targetPrice, quantity, date: c.timestamp }).totalRoundTripCharges;
+      const netTargetProfit = (levels.targetPrice - entry) * quantity - targetCharges - 2 * tickSize * quantity;
+      // Net target viability: target must yield positive net profit (B15)
+      if (netTargetProfit <= 0) {
+        lots--;
+        continue;
+      }
+
+      const stopCharges = calculateOptionCharges({ buyPrice: entry, sellPrice: levels.stopPrice, quantity, date: c.timestamp }).totalRoundTripCharges;
+      const charges = Math.max(stopCharges, targetCharges);
+      const allIn =
+        (entry - levels.stopPrice) * quantity +
+        stopCharges +
+        2 * tickSize * quantity;
+      const reserve = entry * quantity + charges + 2 * tickSize * quantity;
+      if (
+        reserve <= Math.min(maxCapital, capital) &&
+        allIn <= Math.min(maxTrade, remainingDailyBudget) &&
+        charges <= (strategy.risk?.maxRoundTripCostBudgetInr ?? strategy.maxRoundTripCostBudgetInr ?? Infinity)
+      ) {
+        selected = { quantity, stop: levels.stopPrice, target: levels.targetPrice };
+        break;
+      }
       lots--;
     }
     if (!selected) continue;
-    active={entryIndex:i,entryTime:iso(c.timestamp),entry,premium,spot:c.open,quantity:selected.quantity,stop:selected.stop,initialStop:selected.stop,target:selected.target,type,trailing:false,peakClose:entry};count++;
+
+    active = {
+      entryIndex: i,
+      entryTime: iso(c.timestamp),
+      entry,
+      premium,
+      spot: c.open,
+      quantity: selected.quantity,
+      stop: selected.stop,
+      initialStop: selected.stop,
+      target: selected.target,
+      type,
+      trailing: false,
+      peakClose: entry,
+    };
+    count++;
     signalWaveEntered = true;
-    protect(c,i);
+    protect(c, i);
   }
-  if (active && candles.at(-1)) {const last=candles.at(-1)!;settle(prices(last).close,new Date(Number(new Date(last.timestamp))+interval).toISOString(),'DATASET_END',candles.length-1);}
-  const totalCharges=money(trades.reduce((sum,t)=>sum+t.charges,0));const grossPnl=money(trades.reduce((sum,t)=>sum+t.grossPnl,0));
-  const wins=trades.filter(t=>t.netPnl>0);const losses=trades.filter(t=>t.netPnl<=0);const gains=wins.reduce((sum,t)=>sum+t.netPnl,0);const loss=Math.abs(losses.reduce((sum,t)=>sum+t.netPnl,0));
-  return {...empty,finalCapital:capital,totalTrades:trades.length,winningTrades:wins.length,losingTrades:losses.length,winRatePct:trades.length?money(wins.length/trades.length*100):0,grossPnl,totalCharges,netPnl:money(grossPnl-totalCharges),maxDrawdown:money(drawdown),maxDrawdownPct:money(drawdownPct),profitFactor:loss?money(gains/loss):0,trades};
+
+  if (active && lastEligibleCandle) {
+    settle(
+      prices(lastEligibleCandle).close,
+      new Date(Number(new Date(lastEligibleCandle.timestamp)) + interval).toISOString(),
+      'DATASET_END',
+      candles.indexOf(lastEligibleCandle),
+    );
+  }
+
+  const totalCharges = money(trades.reduce((sum, t) => sum + t.charges, 0));
+  const grossPnl = money(trades.reduce((sum, t) => sum + t.grossPnl, 0));
+  const wins = trades.filter((t) => t.netPnl > 0);
+  const losses = trades.filter((t) => t.netPnl <= 0);
+  const gains = wins.reduce((sum, t) => sum + t.netPnl, 0);
+  const loss = Math.abs(losses.reduce((sum, t) => sum + t.netPnl, 0));
+  const profitFactor = loss > 0 ? money(gains / loss) : gains > 0 ? money(gains) : 0;
+
+  return {
+    ...empty,
+    finalCapital: capital,
+    totalTrades: trades.length,
+    winningTrades: wins.length,
+    losingTrades: losses.length,
+    winRatePct: trades.length ? money((wins.length / trades.length) * 100) : 0,
+    grossPnl,
+    totalCharges,
+    netPnl: money(grossPnl - totalCharges),
+    maxDrawdown: money(drawdown),
+    maxDrawdownPct: money(drawdownPct),
+    profitFactor,
+    trades,
+    equityCurve,
+  };
 }
 
 const UPSTOX_INDEX_MAP: Record<string, string> = {

@@ -20,8 +20,12 @@ try {
     console.log(JSON.stringify({probe:'wrong_index',underlying,url:calls[0]?.url,dataSource:result.dataSource,firstOpen:result.candles[0]?.open,candles:result.candles.length}));
   }
   calls.length=0;
-  const three=await fetchRealHistoricalCandles({underlying:'NIFTY',timeframe:'3m',fromDate:'2026-10-05',toDate:'2026-10-05',authToken:'fake-local-probe-token'});
-  console.log(JSON.stringify({probe:'silently_changed_interval',requested:'3m',url:calls[0]?.url,spacingMinutes:(Date.parse(three.candles[1]!.timestamp)-Date.parse(three.candles[0]!.timestamp))/60000}));
+  try {
+    const three=await fetchRealHistoricalCandles({underlying:'NIFTY',timeframe:'3m',fromDate:'2026-10-05',toDate:'2026-10-05',authToken:'fake-local-probe-token'});
+    console.log(JSON.stringify({probe:'silently_changed_interval',requested:'3m',url:calls[0]?.url,spacingMinutes:(Date.parse(three.candles[1]!.timestamp)-Date.parse(three.candles[0]!.timestamp))/60000}));
+  } catch (err: any) {
+    console.log(JSON.stringify({probe:'rejected_unsupported_interval',requested:'3m',error:err.message}));
+  }
   rows=makeRows(15);
   const request=BacktestRequestSchema.parse({fromDate:'2026-10-05',toDate:'2026-10-05',initialCapital:10000,useTrailingStop:false});
   const history=await fetchRealHistoricalCandles({underlying:'NIFTY',interval:strategy.timeframe,fromDate:request.fromDate,toDate:request.toDate,authToken:'fake-local-probe-token'});
@@ -34,8 +38,12 @@ try {
   const unfinished=await fetchRealHistoricalCandles({underlying:'NIFTY',days:1,timeframe:'5m',authToken:'fake-local-probe-token'});
   console.log(JSON.stringify({probe:'unfinished_candle',now:new Date(Date.now()).toISOString(),lastOpen:unfinished.candles.at(-1)!.timestamp,lastClose:new Date(Date.parse(unfinished.candles.at(-1)!.timestamp)+300000).toISOString(),fetchAbortSignal:calls[0]?.signal}));
   rows=makeRows();calls.length=0;
-  const malformedDate=await fetchRealHistoricalCandles({underlying:'NIFTY',fromDate:'2026-10-05junk',toDate:'2026-10-05',authToken:'fake-local-probe-token'});
-  console.log(JSON.stringify({probe:'malformed_date_accepted',schemaAccepts:BacktestRequestSchema.safeParse({fromDate:'2026-10-05junk'}).success,url:calls[0]?.url,candles:malformedDate.candles.length}));
+  try {
+    const malformedDate=await fetchRealHistoricalCandles({underlying:'NIFTY',fromDate:'2026-10-05junk',toDate:'2026-10-05',authToken:'fake-local-probe-token'});
+    console.log(JSON.stringify({probe:'malformed_date_accepted',schemaAccepts:BacktestRequestSchema.safeParse({fromDate:'2026-10-05junk'}).success,url:calls[0]?.url,candles:malformedDate.candles.length}));
+  } catch (err: any) {
+    console.log(JSON.stringify({probe:'malformed_date_rejected',error:err.message}));
+  }
   const asCandles=(data:any[])=>data.map(r=>({timestamp:r[0],open:r[1],high:r[2],low:r[3],close:r[4],volume:r[5]}));
   const fiveStrategy={...strategy,timeframe:'5m'};
   for (const date of ['2025-10-06','2026-10-05']) {

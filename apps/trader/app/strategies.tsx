@@ -55,8 +55,8 @@ export default function StrategiesScreen() {
   // Backtest state
   const [backtestDays, setBacktestDays] = useState<number>(14);
   const [backtestCapital, setBacktestCapital] = useState<number>(10000);
-  const [backtestUnderlying, setBacktestUnderlying] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
-  const [backtestTimeframe, setBacktestTimeframe] = useState<'1m' | '5m' | '15m' | '30m' | '1d'>('5m');
+  const [backtestUnderlying, setBacktestUnderlying] = useState<'NIFTY' | 'BANKNIFTY' | 'FINNIFTY' | 'MIDCPNIFTY'>('NIFTY');
+  const [backtestTimeframe, setBacktestTimeframe] = useState<'1m' | '5m' | '15m' | '30m'>('5m');
   const [backtestFromDate, setBacktestFromDate] = useState<string>('');
   const [backtestToDate, setBacktestToDate] = useState<string>('');
   const [isCustomDateRange, setIsCustomDateRange] = useState<boolean>(false);
@@ -79,7 +79,7 @@ export default function StrategiesScreen() {
   // Create Strategy Form
   const [createForm, setCreateForm] = useState({
     name: '',
-    underlying: 'NIFTY' as 'NIFTY' | 'BANKNIFTY',
+    underlying: 'NIFTY' as 'NIFTY' | 'BANKNIFTY' | 'FINNIFTY' | 'MIDCPNIFTY',
     direction: AllowedOptionType.LONG_CALL,
     timeframe: '5m',
     emaPeriod: 20,
@@ -1120,8 +1120,10 @@ export default function StrategiesScreen() {
                   fontSize: typography.fontSize.sm,
                 }}
               >
-                <option value="NIFTY">NIFTY (Lot: 25)</option>
-                <option value="BANKNIFTY">BANKNIFTY (Lot: 15)</option>
+                <option value="NIFTY">NIFTY (Lot: 65)</option>
+                <option value="BANKNIFTY">BANKNIFTY (Lot: 30)</option>
+                <option value="FINNIFTY">FINNIFTY (Lot: 65)</option>
+                <option value="MIDCPNIFTY">MIDCPNIFTY (Lot: 120)</option>
               </select>
             </div>
 
@@ -1144,7 +1146,6 @@ export default function StrategiesScreen() {
                 <option value="5m">5m (Recommended)</option>
                 <option value="15m">15m (Trend Swing)</option>
                 <option value="30m">30m (Positional)</option>
-                <option value="1d">1d (Daily EOD)</option>
               </select>
             </div>
 
@@ -1536,6 +1537,37 @@ export default function StrategiesScreen() {
               </div>
             </div>
 
+            {/* Model Assumptions & Manifest Banner */}
+            {backtestResult.modelAssumptions && backtestResult.modelAssumptions.length > 0 && (
+              <div
+                style={{
+                  backgroundColor: colors.surfaceElevated,
+                  border: `1px solid ${colors.border}`,
+                  borderLeft: `4px solid ${colors.cyan}`,
+                  borderRadius: borderRadius.md,
+                  padding: `${spacing.sm}px ${spacing.md}px`,
+                  marginBottom: spacing.md,
+                  fontSize: typography.fontSize.xs,
+                  color: colors.textSecondary,
+                  lineHeight: 1.5,
+                }}
+              >
+                <div style={{ fontWeight: typography.fontWeight.semibold, color: colors.textPrimary, marginBottom: 4 }}>
+                  🔬 Research Simulation Assumptions & Model Manifest
+                </div>
+                {backtestResult.runId && (
+                  <div style={{ color: colors.textMuted, marginBottom: 6, fontFamily: 'monospace' }}>
+                    Run ID: {backtestResult.runId} | Data: {backtestResult.dataFingerprint} | Lot: {backtestResult.effectiveLotSize ?? 'Default'} | Tick: {backtestResult.effectiveTickSize ?? 0.05}
+                  </div>
+                )}
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {backtestResult.modelAssumptions.map((assumption, i) => (
+                    <li key={i}>{assumption}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {/* KPI Cards Row */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: spacing.md, marginBottom: spacing.lg }}>
               {/* Net P&L */}
@@ -1801,7 +1833,7 @@ export default function StrategiesScreen() {
                   </label>
                   <select
                     value={createForm.underlying}
-                    onChange={(e) => setCreateForm({ ...createForm, underlying: e.target.value as 'NIFTY' | 'BANKNIFTY' })}
+                    onChange={(e) => setCreateForm({ ...createForm, underlying: e.target.value as 'NIFTY' | 'BANKNIFTY' | 'FINNIFTY' | 'MIDCPNIFTY' })}
                     style={{
                       width: '100%',
                       padding: spacing.sm,
@@ -1811,8 +1843,10 @@ export default function StrategiesScreen() {
                       borderRadius: borderRadius.sm,
                     }}
                   >
-                    <option value="NIFTY">NIFTY (Lot 25)</option>
-                    <option value="BANKNIFTY">BANKNIFTY (Lot 15)</option>
+                    <option value="NIFTY">NIFTY (Lot: 65)</option>
+                    <option value="BANKNIFTY">BANKNIFTY (Lot: 30)</option>
+                    <option value="FINNIFTY">FINNIFTY (Lot: 65)</option>
+                    <option value="MIDCPNIFTY">MIDCPNIFTY (Lot: 120)</option>
                   </select>
                 </div>
 

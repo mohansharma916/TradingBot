@@ -39,11 +39,8 @@ describe('Explicit owner checklist evidence', () => {
     api.getReconciliationSchedule.mockResolvedValue({ schedulerActive: false, intervalSeconds: 60, totalRuns: 0 });
     api.getAlerts.mockResolvedValue([]);
     render(React.createElement(HealthScreen));
-    // Health first resolves its account requests, then mounts the checklist,
-    // which fetches its own evidence. Wait for both phases under suite load.
     await screen.findByRole('heading', { name: 'Broker Health & Diagnostics' }, { timeout: 5000 });
-    await waitFor(() => expect(api.getGoLiveChecklist).toHaveBeenCalled(), { timeout: 5000 });
-    await screen.findByRole('textbox', { name: 'Evidence for Executable feed verified' }, { timeout: 5000 });
+    expect(screen.queryByRole('textbox')).toBeNull();
     expect(screen.getAllByText('Not measured')).toHaveLength(2);
     expect(screen.getByText('Unavailable')).toBeTruthy();
     expect(screen.getByText('Expired or unavailable')).toBeTruthy();

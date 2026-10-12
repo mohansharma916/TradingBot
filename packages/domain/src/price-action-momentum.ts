@@ -7,7 +7,7 @@ import {
 } from '@trading-bot/contracts';
 import { calculateOptionCharges } from './charges';
 import { Candle } from './indicators';
-import { getStandardLotSize } from './lot-size';
+import { getDatedLotSize } from './lot-size';
 import { isMarketOpenForTrading, isCalendarVerifiedForDate, getIstDateTime } from './market-calendar';
 
 export interface PriceActionMomentumEvaluationInput {
@@ -349,14 +349,13 @@ export function runPriceActionMomentumBacktest(
   rangingMarketTrades: number;
 } {
   const config = PriceActionMomentumConfigSchema.parse(options.config ?? {});
-  const lotSize = options.lotSize ?? getStandardLotSize(config.underlying);
-  const tickSize = options.tickSize ?? 0.05;
-  const initialCapital = options.initialCapital ?? 10000;
-  const candleCount = config.candleCount;
-
   let candles = [...options.candles].sort(
     (a, b) => Number(new Date(a.timestamp)) - Number(new Date(b.timestamp)),
   );
+  const lotSize = options.lotSize ?? getDatedLotSize(config.underlying, candles[0]?.timestamp);
+  const tickSize = options.tickSize ?? 0.05;
+  const initialCapital = options.initialCapital ?? 10000;
+  const candleCount = config.candleCount;
 
   const fromDate = candles[0] ? new Date(candles[0].timestamp).toISOString() : new Date().toISOString();
   const toDate = candles[candles.length - 1]
@@ -465,6 +464,9 @@ export function runPriceActionMomentumBacktest(
 
     capital = Number((capital + netPnl).toFixed(2));
     dailyPnl = Number((dailyPnl + netPnl).toFixed(2));
+    if (netPnl < 0) {
+      dailyRealizedLoss = Number((dailyRealizedLoss + Math.abs(netPnl)).toFixed(2));
+    }
     peakCapital = Math.max(peakCapital, capital);
     const dd = peakCapital - capital;
     maxDrawdown = Math.max(maxDrawdown, dd);
@@ -498,32 +500,47 @@ export function runPriceActionMomentumBacktest(
     lastExitIndex = index;
   };
 
+  let lastEligibleCandle: Candle | null = null;
+  let dailyRealizedLoss = 0;
+
   for (let i = candleCount; i < candles.length; i++) {
     const currentCandle = candles[i]!;
     const currentDay = new Date(currentCandle.timestamp).toISOString().slice(0, 10);
 
     // Reset daily counters on new session day
     if (currentDay !== day) {
-      if (activeTrade && i > 0) {
-        const prevCandle = candles[i - 1]!;
-        const exitPr = modelOptionPrice(prevCandle.close, activeTrade);
-        settleTrade(exitPr, new Date(prevCandle.timestamp).toISOString(), 'SESSION_END', i - 1);
+      if (activeTrade && lastEligibleCandle) {
+        const exitPr = modelOptionPrice(lastEligibleCandle.close, activeTrade);
+        settleTrade(exitPr, new Date(lastEligibleCandle.timestamp).toISOString(), 'SESSION_END', i - 1);
       }
       day = currentDay;
       dailyPnl = 0;
+      dailyRealizedLoss = 0;
       dailyTradesCount = 0;
     }
 
     if (!isMarketOpenForTrading(new Date(currentCandle.timestamp))) {
       continue;
     }
+    lastEligibleCandle = currentCandle;
 
     // Active position management
     if (activeTrade) {
+      const optionOpen = modelOptionPrice(currentCandle.open, activeTrade);
       const optionHigh = modelOptionPrice(activeTrade.type === 'CE' ? currentCandle.high : currentCandle.low, activeTrade);
       const optionLow = modelOptionPrice(activeTrade.type === 'CE' ? currentCandle.low : currentCandle.high, activeTrade);
       const optionClose = modelOptionPrice(currentCandle.close, activeTrade);
       const closeTime = new Date(currentCandle.timestamp).toISOString();
+
+      // Check Opening Gap First (B21)
+      if (optionOpen >= activeTrade.targetPrice) {
+        settleTrade(optionOpen, closeTime, 'TARGET_PROFIT', i);
+        continue;
+      }
+      if (optionOpen <= activeTrade.stopLossPrice) {
+        settleTrade(optionOpen, closeTime, activeTrade.trailing ? 'TRAILING_STOP' : 'STOP_LOSS', i);
+        continue;
+      }
 
       // Check Stop-Loss
       if (optionLow <= activeTrade.stopLossPrice) {
@@ -537,10 +554,15 @@ export function runPriceActionMomentumBacktest(
         continue;
       }
 
-      // Trailing stop adjustment
+      // Trailing stop adjustment (Net profit activation)
       if (config.trailingStopEnabled) {
         activeTrade.peakPrice = Math.max(activeTrade.peakPrice, optionClose);
-        const unrealizedNet = (activeTrade.peakPrice - activeTrade.entryPrice) * activeTrade.quantity;
+        const exitCharges = calculateOptionCharges({
+          buyPrice: activeTrade.entryPrice,
+          sellPrice: activeTrade.peakPrice,
+          quantity: activeTrade.quantity,
+        }).totalRoundTripCharges;
+        const unrealizedNet = (activeTrade.peakPrice - activeTrade.entryPrice) * activeTrade.quantity - exitCharges;
         if (unrealizedNet >= config.trailingActivationProfitInr) {
           activeTrade.trailing = true;
           const trailingPoints = config.trailingStepInr / activeTrade.quantity;
@@ -548,6 +570,19 @@ export function runPriceActionMomentumBacktest(
           activeTrade.stopLossPrice = Math.max(activeTrade.stopLossPrice, newStop);
         }
       }
+
+      // MTM Drawdown update (B14)
+      const currentCharges = calculateOptionCharges({
+        buyPrice: activeTrade.entryPrice,
+        sellPrice: optionClose,
+        quantity: activeTrade.quantity,
+      }).totalRoundTripCharges;
+      const mtmNet = (optionClose - activeTrade.entryPrice) * activeTrade.quantity - currentCharges;
+      const currentEquity = capital + mtmNet;
+      peakCapital = Math.max(peakCapital, currentEquity);
+      const mtmDd = peakCapital - currentEquity;
+      maxDrawdown = Math.max(maxDrawdown, mtmDd);
+      maxDrawdownPct = Math.max(maxDrawdownPct, peakCapital > 0 ? (mtmDd / peakCapital) * 100 : 0);
       continue;
     }
 
@@ -556,8 +591,9 @@ export function runPriceActionMomentumBacktest(
       continue;
     }
 
-    // Risk daily caps
-    if (dailyTradesCount >= config.maxTradesPerDay || dailyPnl <= -config.maxAllInDailyLossInr) {
+    // Risk daily caps (B12: cumulative realized daily loss)
+    const remainingDailyBudget = Math.max(0, config.maxAllInDailyLossInr - dailyRealizedLoss);
+    if (dailyTradesCount >= config.maxTradesPerDay || remainingDailyBudget <= 0) {
       continue;
     }
 
@@ -587,9 +623,11 @@ export function runPriceActionMomentumBacktest(
         continue;
       }
 
-      // Determine Stop Loss
+      // Determine Stop Loss (B17: supports PERCENTAGE and STRUCTURE_BASED)
       let stopLossPoints = config.stopLossValue;
-      if (config.stopLossType === 'STRUCTURE_BASED') {
+      if (config.stopLossType === 'PERCENTAGE') {
+        stopLossPoints = Number((entryPrice * (config.stopLossValue / 100)).toFixed(2));
+      } else if (config.stopLossType === 'STRUCTURE_BASED') {
         const setupCandle = completedWindow[completedWindow.length - 1]!;
         const spotRisk = type === 'CE'
           ? Math.max(5, spotEntry - setupCandle.low)
@@ -623,16 +661,18 @@ export function runPriceActionMomentumBacktest(
       stopLossPoints = Math.min(stopLossPoints, maxAllowedStopPoints);
       const stopLossPrice = Math.max(tickSize, Number((entryPrice - stopLossPoints).toFixed(2)));
 
-      // 3. Daily loss allowance check
-      const remainingDailyBudget = config.maxAllInDailyLossInr + dailyPnl;
+      // 3. Daily loss allowance check (B12)
       if (stopLossPoints * lotSize + estimatedRoundTripCharges > remainingDailyBudget) {
         continue;
       }
 
-      // Determine Target Profit
-      const targetPoints = config.targetProfitType === 'RISK_REWARD'
-        ? Number((stopLossPoints * config.riskRewardRatio).toFixed(2))
-        : config.targetPoints;
+      // Determine Target Profit (B17: supports RISK_REWARD, PERCENTAGE, FIXED_POINTS)
+      let targetPoints = config.targetPoints;
+      if (config.targetProfitType === 'RISK_REWARD') {
+        targetPoints = Number((stopLossPoints * config.riskRewardRatio).toFixed(2));
+      } else if (config.targetProfitType === 'PERCENTAGE') {
+        targetPoints = Number((entryPrice * (config.targetPoints / 100)).toFixed(2));
+      }
       const targetPrice = Number((entryPrice + targetPoints).toFixed(2));
 
       activeTrade = {
@@ -654,11 +694,10 @@ export function runPriceActionMomentumBacktest(
     }
   }
 
-  // Settle any remaining active trade at last candle
-  if (activeTrade && candles.length > 0) {
-    const last = candles[candles.length - 1]!;
-    const exitPr = modelOptionPrice(last.close, activeTrade);
-    settleTrade(exitPr, new Date(last.timestamp).toISOString(), 'BACKTEST_END', candles.length - 1);
+  // Settle any remaining active trade at last eligible candle (B13)
+  if (activeTrade && lastEligibleCandle) {
+    const exitPr = modelOptionPrice(lastEligibleCandle.close, activeTrade);
+    settleTrade(exitPr, new Date(lastEligibleCandle.timestamp).toISOString(), 'BACKTEST_END', candles.indexOf(lastEligibleCandle));
   }
 
   // Calculate backtest metrics
@@ -672,7 +711,8 @@ export function runPriceActionMomentumBacktest(
 
   const totalWins = trades.filter((t) => t.netPnl > 0).reduce((sum, t) => sum + t.netPnl, 0);
   const totalLosses = Math.abs(trades.filter((t) => t.netPnl < 0).reduce((sum, t) => sum + t.netPnl, 0));
-  const profitFactor = totalLosses > 0 ? Number((totalWins / totalLosses).toFixed(2)) : totalWins > 0 ? 99.99 : 0;
+  // B24: return 0 when no losses without artificial 99.99 sentinel
+  const profitFactor = totalLosses > 0 ? Number((totalWins / totalLosses).toFixed(2)) : totalWins > 0 ? Number(totalWins.toFixed(2)) : 0;
 
   const averageProfit = winningTrades > 0 ? Number((totalWins / winningTrades).toFixed(2)) : 0;
   const averageLoss = losingTrades > 0 ? Number((totalLosses / losingTrades).toFixed(2)) : 0;

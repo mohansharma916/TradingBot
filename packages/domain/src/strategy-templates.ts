@@ -10,6 +10,8 @@ import {
   TradeDirection,
   TrailingProfitMode,
 } from '@trading-bot/contracts';
+import { calculateOptionCharges } from './charges';
+import { getStandardLotSize } from './lot-size';
 
 export interface StrategyTemplateItem {
   id: string;
@@ -1010,3 +1012,68 @@ export const ALL_STRATEGY_TEMPLATES: StrategyTemplateItem[] = [
   ...PREDEFINED_STRATEGY_TEMPLATES,
   PRICE_ACTION_MOMENTUM_TEMPLATE,
 ];
+
+export interface StrategyFeasibilityResult {
+  feasible: boolean;
+  requiredCapitalInr: number;
+  modeledRiskPerLotInr: number;
+  declaredTradeCapInr: number;
+  lotSize: number;
+  reason?: string;
+}
+
+/**
+ * Mathematically validates whether a strategy's stop loss and statutory fees
+ * can feasibly execute within declared trade loss and capital limits.
+ */
+export function validateStrategyFeasibility(
+  strategy: Partial<StrategyConfig>,
+  customLotSize?: number,
+): StrategyFeasibilityResult {
+  const underlying = strategy.underlying || 'NIFTY';
+  const lotSize = customLotSize ?? getStandardLotSize(underlying);
+  const ast = (strategy as any).astConfig;
+  const stopPoints = ast?.exitRules?.stopLossValue ?? strategy.exit?.stopLossPoints ?? 0;
+  const declaredTradeCap = strategy.risk?.maxAllInTradeLossInr ?? (strategy as any).maxAllInTradeLossInr ?? Infinity;
+
+  if (lotSize <= 0) {
+    return {
+      feasible: false,
+      requiredCapitalInr: 0,
+      modeledRiskPerLotInr: 0,
+      declaredTradeCapInr: declaredTradeCap,
+      lotSize: 0,
+      reason: `Unknown lot size for underlying ${underlying}`,
+    };
+  }
+
+  // Reference entry price modeled for option premium
+  const refEntryPrice = underlying === 'BANKNIFTY' ? 240 : 60;
+  const charges = calculateOptionCharges({
+    buyPrice: refEntryPrice,
+    sellPrice: Math.max(0.05, refEntryPrice - stopPoints),
+    quantity: lotSize,
+  }).totalRoundTripCharges;
+  const slippageBuffer = 2 * 0.05 * lotSize;
+  const modeledRiskPerLot = Number((stopPoints * lotSize + charges + slippageBuffer).toFixed(2));
+  const requiredCapital = Number((refEntryPrice * lotSize + charges + slippageBuffer).toFixed(2));
+
+  if (modeledRiskPerLot > declaredTradeCap) {
+    return {
+      feasible: false,
+      requiredCapitalInr: requiredCapital,
+      modeledRiskPerLotInr: modeledRiskPerLot,
+      declaredTradeCapInr: declaredTradeCap,
+      lotSize,
+      reason: `Strategy stop loss (${stopPoints} pts) requires ₹${modeledRiskPerLot} risk budget per lot, which exceeds declared maxAllInTradeLossInr (₹${declaredTradeCap}).`,
+    };
+  }
+
+  return {
+    feasible: true,
+    requiredCapitalInr: requiredCapital,
+    modeledRiskPerLotInr: modeledRiskPerLot,
+    declaredTradeCapInr: declaredTradeCap,
+    lotSize,
+  };
+}

@@ -12,7 +12,6 @@ import {
 } from '@trading-bot/contracts';
 import { apiClient } from '../src/services/api';
 import { formatErrorMessage } from '@trading-bot/client-sdk';
-import LiveChecklistReview from '../src/features/health/LiveChecklistReview';
 
 export default function HealthScreen() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -252,8 +251,6 @@ export default function HealthScreen() {
           </p>
         </div>
       </div>
-
-      <LiveChecklistReview />
 
       {/* Diagnostics Telemetry Metrics Bar */}
       <div

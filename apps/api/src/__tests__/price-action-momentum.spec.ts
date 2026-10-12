@@ -115,5 +115,26 @@ describe('PriceActionMomentumService NestJS Integration Tests', () => {
     expect(optimization[0]).toHaveProperty('candleCount');
     expect(optimization[0]).toHaveProperty('minimumEfficiency');
     expect(optimization[0]).toHaveProperty('winRatePct');
+    expect(optimization[0]).toHaveProperty('inSample');
+    expect(optimization[0]).toHaveProperty('outOfSample');
+    expect(optimization[0]).toHaveProperty('degradationRatio');
+  });
+
+  it('B30: bounds optimization dataset rejecting oversized candle inputs', () => {
+    const service = new PriceActionMomentumService(
+      mockProposalsService,
+      mockRiskService,
+      mockCatalogService,
+    );
+    const fakeBar = {
+      timestamp: '2026-03-02T09:15:00.000Z',
+      open: 22000,
+      high: 22010,
+      low: 21990,
+      close: 22005,
+      volume: 1000,
+    };
+    const oversized = new Array(10001).fill(fakeBar);
+    expect(() => service.runParameterOptimization(oversized)).toThrow('10,000 candles');
   });
 });

@@ -28,8 +28,9 @@ export function calculateOptionCharges(params: {
   buyPrice: number;
   sellPrice: number;
   quantity: number;
+  date?: Date | string | number;
 }): ChargeBreakdown {
-  const { buyPrice, sellPrice, quantity } = params;
+  const { buyPrice, sellPrice, quantity, date } = params;
   if (![buyPrice, sellPrice, quantity].every(Number.isFinite) || buyPrice < 0 || sellPrice < 0 || buyPrice + sellPrice <= 0 || !Number.isInteger(quantity) || quantity <= 0) {
     throw new RangeError('Charges require nonnegative finite turnover, an executed leg and a positive integer quantity.');
   }
@@ -41,11 +42,32 @@ export function calculateOptionCharges(params: {
   // Brokerage: ₹20 per leg (Buy + Sell)
   const brokerage = 20.0 + 20.0;
 
-  // STT: 0.15% on sell-side option premium turnover (revised 1 April 2026 — was 0.1%)
-  const stt = Number((sellTurnover * 0.0015).toFixed(2));
+  // Historical date determination
+  const dateMs = date
+    ? typeof date === 'number'
+      ? date
+      : typeof date === 'string'
+      ? Date.parse(date)
+      : date.getTime()
+    : Date.now();
 
-  // NSE Exchange Charges: 0.03553% on option premium turnover (revised 1 March 2026 — was 0.0505%)
-  const exchangeCharges = Number((totalTurnover * 0.0003553).toFixed(2));
+  // STT: 0.15% on sell-side option premium (0.1% before 1 Apr 2026, 0.0625% before 1 Oct 2024)
+  let sttRate = 0.0015;
+  if (date) {
+    if (dateMs < Date.parse('2024-10-01T00:00:00Z')) {
+      sttRate = 0.000625;
+    } else if (dateMs < Date.parse('2026-04-01T00:00:00Z')) {
+      sttRate = 0.001;
+    }
+  }
+  const stt = Number((sellTurnover * sttRate).toFixed(2));
+
+  // NSE Exchange Charges: 0.03553% on turnover (was 0.0505% before 1 March 2026)
+  let exchangeRate = 0.0003553;
+  if (date && dateMs < Date.parse('2026-03-01T00:00:00Z')) {
+    exchangeRate = 0.000505;
+  }
+  const exchangeCharges = Number((totalTurnover * exchangeRate).toFixed(2));
 
   // SEBI turnover charges: ₹10 per crore (0.0001% of turnover)
   const sebiCharges = Number((totalTurnover * 0.000001).toFixed(2));
