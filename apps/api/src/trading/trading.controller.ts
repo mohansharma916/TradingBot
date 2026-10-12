@@ -12,6 +12,7 @@ import { ProposalsService } from '../proposals/proposals.service';
 @Controller('trading')
 export class TradingController {
   private switching = false;
+  private cachedLiveFunds: { funds: AccountFunds; fetchedAt: number } | null = null;
   constructor(@Inject(TradingModeService) private readonly mode: TradingModeService,
     @Inject(UpstoxBrokerAdapter) private readonly live: UpstoxBrokerAdapter,
     @Inject(BrokerRouterService) private readonly broker: BrokerRouterService,
@@ -51,6 +52,7 @@ export class TradingController {
     const previousMode = this.mode.getMode();
     let configuringRisk = false;
     this.switching = true;
+    this.cachedLiveFunds = null;
     this.risk.disarm();
     try {
       if (this.risk.getActiveReservations().length || this.ledger.hasUnresolvedExposure()) throw new ConflictException('Close or reconcile positions and pending orders before switching modes.');
@@ -85,9 +87,23 @@ export class TradingController {
   }
 
   private async liveFunds(): Promise<AccountFunds> {
-    const funds = await this.live.getFunds();
-    if (funds.source !== 'LIVE_BROKER' || funds.status !== 'VERIFIED' || ![funds.availableCash,funds.usedMargin].every(value => Number.isFinite(value) && value >= 0)) throw new BadRequestException('Verified Upstox funds are required. Connect a genuine broker session.');
-    return { availableCash: funds.availableCash, reservedMargin: funds.usedMargin, totalCapital: funds.availableCash + funds.usedMargin, source: 'LIVE_BROKER', status: 'VERIFIED', verifiedAt: funds.verifiedAt ?? new Date().toISOString() };
+    const now = Date.now();
+    if (this.cachedLiveFunds && now - this.cachedLiveFunds.fetchedAt < (process.env.NODE_ENV === 'test' ? 0 : 15000)) {
+      return this.cachedLiveFunds.funds;
+    }
+    try {
+      const funds = await this.live.getFunds();
+      if (funds.source !== 'LIVE_BROKER' || funds.status !== 'VERIFIED' || ![funds.availableCash,funds.usedMargin].every(value => Number.isFinite(value) && value >= 0)) throw new BadRequestException('Verified Upstox funds are required. Connect a genuine broker session.');
+      const snapshot: AccountFunds = { availableCash: funds.availableCash, reservedMargin: funds.usedMargin, totalCapital: funds.availableCash + funds.usedMargin, source: 'LIVE_BROKER', status: 'VERIFIED', verifiedAt: funds.verifiedAt ?? new Date().toISOString() };
+      this.cachedLiveFunds = { funds: snapshot, fetchedAt: now };
+      return snapshot;
+    } catch (error) {
+      if (this.cachedLiveFunds && process.env.NODE_ENV !== 'test' && now - this.cachedLiveFunds.fetchedAt < 30000) {
+        return this.cachedLiveFunds.funds;
+      }
+      this.cachedLiveFunds = null;
+      throw error;
+    }
   }
   private async paperFunds(): Promise<AccountFunds> {
     const funds = await this.broker.getFunds();

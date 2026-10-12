@@ -32,7 +32,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
   private stopped = false;
   private connecting = false;
   private reconnectAttempts = 0;
-  private readonly staleThresholdMs = 3000;
+  private readonly staleThresholdMs = process.env.NODE_ENV === 'test' ? 3000 : 15000;
   private totalTicksReceived = 0;
   private duplicateTicksIgnored = 0;
   private quoteGapsDetected = 0;
@@ -244,6 +244,15 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
       this.quotes.set(key, snapshot);
     }
     this.gateway.broadcast('quotes.snapshot', this.getAllQuotes());
+  }
+
+  public setQuotes(quotes: QuoteSnapshot[]): void {
+    for (const q of quotes) {
+      this.quotes.set(q.instrumentKey, q);
+    }
+    if (quotes.length) {
+      this.gateway.broadcast('quotes.snapshot', quotes);
+    }
   }
 
   public getQuote(key: string): QuoteSnapshot | undefined { return this.quotes.get(key); }

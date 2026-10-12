@@ -6,7 +6,14 @@ import { buildIndicatorCache, convertLegacyStrategyToAst, evaluateStrategyAst } 
 import { strategyExitLevels, strategyTimeframeMinutes } from './strategy-evaluator';
 import { isMarketOpenForTrading, isCalendarVerifiedForDate, getIstDateTime } from './market-calendar';
 
-export interface BacktestOptions { strategy: StrategyConfig; candles: Candle[]; request?: Partial<BacktestRequest>; dataSource?: string; lotSize?: number; tickSize?: number }
+export interface BacktestOptions {
+  strategy: StrategyConfig; candles: Candle[]; request?: Partial<BacktestRequest>; dataSource?: string; lotSize?: number; tickSize?: number;
+  /** Modeled time decay as a percentage of entry premium lost per full 375-minute session. Expiry days decay far faster. */
+  thetaDecayPctPerSession?: number;
+}
+/** Rough non-expiry-day ATM weekly decay; deliberately disclosed rather than hidden. */
+export const DEFAULT_THETA_DECAY_PCT_PER_SESSION = 10;
+const SESSION_MINUTES = 375;
 const iso = (time: string | number) => new Date(time).toISOString();
 const money = (value:number) => Number(value.toFixed(2));
 const istTime = (timestamp:string | number) => new Date(Number(new Date(timestamp)) + 330 * 60000).toISOString().slice(11,16);
@@ -22,9 +29,12 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const firstCandleDate = candles[0]?.timestamp;
   const lotSize = options.lotSize ?? getDatedLotSize(strategy.underlying, firstCandleDate);
   const tickSize = options.tickSize ?? 0.05;
+  const thetaPct = options.thetaDecayPctPerSession ?? DEFAULT_THETA_DECAY_PCT_PER_SESSION;
   const modelAssumptions = [
     'RESEARCH_MODE: Underlying candles drive simulation; all option contracts, prices and fills are modeled.',
-    `ATM strike dynamically derived from underlying spot (${strategy.underlying === 'BANKNIFTY' ? '100-pt' : '50-pt'} grid); delta fixed at 0.5.`,
+    `ATM strike dynamically derived from underlying spot (${strategy.underlying === 'BANKNIFTY' ? '100-pt' : '50-pt'} grid); delta fixed at 0.5; no IV or gamma modeling.`,
+    `Time decay modeled at ${thetaPct}% of entry premium per session, linear while held; expiry-day decay is much faster and is not modeled.`,
+    'One lot per trade, matching live runtime position sizing.',
     'Historical dated statutory fee schedule applied based on trade session timestamp.',
     'Intrabar known opening gaps execute at open; stops precede targets under intrabar ambiguity.',
     'Market cutoff is strictly enforced; candles spanning cutoff exit at cutoff boundary rather than claiming post-cutoff targets.',
@@ -74,6 +84,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     profitFactor:0,
     trades:[],
   };
+  if (!Number.isFinite(thetaPct) || thetaPct<0) return {...empty,error:'Theta decay percentage must be a nonnegative number.'};
   if (!Number.isInteger(lotSize) || lotSize<=0 || !Number.isFinite(tickSize) || tickSize<=0 || !interval || !Number.isFinite(initialCapital) || initialCapital<=0) return {...empty,error:'Valid timeframe, capital and authoritative lot/tick metadata are required.'};
   if (candles.some((c,i)=>!Number.isFinite(Number(new Date(c.timestamp))) || ![c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite) || c.low<=0 || c.high<Math.max(c.open,c.close) || c.low>Math.min(c.open,c.close) || c.volume<0 || (i>0 && Number(new Date(c.timestamp))===Number(new Date(candles[i-1]!.timestamp))))) return {...empty,error:'Invalid or duplicate underlying candles.'};
   if (candles.length<3) return empty;
@@ -135,6 +146,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   let active: {
     entryIndex: number;
     entryTime: string;
+    entryMs: number;
     entry: number;
     premium: number;
     spot: number;
@@ -150,12 +162,17 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const prices = (c: Candle) => {
     const t = active!;
     const sign = t.type === 'CE' ? 1 : -1;
-    const premium = (spot: number) => Math.max(tickSize, t.premium + sign * (spot - t.spot) * 0.5 - tickSize);
+    const thetaPerMinute = (t.premium * thetaPct) / 100 / SESSION_MINUTES;
+    const openMinutes = Math.max(0, (Number(new Date(c.timestamp)) - t.entryMs) / 60000);
+    const closeMinutes = openMinutes + interval / 60000;
+    // Bid-side value: delta move, minus decay while held, minus one tick of spread.
+    const premium = (spot: number, minutes: number) => Math.max(tickSize, t.premium + sign * (spot - t.spot) * 0.5 - thetaPerMinute * minutes - tickSize);
     return {
-      open: toTick(premium(c.open)),
-      high: toTick(premium(t.type === 'CE' ? c.high : c.low)),
-      low: toTick(premium(t.type === 'CE' ? c.low : c.high)),
-      close: toTick(premium(c.close)),
+      open: toTick(premium(c.open, openMinutes)),
+      // Intrabar extremes use end-of-bar decay: pessimistic for both target and stop checks.
+      high: toTick(premium(t.type === 'CE' ? c.high : c.low, closeMinutes)),
+      low: toTick(premium(t.type === 'CE' ? c.low : c.high, closeMinutes)),
+      close: toTick(premium(c.close, closeMinutes)),
     };
   };
 
@@ -326,7 +343,8 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
       continue;
     }
 
-    let lots = Math.floor(Math.min(maxCapital, capital) / (entry * lotSize));
+    // Live proposals always size exactly one lot; more lots here would overstate attainable P&L.
+    let lots = Math.min(1, Math.floor(Math.min(maxCapital, capital) / (entry * lotSize)));
     let selected: { quantity: number; stop: number; target: number } | undefined;
     while (lots >= 1) {
       const quantity = lots * lotSize;
@@ -370,6 +388,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     active = {
       entryIndex: i,
       entryTime: iso(c.timestamp),
+      entryMs: candleMs,
       entry,
       premium,
       spot: c.open,
@@ -401,7 +420,8 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const losses = trades.filter((t) => t.netPnl <= 0);
   const gains = wins.reduce((sum, t) => sum + t.netPnl, 0);
   const loss = Math.abs(losses.reduce((sum, t) => sum + t.netPnl, 0));
-  const profitFactor = loss > 0 ? money(gains / loss) : gains > 0 ? money(gains) : 0;
+  // Undefined (null) with no losing trades; returning the summed gains would masquerade as a ratio.
+  const profitFactor = loss > 0 ? money(gains / loss) : gains > 0 ? null : 0;
 
   return {
     ...empty,

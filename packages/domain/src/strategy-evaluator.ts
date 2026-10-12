@@ -77,7 +77,11 @@ export function strategyExitLevels(input: { strategy: StrategyConfig; entryPrice
     for (let i = 0; i < 3; i++) targetPoints = (targetNet + calculateOptionCharges({ buyPrice: entryPrice, sellPrice: entryPrice + targetPoints, quantity }).totalRoundTripCharges + slippageBufferInr) / quantity;
   }
   if (!Number.isFinite(targetPoints) || targetPoints <= 0) return { error: 'A positive target is required.' };
-  return { stopPrice: Number(stopPrice.toFixed(6)), targetPrice: Number((Math.ceil((entryPrice + targetPoints) / tickSize - 1e-9) * tickSize).toFixed(6)) };
+  const roundedStop = Number(stopPrice.toFixed(6));
+  const roundedTarget = Number((Math.ceil((entryPrice + targetPoints) / tickSize - 1e-9) * tickSize).toFixed(6));
+  // Tick rounding can collapse a tiny stop distance onto the entry; that is not a protective stop.
+  if (!(roundedStop > 0 && roundedStop < entryPrice && roundedTarget > entryPrice)) return { error: 'Exit levels must satisfy 0 < stop < entry < target after tick rounding.' };
+  return { stopPrice: roundedStop, targetPrice: roundedTarget };
 }
 
 export function evaluateStrategyRules(context: StrategyEvaluationContext): StrategyEvaluationResult {

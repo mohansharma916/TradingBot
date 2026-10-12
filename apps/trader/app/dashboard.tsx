@@ -72,7 +72,6 @@ export default function DashboardScreen() {
   }, []);
 
   useEffect(() => {
-    setIsLiveConnected(false);
     void fetchLiveDashboard();
     if (!isMarketOpenForTrading()) {
       return;
@@ -85,7 +84,7 @@ export default function DashboardScreen() {
   const targetProfit = risk?.dailyTargetProfit ?? 0;
   const progressPct = targetProfit > 0 ? Math.max(0, Math.min(100, (netPnl / targetProfit) * 100)) : 0;
 
-  if (!isLiveConnected) return <div role="alert" style={{ color: colors.textSecondary }}>Dashboard data unavailable. Waiting for confirmed account and report responses.</div>;
+  if (!isLiveConnected && !lastSyncTime) return <div role="alert" style={{ color: colors.textSecondary }}>Dashboard data unavailable. Waiting for confirmed account and report responses.</div>;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: spacing.xl, maxWidth: 1200, margin: '0 auto', width: '100%' }}>
