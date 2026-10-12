@@ -354,6 +354,14 @@ export class StrategiesService {
     } else {
       try {
         strategy = this.getStrategy(id);
+        if (parsedReq.strategy) {
+          strategy = {
+            ...strategy,
+            ...(parsedReq.strategy as StrategyConfig),
+            id: strategy.id,
+            version: strategy.version,
+          };
+        }
       } catch (err) {
         if (parsedReq.strategy) {
           strategy = parsedReq.strategy as StrategyConfig;

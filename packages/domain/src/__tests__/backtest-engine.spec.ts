@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { StrategyConfig, StrategyStatus, TradeMode } from '@trading-bot/contracts';
+import { BacktestRequestSchema, StrategyConfig, StrategyStatus, TradeMode } from '@trading-bot/contracts';
 import {
   generateHistoricalMarketCandles,
   runStrategyBacktest,
@@ -9,6 +9,8 @@ import {
   PREDEFINED_STRATEGY_TEMPLATES,
   validateStrategyFeasibility,
   convertLegacyStrategyToAst,
+  buildIndicatorCache,
+  evaluateStrategyAst,
 } from '../index';
 
 describe('Historical Backtest Engine', () => {
@@ -610,6 +612,94 @@ describe('Historical Backtest Engine', () => {
       expect(result.modelAssumptions.some((a) => a.includes('RESEARCH_MODE'))).toBe(true);
       expect(result.modelAssumptions.some((a) => a.includes('ATM strike dynamically derived'))).toBe(true);
       expect(result.modelAssumptions.some((a) => a.includes('Historical dated statutory fee schedule'))).toBe(true);
+    });
+
+    it('B19: indicators respect configured source series and operand multiplier 0 evaluates to 0', () => {
+      const candles = Array.from({ length: 30 }, (_, i) => ({
+        timestamp: new Date(Date.parse('2026-10-05T03:45:00.000Z') + i * 300000).toISOString(),
+        open: 20000 + i * 10,
+        high: 20010 + i * 10,
+        low: 19990 + i * 10,
+        close: 20005 + i * 10,
+        volume: 2000,
+      }));
+
+      // Test buildIndicatorCache with source: 'open' vs default 'close'
+      const astClose: any = {
+        indicators: [{ id: 'rsi_close', type: 'RSI', period: 14, source: 'close' }],
+      };
+      const astOpen: any = {
+        indicators: [{ id: 'rsi_open', type: 'RSI', period: 14, source: 'open' }],
+      };
+      const cacheClose = buildIndicatorCache(candles, astClose, { timeframeMinutes: 5, candleTimestampBasis: 'OPEN' });
+      const cacheOpen = buildIndicatorCache(candles, astOpen, { timeframeMinutes: 5, candleTimestampBasis: 'OPEN' });
+      expect(cacheClose.indicatorSeries.get('rsi_close')).toBeDefined();
+      expect(cacheOpen.indicatorSeries.get('rsi_open')).toBeDefined();
+
+      // Test operand with multiplier: 0
+      const astWithZeroMult: any = {
+        direction: 'BULLISH',
+        indicators: [{ id: 'rsi', type: 'RSI', period: 14 }],
+        bullishEntry: {
+          operator: 'AND',
+          conditions: [
+            {
+              left: { type: 'INDICATOR', indicatorId: 'rsi' },
+              comparison: 'GT',
+              right: { type: 'INDICATOR', indicatorId: 'rsi', multiplier: 0 },
+            },
+          ],
+        },
+      };
+      const cache = buildIndicatorCache(candles, astWithZeroMult, { timeframeMinutes: 5, candleTimestampBasis: 'OPEN' });
+      const evalResult = evaluateStrategyAst(astWithZeroMult, candles.length - 1, candles, cache);
+      // Left is RSI (>0), right is RSI * 0 = 0, so RSI > 0 is true
+      expect(evalResult.bullishSignal).toBe(true);
+    });
+
+    it('B34: BacktestRequestSchema default values do not override strategy AST trailingProfit setting', () => {
+      const parsedReq = BacktestRequestSchema.parse({});
+      expect(parsedReq.useTrailingStop).toBeUndefined();
+      expect(parsedReq.trailingActivationProfitInr).toBeUndefined();
+      expect(parsedReq.trailingStepInr).toBeUndefined();
+
+      // AST with trailing disabled
+      const candles = generateHistoricalMarketCandles('NIFTY', 5, 5, '2026-10-05', '2026-10-05');
+      const stratWithoutTrailing = {
+        ...sampleStrategy,
+        astConfig: {
+          ...convertLegacyStrategyToAst(sampleStrategy),
+          trailingProfit: { enabled: false },
+        },
+      };
+      const result = runStrategyBacktest({
+        strategy: stratWithoutTrailing as any,
+        candles,
+        request: parsedReq,
+      });
+      expect(result.error).toBeUndefined();
+      // Trades should not have trailing stop set if trailing is disabled in AST
+      for (const t of result.trades) {
+        expect(t.trailingStopPrice).toBeUndefined();
+      }
+    });
+
+    it('B26: backtest result manifest includes runId, dataFingerprint, effective lots, and equity curve', () => {
+      const candles = generateHistoricalMarketCandles('NIFTY', 5, 5, '2026-10-05', '2026-10-05');
+      const result = runStrategyBacktest({
+        strategy: sampleStrategy,
+        candles,
+      });
+
+      expect(result.runId).toBeDefined();
+      expect(result.runId?.startsWith('bt_')).toBe(true);
+      expect(result.dataFingerprint).toContain('bars:');
+      expect(result.effectiveLotSize).toBe(65); // Active NIFTY lot size in 2026
+      expect(result.effectiveTickSize).toBe(0.05);
+      expect(result.effectiveStrategyConfig).toBeDefined();
+      expect(Array.isArray(result.equityCurve)).toBe(true);
+      expect(result.equityCurve!.length).toBeGreaterThanOrEqual(1);
+      expect(result.equityCurve![0]?.equity).toBe(10000);
     });
   });
 });

@@ -41,7 +41,38 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     fromDate = `${dates[0]}T00:00:00.000Z`;
     toDate = `${dates[1]}T23:59:59.999Z`;
   }
-  const empty:BacktestResult = {strategyId:strategy.id,strategyName:strategy.name,version:strategy.version,periodDays:Math.max(1,Math.ceil((Date.parse(toDate)-Date.parse(fromDate))/86400000)),timeframe,fromDate,toDate,dataSource,modelAssumptions,initialCapital,finalCapital:initialCapital,totalTrades:0,winningTrades:0,losingTrades:0,winRatePct:0,grossPnl:0,totalCharges:0,netPnl:0,maxDrawdown:0,maxDrawdownPct:0,profitFactor:0,trades:[]};
+  const runId = `bt_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  const dataFingerprint = `${candles.length}_bars:${candles[0]?.timestamp ?? 'none'}..${candles.at(-1)?.timestamp ?? 'none'}`;
+  const empty:BacktestResult = {
+    strategyId:strategy.id,
+    strategyName:strategy.name,
+    version:strategy.version,
+    periodDays:Math.max(1,Math.ceil((Date.parse(toDate)-Date.parse(fromDate))/86400000)),
+    timeframe,
+    fromDate,
+    toDate,
+    dataSource,
+    modelAssumptions,
+    runId,
+    dataFingerprint,
+    effectiveLotSize: lotSize,
+    effectiveTickSize: tickSize,
+    effectiveStrategyConfig: strategy as any,
+    equityCurve: [{ timestamp: fromDate, equity: initialCapital }],
+    initialCapital,
+    finalCapital:initialCapital,
+    totalTrades:0,
+    winningTrades:0,
+    losingTrades:0,
+    winRatePct:0,
+    grossPnl:0,
+    totalCharges:0,
+    netPnl:0,
+    maxDrawdown:0,
+    maxDrawdownPct:0,
+    profitFactor:0,
+    trades:[],
+  };
   if (!Number.isInteger(lotSize) || lotSize<=0 || !Number.isFinite(tickSize) || tickSize<=0 || !interval || !Number.isFinite(initialCapital) || initialCapital<=0) return {...empty,error:'Valid timeframe, capital and authoritative lot/tick metadata are required.'};
   if (candles.some((c,i)=>!Number.isFinite(Number(new Date(c.timestamp))) || ![c.open,c.high,c.low,c.close,c.volume].every(Number.isFinite) || c.low<=0 || c.high<Math.max(c.open,c.close) || c.low>Math.min(c.open,c.close) || c.volume<0 || (i>0 && Number(new Date(c.timestamp))===Number(new Date(candles[i-1]!.timestamp))))) return {...empty,error:'Invalid or duplicate underlying candles.'};
   if (candles.length<3) return empty;
@@ -63,7 +94,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const ast = convertLegacyStrategyToAst(strategy);
   if ((ast.indicators ?? []).some(ind=>ind.timeframe && ind.timeframe!==timeframe)) return {...empty,error:'Mixed indicator timeframes are unsupported; aligned source data is required.'};
   if (ast.contractSelection?.instrumentType==='FUTURES' || ast.exitRules?.exitOnIndicatorReversal) return {...empty,error:'Futures and generic indicator-reversal exits require a dedicated price/execution model.'};
-  const useTrailing = request?.useTrailingStop ?? ast.trailingProfit?.enabled ?? false;
+  const useTrailing = request?.useTrailingStop !== undefined ? request.useTrailingStop : (ast.trailingProfit?.enabled ?? false);
   if (useTrailing && ast.trailingProfit?.mode && ast.trailingProfit.mode!==TrailingProfitMode.FIXED_STEP) return {...empty,error:'Only fixed-step trailing is supported by this modeled backtest.'};
 
   // Build indicator cache over the full dataset (including warmup padding)
@@ -81,11 +112,14 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
   const maxTrades = Math.min(request?.maxTradesPerDay ?? Infinity,strategy.risk?.maxTradesPerDay ?? 3);
   const maxCapital = strategy.risk?.maxCapitalInr ?? strategy.maxCapitalInr ?? initialCapital;
   const cutoff = ast.exitRules?.marketCutoffTime ?? strategy.exit?.marketCutoff ?? '15:10';
-  const activation = request?.trailingActivationProfitInr ?? ast.trailingProfit?.activationProfitInr ?? 150;
-  const gap = request?.trailingStepInr ?? ast.trailingProfit?.trailingGapInr ?? ast.trailingProfit?.adjustmentStepInr ?? 50;
+  const activation = request?.trailingActivationProfitInr !== undefined ? request.trailingActivationProfitInr : (ast.trailingProfit?.activationProfitInr ?? 150);
+  const gap = request?.trailingStepInr !== undefined ? request.trailingStepInr : (ast.trailingProfit?.trailingGapInr ?? ast.trailingProfit?.adjustmentStepInr ?? 50);
   const toTick = (price: number, tick = tickSize) => Number((Math.round(price / tick) * tick).toFixed(2));
 
   const trades: BacktestTradeRecord[] = [];
+  const equityCurve: { timestamp: string; equity: number }[] = [
+    { timestamp: fromDate, equity: initialCapital },
+  ];
   let capital = initialCapital,
     peakEquity = initialCapital,
     drawdown = 0,
@@ -137,6 +171,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     peakEquity = Math.max(peakEquity, capital);
     drawdown = Math.max(drawdown, peakEquity - capital);
     drawdownPct = Math.max(drawdownPct, peakEquity > 0 ? ((peakEquity - capital) / peakEquity) * 100 : 0);
+    equityCurve.push({ timestamp, equity: capital });
     trades.push({
       id: `bt_${trades.length + 1}`,
       entryTime: t.entryTime,
@@ -373,6 +408,7 @@ export function runStrategyBacktest(options:BacktestOptions):BacktestResult {
     maxDrawdownPct: money(drawdownPct),
     profitFactor,
     trades,
+    equityCurve,
   };
 }
 

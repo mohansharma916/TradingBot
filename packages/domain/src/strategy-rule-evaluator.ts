@@ -45,7 +45,6 @@ export function buildIndicatorCache(
     warmupRequired: 20,
   };
 
-  const closes = candles.map((c) => c.close);
   const volumes = candles.map((c) => c.volume);
 
   let maxWarmup = 2;
@@ -75,7 +74,8 @@ export function buildIndicatorCache(
       }
 
       case IndicatorType.RSI: {
-        const series = calculateRSI(closes, period);
+        const sourceData = getSourceSeries(candles, ind.source);
+        const series = calculateRSI(sourceData, period);
         const padded = padSeries(series, candles.length);
         cache.indicatorSeries.set(id, padded);
         if (period + 1 > maxWarmup) maxWarmup = period + 1;
@@ -93,7 +93,8 @@ export function buildIndicatorCache(
 
       case IndicatorType.BOLLINGER_BANDS: {
         const mult = ind.stdDevMultiplier ?? 2;
-        const bb = calculateBollingerBands(closes, period, mult);
+        const sourceData = getSourceSeries(candles, ind.source);
+        const bb = calculateBollingerBands(sourceData, period, mult);
         cache.multiFieldSeries.set(id, {
           upper: padSeries(bb.upper, candles.length),
           middle: padSeries(bb.middle, candles.length),
@@ -107,7 +108,8 @@ export function buildIndicatorCache(
         const fast = ind.fastPeriod ?? 12;
         const slow = ind.slowPeriod ?? 26;
         const signal = ind.signalPeriod ?? 9;
-        const macd = calculateMACD(closes, fast, slow, signal);
+        const sourceData = getSourceSeries(candles, ind.source);
+        const macd = calculateMACD(sourceData, fast, slow, signal);
         cache.multiFieldSeries.set(id, {
           macd: padSeries(macd.macd, candles.length),
           signal: padSeries(macd.signal, candles.length),
@@ -249,7 +251,7 @@ export function resolveOperandValue(
 
   if (operand.type === 'NUMBER') {
     const base = operand.value ?? 0;
-    return operand.multiplier ? base * operand.multiplier : base;
+    return operand.multiplier !== undefined ? base * operand.multiplier : base;
   }
 
   const offset = operand.offset ?? 0;
@@ -305,7 +307,7 @@ export function resolveOperandValue(
     return null;
   }
 
-  return operand.multiplier ? value * operand.multiplier : value;
+  return operand.multiplier !== undefined ? value * operand.multiplier : value;
 }
 
 /**
