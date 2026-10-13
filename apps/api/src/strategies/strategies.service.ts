@@ -21,6 +21,7 @@ import {
   calculateStrategyVersionHash,
   fetchRealHistoricalCandles,
   getDatedLotSize,
+  isCalendarVerifiedForDate,
   requiresVersionBump,
   runPriceActionMomentumBacktest,
   runStrategyBacktest,
@@ -388,9 +389,11 @@ export class StrategiesService {
       }
     }
 
-    // Respect requested and configured limits strictly without synthetic inflation
-    const maxTradeLoss = parsedReq.maxTradeLossInr ?? strategy.risk?.maxAllInTradeLossInr ?? 500;
-    const maxDailyLoss = parsedReq.maxDailyLossInr ?? strategy.risk?.maxAllInDailyLossInr ?? 1500;
+    // A request may tighten saved limits but never enlarge them.
+    const tighter = (requested: number | undefined, saved: number | undefined, fallback: number) =>
+      Math.min(requested ?? Infinity, saved ?? (requested === undefined ? fallback : Infinity));
+    const maxTradeLoss = tighter(parsedReq.maxTradeLossInr, strategy.risk?.maxAllInTradeLossInr ?? strategy.maxAllInTradeLossInr, 500);
+    const maxDailyLoss = tighter(parsedReq.maxDailyLossInr, strategy.risk?.maxAllInDailyLossInr ?? strategy.maxAllInDailyLossInr, 1500);
     const maxRoundTripCostBudget = strategy.risk?.maxRoundTripCostBudgetInr ?? strategy.maxRoundTripCostBudgetInr ?? 60;
 
     // Keep strategy aligned with backtest request params and timeframe
@@ -414,6 +417,15 @@ export class StrategiesService {
       maxDailyLossInr: maxDailyLoss,
     };
 
+    // Fetch a week of warmup history before the requested window so indicators are ready on its first bar.
+    // The engine still restricts entries to the requested window. Never pad into an unverified calendar year.
+    const windowStart = parsedReq.fromDate ?? parsedReq.toDate;
+    let fetchFrom = parsedReq.fromDate;
+    if (windowStart && /^\d{4}-\d{2}-\d{2}$/.test(windowStart.slice(0, 10))) {
+      const padded = new Date(Date.parse(`${windowStart.slice(0, 10)}T00:00:00Z`) - 7 * 86400000);
+      fetchFrom = isCalendarVerifiedForDate(padded) ? padded.toISOString().slice(0, 10) : windowStart.slice(0, 10);
+    }
+
     // Underlying OHLC comes from a named provider; options premiums remain a disclosed model.
     const { candles, dataSource } = await fetchRealHistoricalCandles({
       underlying,
@@ -421,8 +433,8 @@ export class StrategiesService {
       interval,
       authToken: this.tokens?.hasValidToken() ? this.tokens.getToken()?.accessToken : undefined,
       preferUpstox: true,
-      fromDate: parsedReq.fromDate,
-      toDate: parsedReq.toDate,
+      fromDate: fetchFrom,
+      toDate: parsedReq.toDate ?? parsedReq.fromDate,
     });
 
     if (candles.length > 10000) {
@@ -432,8 +444,10 @@ export class StrategiesService {
     // B06: Canonical PAM strategy dispatch ensuring genuine trend efficiency and structure rules
     if (strategy.id === 'tpl_price_action_momentum' || strategy.templateId === 'tpl_price_action_momentum') {
       const lotSize = getDatedLotSize(underlying, candles[0]?.timestamp);
+      // PAM needs only a few bars of history; keep its trades inside the requested window.
+      const windowStartMs = windowStart ? Date.parse(`${windowStart.slice(0, 10)}T00:00:00+05:30`) : -Infinity;
       const pamResult = runPriceActionMomentumBacktest({
-        candles,
+        candles: candles.filter((candle) => Date.parse(String(candle.timestamp)) >= windowStartMs),
         initialCapital: parsedReq.initialCapital,
         lotSize,
       });

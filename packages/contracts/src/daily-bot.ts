@@ -93,6 +93,8 @@ export const DailyBotTradeSchema = z.object({
   reservationId: z.string().min(1).optional(),
   signalKey: z.string().min(1).optional(),
   initialStopPrice: amountSchema.optional(),
+  /** Target fixed at entry; the same level the broker ledger and live exit monitor use. */
+  targetPrice: amountSchema.optional(),
   tickSize: amountSchema.optional(),
   entryActualCharges: z.number().finite().nonnegative().optional(),
   grossPnl: z.number().finite().optional(),

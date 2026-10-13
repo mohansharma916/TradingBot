@@ -506,10 +506,34 @@ describe('Historical Backtest Engine', () => {
       if (pamResult.trades.length > 0) {
         // Profit factor should never be artificial 99.99 or 0 if winning
         if (pamResult.winningTrades > 0 && pamResult.losingTrades === 0) {
-          expect(pamResult.profitFactor).toBeGreaterThan(0);
-          expect(pamResult.profitFactor).not.toBe(99.99);
+          expect(pamResult.profitFactor).toBeNull();
         }
       }
+    });
+  });
+
+  describe('PAM session enforcement', () => {
+    const trendingMinutes = (startUtc: string, count: number) => Array.from({ length: count }, (_, i) => ({
+      timestamp: new Date(Date.parse(startUtc) + i * 60000).toISOString(),
+      open: 10000 + i * 10, high: 10005 + i * 10, low: 9995 + i * 10, close: 10004 + i * 10, volume: 2000,
+    }));
+    const pamConfig = { candleCount: 4, minimumStructureConfirmations: 1, minimumEfficiency: 0.1, trailingStopEnabled: false, maxTradesPerDay: 50, cooldownMinutes: 0,
+      stopLossType: 'FIXED_POINTS' as const, stopLossValue: 2, targetProfitType: 'FIXED_POINTS' as const, targetPoints: 500 };
+
+    it('opens no PAM entries after the configured last-entry time', () => {
+      // 14:50–15:09 IST: after the default 14:45 last entry.
+      const result = runPriceActionMomentumBacktest({ candles: trendingMinutes('2026-10-12T09:20:00Z', 20), config: pamConfig, initialCapital: 10000, lotSize: 65 });
+      expect(result.trades).toHaveLength(0);
+    });
+
+    it('exits an open PAM position at the 15:10 IST cutoff instead of holding to session end', () => {
+      // 14:35–15:24 IST, with an unreachable target and a stop the trend never touches.
+      const result = runPriceActionMomentumBacktest({ candles: trendingMinutes('2026-10-12T09:05:00Z', 50), config: pamConfig, initialCapital: 10000, lotSize: 65 });
+      expect(result.trades.length).toBeGreaterThan(0);
+      const last = result.trades.at(-1)!;
+      expect(last.exitReason).toBe('TIME_CUTOFF');
+      expect(new Date(Date.parse(last.exitTime) + 330 * 60000).toISOString().slice(11, 16)).toBe('15:10');
+      expect(result.trades.every((trade) => new Date(Date.parse(trade.entryTime) + 330 * 60000).toISOString().slice(11, 16) <= '14:45')).toBe(true);
     });
   });
 

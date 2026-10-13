@@ -337,7 +337,12 @@ export interface PriceActionMomentumBacktestOptions {
   initialCapital?: number;
   lotSize?: number;
   tickSize?: number;
+  /** Percentage of entry premium lost per 375-minute session while held. */
+  thetaDecayPctPerSession?: number;
 }
+
+/** Intraday square-off boundary for open PAM positions (IST). */
+const PAM_MARKET_CUTOFF = '15:10';
 
 export function runPriceActionMomentumBacktest(
   options: PriceActionMomentumBacktestOptions,
@@ -355,7 +360,11 @@ export function runPriceActionMomentumBacktest(
   const lotSize = options.lotSize ?? getDatedLotSize(config.underlying, candles[0]?.timestamp);
   const tickSize = options.tickSize ?? 0.05;
   const initialCapital = options.initialCapital ?? 10000;
+  const thetaPct = options.thetaDecayPctPerSession ?? 10;
   const candleCount = config.candleCount;
+  const minuteMs = 60000;
+  const toTick = (price: number) => Number((Math.round(price / tickSize) * tickSize).toFixed(2));
+  const istTime = (ms: number) => new Date(ms + 330 * 60000).toISOString().slice(11, 16);
 
   const fromDate = candles[0] ? new Date(candles[0].timestamp).toISOString() : new Date().toISOString();
   const toDate = candles[candles.length - 1]
@@ -373,8 +382,11 @@ export function runPriceActionMomentumBacktest(
     dataSource: 'MODELED_OPTIONS_ON_PRICE_ACTION_MOMENTUM',
     modelAssumptions: [
       'Raw OHLC price action directional momentum without EMA/SMA indicators.',
-      'Options premium modeled at 0.55% spot with 0.5 delta.',
-      'Includes exchange turnover, STT, GST, stamp duty, and SEBI charges.',
+      'Options premium modeled at 0.55% spot with 0.5 delta; no IV or gamma modeling.',
+      `Time decay modeled at ${thetaPct}% of entry premium per session; expiry-day decay is much faster and is not modeled.`,
+      'Entries fill one tick above and exits one tick below the modeled premium; fills are rounded to tick size.',
+      `Entries only inside the configured session window; open positions exit at the ${PAM_MARKET_CUTOFF} IST cutoff.`,
+      'Includes dated exchange turnover, STT, GST, stamp duty, and SEBI charges.',
     ],
     initialCapital,
     finalCapital: initialCapital,
@@ -428,7 +440,9 @@ export function runPriceActionMomentumBacktest(
   let activeTrade: {
     entryIndex: number;
     entryTime: string;
+    entryMs: number;
     entryPrice: number;
+    premium: number;
     spotEntry: number;
     quantity: number;
     stopLossPrice: number;
@@ -440,11 +454,13 @@ export function runPriceActionMomentumBacktest(
     marketEfficiency: number;
   } | null = null;
 
-  const modelOptionPrice = (spot: number, active: typeof activeTrade) => {
+  /** Bid-side modeled premium at a point in time: delta move, minus decay while held, minus one tick of spread. */
+  const modelOptionPrice = (spot: number, active: typeof activeTrade, atMs: number) => {
     if (!active) return 0;
     const sign = active.type === 'CE' ? 1 : -1;
-    const premium = active.entryPrice + sign * (spot - active.spotEntry) * 0.5;
-    return Math.max(tickSize, Number(premium.toFixed(2)));
+    const minutesHeld = Math.max(0, (atMs - active.entryMs) / minuteMs);
+    const decay = (active.premium * thetaPct) / 100 / 375 * minutesHeld;
+    return Math.max(tickSize, toTick(active.premium + sign * (spot - active.spotEntry) * 0.5 - decay - tickSize));
   };
 
   const settleTrade = (
@@ -454,11 +470,13 @@ export function runPriceActionMomentumBacktest(
     index: number,
   ) => {
     if (!activeTrade) return;
+    exitPrice = toTick(exitPrice);
     const grossPnl = Number(((exitPrice - activeTrade.entryPrice) * activeTrade.quantity).toFixed(2));
     const charges = calculateOptionCharges({
       buyPrice: activeTrade.entryPrice,
       sellPrice: exitPrice,
       quantity: activeTrade.quantity,
+      date: exitTime,
     }).totalRoundTripCharges;
     const netPnl = Number((grossPnl - charges).toFixed(2));
 
@@ -486,7 +504,7 @@ export function runPriceActionMomentumBacktest(
       symbol: `${config.underlying} MODELED ATM ${activeTrade.type}`,
       side: 'BUY',
       entryPrice: activeTrade.entryPrice,
-      exitPrice: Number(exitPrice.toFixed(2)),
+      exitPrice,
       quantity: activeTrade.quantity,
       grossPnl,
       charges,
@@ -510,8 +528,9 @@ export function runPriceActionMomentumBacktest(
     // Reset daily counters on new session day
     if (currentDay !== day) {
       if (activeTrade && lastEligibleCandle) {
-        const exitPr = modelOptionPrice(lastEligibleCandle.close, activeTrade);
-        settleTrade(exitPr, new Date(lastEligibleCandle.timestamp).toISOString(), 'SESSION_END', i - 1);
+        const lastCloseMs = Number(new Date(lastEligibleCandle.timestamp)) + minuteMs;
+        const exitPr = modelOptionPrice(lastEligibleCandle.close, activeTrade, lastCloseMs);
+        settleTrade(exitPr, new Date(lastCloseMs).toISOString(), 'SESSION_END', i - 1);
       }
       day = currentDay;
       dailyPnl = 0;
@@ -525,20 +544,29 @@ export function runPriceActionMomentumBacktest(
     lastEligibleCandle = currentCandle;
 
     // Active position management
+    const candleOpenMs = Number(new Date(currentCandle.timestamp));
+    const candleCloseMs = candleOpenMs + minuteMs;
     if (activeTrade) {
-      const optionOpen = modelOptionPrice(currentCandle.open, activeTrade);
-      const optionHigh = modelOptionPrice(activeTrade.type === 'CE' ? currentCandle.high : currentCandle.low, activeTrade);
-      const optionLow = modelOptionPrice(activeTrade.type === 'CE' ? currentCandle.low : currentCandle.high, activeTrade);
-      const optionClose = modelOptionPrice(currentCandle.close, activeTrade);
-      const closeTime = new Date(currentCandle.timestamp).toISOString();
+      const optionOpen = modelOptionPrice(currentCandle.open, activeTrade, candleOpenMs);
+      const optionHigh = modelOptionPrice(activeTrade.type === 'CE' ? currentCandle.high : currentCandle.low, activeTrade, candleCloseMs);
+      const optionLow = modelOptionPrice(activeTrade.type === 'CE' ? currentCandle.low : currentCandle.high, activeTrade, candleCloseMs);
+      const optionClose = modelOptionPrice(currentCandle.close, activeTrade, candleCloseMs);
+      const openTime = new Date(candleOpenMs).toISOString();
+      const closeTime = new Date(candleCloseMs).toISOString();
+
+      // Intraday cutoff: exit at the open of the first bar at or after the cutoff.
+      if (istTime(candleOpenMs) >= PAM_MARKET_CUTOFF) {
+        settleTrade(optionOpen, openTime, 'TIME_CUTOFF', i);
+        continue;
+      }
 
       // Check Opening Gap First (B21)
       if (optionOpen >= activeTrade.targetPrice) {
-        settleTrade(optionOpen, closeTime, 'TARGET_PROFIT', i);
+        settleTrade(optionOpen, openTime, 'TARGET_PROFIT', i);
         continue;
       }
       if (optionOpen <= activeTrade.stopLossPrice) {
-        settleTrade(optionOpen, closeTime, activeTrade.trailing ? 'TRAILING_STOP' : 'STOP_LOSS', i);
+        settleTrade(optionOpen, openTime, activeTrade.trailing ? 'TRAILING_STOP' : 'STOP_LOSS', i);
         continue;
       }
 
@@ -566,7 +594,7 @@ export function runPriceActionMomentumBacktest(
         if (unrealizedNet >= config.trailingActivationProfitInr) {
           activeTrade.trailing = true;
           const trailingPoints = config.trailingStepInr / activeTrade.quantity;
-          const newStop = Number((activeTrade.peakPrice - trailingPoints).toFixed(2));
+          const newStop = toTick(activeTrade.peakPrice - trailingPoints);
           activeTrade.stopLossPrice = Math.max(activeTrade.stopLossPrice, newStop);
         }
       }
@@ -576,6 +604,7 @@ export function runPriceActionMomentumBacktest(
         buyPrice: activeTrade.entryPrice,
         sellPrice: optionClose,
         quantity: activeTrade.quantity,
+        date: closeTime,
       }).totalRoundTripCharges;
       const mtmNet = (optionClose - activeTrade.entryPrice) * activeTrade.quantity - currentCharges;
       const currentEquity = capital + mtmNet;
@@ -588,6 +617,12 @@ export function runPriceActionMomentumBacktest(
 
     // Cooldown check
     if (i - lastExitIndex < config.cooldownMinutes) {
+      continue;
+    }
+
+    // Session entry window, judged at the bar close where the entry would fill.
+    const entryClock = istTime(candleCloseMs);
+    if (entryClock < config.session.start || entryClock > config.session.lastEntry || entryClock >= PAM_MARKET_CUTOFF) {
       continue;
     }
 
@@ -614,8 +649,8 @@ export function runPriceActionMomentumBacktest(
     if (evalResult.signal === 'BUY_CE' || evalResult.signal === 'BUY_PE') {
       const type = evalResult.signal === 'BUY_CE' ? 'CE' : 'PE';
       const spotEntry = currentCandle.close;
-      const initialPremium = Number(Math.max(25, spotEntry * 0.0055).toFixed(2));
-      const entryPrice = initialPremium;
+      const initialPremium = toTick(Math.max(25, spotEntry * 0.0055));
+      const entryPrice = toTick(initialPremium + tickSize);
       const requiredCapital = entryPrice * lotSize;
 
       // 1. Funding check: cannot enter if position premium exceeds available capital
@@ -641,6 +676,7 @@ export function runPriceActionMomentumBacktest(
         buyPrice: entryPrice,
         sellPrice: Math.max(tickSize, entryPrice - stopLossPoints),
         quantity: lotSize,
+        date: candleCloseMs,
       }).totalRoundTripCharges;
 
       const maxGrossRiskInr = Math.max(0, config.maxAllInTradeLossInr - estimatedRoundTripCharges);
@@ -650,6 +686,7 @@ export function runPriceActionMomentumBacktest(
         buyPrice: entryPrice,
         sellPrice: Math.max(tickSize, entryPrice - maxAllowedStopPoints),
         quantity: lotSize,
+        date: candleCloseMs,
       }).totalRoundTripCharges;
 
       while (maxAllowedStopPoints >= tickSize && maxAllowedStopPoints * lotSize + actualChargesAtStop > config.maxAllInTradeLossInr) {
@@ -659,7 +696,10 @@ export function runPriceActionMomentumBacktest(
         continue;
       }
       stopLossPoints = Math.min(stopLossPoints, maxAllowedStopPoints);
-      const stopLossPrice = Math.max(tickSize, Number((entryPrice - stopLossPoints).toFixed(2)));
+      const stopLossPrice = Math.max(tickSize, toTick(entryPrice - stopLossPoints));
+      if (stopLossPrice >= entryPrice) {
+        continue;
+      }
 
       // 3. Daily loss allowance check (B12)
       if (stopLossPoints * lotSize + estimatedRoundTripCharges > remainingDailyBudget) {
@@ -673,12 +713,18 @@ export function runPriceActionMomentumBacktest(
       } else if (config.targetProfitType === 'PERCENTAGE') {
         targetPoints = Number((entryPrice * (config.targetPoints / 100)).toFixed(2));
       }
-      const targetPrice = Number((entryPrice + targetPoints).toFixed(2));
+      const targetPrice = toTick(entryPrice + targetPoints);
+      if (targetPrice <= entryPrice) {
+        continue;
+      }
 
       activeTrade = {
         entryIndex: i,
-        entryTime: new Date(currentCandle.timestamp).toISOString(),
+        // Signal uses this bar's close, so the modeled fill is at the bar close, not its open.
+        entryTime: new Date(candleCloseMs).toISOString(),
+        entryMs: candleCloseMs,
         entryPrice,
+        premium: initialPremium,
         spotEntry,
         quantity: lotSize,
         stopLossPrice,
@@ -696,8 +742,9 @@ export function runPriceActionMomentumBacktest(
 
   // Settle any remaining active trade at last eligible candle (B13)
   if (activeTrade && lastEligibleCandle) {
-    const exitPr = modelOptionPrice(lastEligibleCandle.close, activeTrade);
-    settleTrade(exitPr, new Date(lastEligibleCandle.timestamp).toISOString(), 'BACKTEST_END', candles.indexOf(lastEligibleCandle));
+    const lastCloseMs = Number(new Date(lastEligibleCandle.timestamp)) + minuteMs;
+    const exitPr = modelOptionPrice(lastEligibleCandle.close, activeTrade, lastCloseMs);
+    settleTrade(exitPr, new Date(lastCloseMs).toISOString(), 'BACKTEST_END', candles.indexOf(lastEligibleCandle));
   }
 
   // Calculate backtest metrics
@@ -711,8 +758,8 @@ export function runPriceActionMomentumBacktest(
 
   const totalWins = trades.filter((t) => t.netPnl > 0).reduce((sum, t) => sum + t.netPnl, 0);
   const totalLosses = Math.abs(trades.filter((t) => t.netPnl < 0).reduce((sum, t) => sum + t.netPnl, 0));
-  // B24: return 0 when no losses without artificial 99.99 sentinel
-  const profitFactor = totalLosses > 0 ? Number((totalWins / totalLosses).toFixed(2)) : totalWins > 0 ? Number(totalWins.toFixed(2)) : 0;
+  // B24: undefined (null) with no losing trades; never a sentinel or the summed gains.
+  const profitFactor = totalLosses > 0 ? Number((totalWins / totalLosses).toFixed(2)) : totalWins > 0 ? null : 0;
 
   const averageProfit = winningTrades > 0 ? Number((totalWins / winningTrades).toFixed(2)) : 0;
   const averageLoss = losingTrades > 0 ? Number((totalLosses / losingTrades).toFixed(2)) : 0;

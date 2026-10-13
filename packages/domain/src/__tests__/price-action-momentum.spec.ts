@@ -273,7 +273,7 @@ describe('Price Action Directional Momentum Strategy Unit Tests', () => {
     it('runs historical backtest and computes comprehensive quantitative metrics', () => {
       // Build 60 synthetic 1m intraday candles
       const candles: Candle[] = [];
-      const baseTime = Date.parse('2026-03-02T09:15:00.000Z');
+      const baseTime = Date.parse('2026-03-02T03:45:00.000Z'); // 09:15 IST
       let currentClose = 22000;
 
       for (let i = 0; i < 60; i++) {
@@ -306,7 +306,8 @@ describe('Price Action Directional Momentum Strategy Unit Tests', () => {
       expect(backtest.winRatePct).toBeLessThanOrEqual(100);
       expect(backtest.totalCharges).toBeGreaterThan(0); // Real statutory charges deducted
       expect(Number.isFinite(backtest.expectancy)).toBe(true);
-      expect(Number.isFinite(backtest.profitFactor)).toBe(true);
+      // Null only when there are no losing trades; otherwise a finite ratio.
+      expect(backtest.losingTrades === 0 ? backtest.profitFactor === null || backtest.profitFactor === 0 : Number.isFinite(backtest.profitFactor)).toBe(true);
     });
   });
 });

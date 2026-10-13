@@ -85,11 +85,36 @@ describe('Strategies Routing & Timeframe Alignment Regression Tests', () => {
     expect(fetchSpy).toHaveBeenCalled();
     const fetchArgs = fetchSpy.mock.calls[0]![0];
     expect(fetchArgs.interval).toBe('15m');
+    // A week of indicator warmup is fetched ahead of the requested window; trading stays inside it.
+    expect(fetchArgs.fromDate).toBe('2026-09-28');
+    expect(fetchArgs.toDate).toBe('2026-10-05');
+    expect(runSpy.mock.calls[0]![0].request?.fromDate).toBe('2026-10-05');
 
     expect(runSpy).toHaveBeenCalled();
     const runArgs = runSpy.mock.calls[0]![0];
     expect(runArgs.strategy.timeframe).toBe('15m');
     expect(result.timeframe).toBe('15m');
+
+    fetchSpy.mockRestore();
+    runSpy.mockRestore();
+  });
+
+  it('keeps saved risk limits when a backtest request omits them, and never lets a request enlarge them', async () => {
+    const fetchSpy = vi.spyOn(domainModule, 'fetchRealHistoricalCandles').mockResolvedValue({ candles: [], dataSource: 'MOCK_TEST_UNDERLYING' } as any);
+    const runSpy = vi.spyOn(domainModule, 'runStrategyBacktest').mockReturnValue({ trades: [], timeframe: '5m' } as any);
+    const service = new StrategiesService(undefined as never, undefined as any, '');
+    const strategy = service.getAllStrategies()[0]!;
+    strategy.risk = { ...strategy.risk!, maxAllInTradeLossInr: 200, maxAllInDailyLossInr: 400 };
+
+    await service.runBacktest(strategy.id, { initialCapital: 10000 });
+    let risk = runSpy.mock.calls[0]![0].strategy.risk!;
+    expect(risk.maxAllInTradeLossInr).toBe(200);
+    expect(risk.maxAllInDailyLossInr).toBe(400);
+
+    await service.runBacktest(strategy.id, { initialCapital: 10000, maxTradeLossInr: 900, maxDailyLossInr: 150 });
+    risk = runSpy.mock.calls[1]![0].strategy.risk!;
+    expect(risk.maxAllInTradeLossInr).toBe(200); // request cannot enlarge the saved ₹200 cap
+    expect(risk.maxAllInDailyLossInr).toBe(150); // request may tighten
 
     fetchSpy.mockRestore();
     runSpy.mockRestore();

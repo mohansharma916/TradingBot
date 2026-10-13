@@ -54,15 +54,93 @@ export default function MarketsScreen() {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, any>>({});
 
+  // Real-time WebSocket streaming connection
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let isMounted = true;
+
+    try {
+      const token = typeof window !== 'undefined' ? JSON.parse(window.sessionStorage.getItem('TRADING_OWNER_SESSION') || '{}')?.token : null;
+      if (token) {
+        const wsUrl = (process.env.EXPO_PUBLIC_API_URL || 'http://localhost:4000/api/v1')
+          .replace(/^http/, 'ws')
+          .replace(/\/api\/v1\/?$/, '/ws');
+
+        ws = new WebSocket(wsUrl, ['owner', token]);
+
+        ws.onmessage = (event) => {
+          if (!isMounted) return;
+          try {
+            const data = JSON.parse(event.data);
+            if (data.topic === 'quotes.snapshot' && Array.isArray(data.payload)) {
+              const quotesList = data.payload;
+              setWatchlistQuotes((prev) => {
+                const updated = { ...prev };
+                for (const q of quotesList) {
+                  if (q.instrumentKey) updated[q.instrumentKey] = q;
+                }
+                return updated;
+              });
+
+              const targetKey = selectedUnderlying === 'NIFTY' ? 'NSE_INDEX|Nifty 50' : 'NSE_INDEX|Nifty Bank';
+              const spotUpdate = quotesList.find((q: any) => q.instrumentKey === targetKey);
+              if (spotUpdate && spotUpdate.lastPrice > 0) {
+                setLiveSpotPrice(spotUpdate.lastPrice);
+              }
+
+              setLiveOptionRows((prev) => {
+                if (!prev) return prev;
+                let changed = false;
+                const next = prev.map((row) => {
+                  let callUpdated = row.call;
+                  let putUpdated = row.put;
+
+                  if (row.call?.instrumentKey) {
+                    const match = quotesList.find((q: any) => q.instrumentKey === row.call?.instrumentKey);
+                    if (match && match.lastPrice > 0) {
+                      changed = true;
+                      callUpdated = { ...row.call, ...match };
+                    }
+                  }
+                  if (row.put?.instrumentKey) {
+                    const match = quotesList.find((q: any) => q.instrumentKey === row.put?.instrumentKey);
+                    if (match && match.lastPrice > 0) {
+                      changed = true;
+                      putUpdated = { ...row.put, ...match };
+                    }
+                  }
+
+                  if (callUpdated !== row.call || putUpdated !== row.put) {
+                    return { ...row, call: callUpdated, put: putUpdated };
+                  }
+                  return row;
+                });
+                return changed ? next : prev;
+              });
+            } else if (data.topic === 'feed.status') {
+              setIsLiveConnected(data.payload?.status === 'CONNECTED');
+              if (data.payload?.provenance) setDataSource(data.payload.provenance);
+            }
+          } catch {}
+        };
+      }
+    } catch {}
+
+    return () => {
+      isMounted = false;
+      ws?.close();
+    };
+  }, [selectedUnderlying]);
+
   // Periodic sync: only polls during active market hours; fetches once when market is closed
   useEffect(() => {
     let isMounted = true;
     const marketOpen = isMarketOpenForTrading();
     setIsMarketOpen(marketOpen);
 
-    const fetchLiveChain = async () => {
+    const fetchLiveChain = async (isManual = false) => {
       try {
-        setIsRefreshing(true);
+        if (isManual) setIsRefreshing(true);
         const [chain, diag, watchlist] = await Promise.all([
           apiClient.getOptionChain(selectedUnderlying, selectedExpiry),
           apiClient.getFeedHealth(),
@@ -89,22 +167,28 @@ export default function MarketsScreen() {
           setFeedLatencyMs(diag.lastTickReceivedAt ? diag.feedLatencyMs : null);
           setIsFeedStale(diag.provenance !== 'LIVE' || diag.staleCount > 0);
         }
-      } catch (failure) { if (isMounted) { setIsLiveConnected(false); setDataSource('UNAVAILABLE'); setConnectionError(formatErrorMessage(failure) || 'Market data unavailable.'); } } finally {
-        if (isMounted) setIsRefreshing(false);
+      } catch (failure) {
+        if (isMounted) {
+          setIsLiveConnected(false);
+          setDataSource('UNAVAILABLE');
+          setConnectionError(formatErrorMessage(failure) || 'Market data unavailable.');
+        }
+      } finally {
+        if (isMounted && isManual) setIsRefreshing(false);
       }
     };
 
     // Always fetch closing/live snapshot upon mount or selection change
-    fetchLiveChain();
+    fetchLiveChain(snapshotTrigger > 0);
 
-    // If market is closed, DO NOT poll every 4 seconds. Save network, CPU, and API quotas.
+    // If market is closed, DO NOT poll continuously. Save network, CPU, and API quotas.
     if (!marketOpen) {
       return () => {
         isMounted = false;
       };
     }
 
-    const interval = setInterval(fetchLiveChain, 4000);
+    const interval = setInterval(() => fetchLiveChain(false), 3000);
     return () => {
       isMounted = false;
       clearInterval(interval);

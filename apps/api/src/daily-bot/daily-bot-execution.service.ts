@@ -336,7 +336,7 @@ export class DailyBotExecutionService {
         const price = confirmation.averagePrice;
         this.reservations.commitReservationToPosition(reservation.id, this.money(price * quantity));
         const partial: DailyBotTrade = { proposalId: proposal.id, orderId: ack.orderId, instrumentKey: proposal.instrumentKey, symbol: proposal.symbol, quantity,
-          entryPrice: price, currentPrice: price, stopPrice: stop, initialStopPrice: stop, peakNetProfit: 0, protectedNetProfit: -allInLoss, trailingActive: false,
+          entryPrice: price, currentPrice: price, stopPrice: stop, initialStopPrice: stop, targetPrice: exits.targetPrice, peakNetProfit: 0, protectedNetProfit: -allInLoss, trailingActive: false,
           status: 'ERROR', realizedNetPnl: 0, estimatedCharges: calculateOptionCharges({ buyPrice: price, sellPrice: Math.max(instrument.tickSize, stop), quantity }).totalRoundTripCharges,
           reservationId: reservation.id, signalKey, tickSize: instrument.tickSize, instrumentSnapshot: structuredClone(instrument), openedAt: new Date().toISOString(), closedAt: null };
         session.trades.push(partial);
@@ -364,7 +364,7 @@ export class DailyBotExecutionService {
       const fillPrice = fills.reduce((sum, fill) => sum + fill.fillPrice * fill.fillQty, 0) / quantity;
       const actualEntryCharges = this.money(fills.reduce((sum, fill) => sum + fill.actualCharges, 0));
       this.reservations.commitReservationToPosition(reservation.id, this.money(fillPrice * quantity));
-      const trade: DailyBotTrade = { proposalId: proposal.id, orderId: ack.orderId, instrumentKey: proposal.instrumentKey, symbol: proposal.symbol, quantity, entryPrice: fillPrice, currentPrice: fillPrice, stopPrice: stop, initialStopPrice: stop, peakNetProfit: 0, protectedNetProfit: -allInLoss, trailingActive: false, status: 'OPEN', realizedNetPnl: 0, estimatedCharges: charges, entryActualCharges: this.isLive() ? undefined : actualEntryCharges, reservationId: reservation.id, signalKey, tickSize: instrument.tickSize, instrumentSnapshot: structuredClone(instrument), grossPnl: 0, netPnl: -charges, openedAt: new Date().toISOString(), closedAt: null, exitOrderId: null, exitPrice: null, exitReason: null };
+      const trade: DailyBotTrade = { proposalId: proposal.id, orderId: ack.orderId, instrumentKey: proposal.instrumentKey, symbol: proposal.symbol, quantity, entryPrice: fillPrice, currentPrice: fillPrice, stopPrice: stop, initialStopPrice: stop, targetPrice: exits.targetPrice, peakNetProfit: 0, protectedNetProfit: -allInLoss, trailingActive: false, status: 'OPEN', realizedNetPnl: 0, estimatedCharges: charges, entryActualCharges: this.isLive() ? undefined : actualEntryCharges, reservationId: reservation.id, signalKey, tickSize: instrument.tickSize, instrumentSnapshot: structuredClone(instrument), grossPnl: 0, netPnl: -charges, openedAt: new Date().toISOString(), closedAt: null, exitOrderId: null, exitPrice: null, exitReason: null };
       session.trades.push(trade);
       session.tradesExecuted++;
       if (this.isLive()) {
@@ -452,9 +452,11 @@ export class DailyBotExecutionService {
       await this.exit(session, trade, trade.trailingActive ? 'TRAILING_STOP' : 'INITIAL_STOP', checkpoint);
       return;
     }
-    const levels = strategyExitLevels({ strategy: session.strategySnapshot, entryPrice: trade.entryPrice, quantity: trade.quantity, tickSize: trade.tickSize });
-    if (levels.error) { this.event(session, 'UNSUPPORTED_EXIT_RULE', levels.error); }
-    else if (quote.bidPrice >= levels.targetPrice!) { await this.exit(session, trade, 'STRATEGY_TARGET', checkpoint); return; }
+    // Use the target fixed at entry (fees and slippage included). Recomputing here without the slippage
+    // buffer produced a lower target than the one the broker ledger's exit monitor uses.
+    const levels = trade.targetPrice !== undefined ? { targetPrice: trade.targetPrice } : strategyExitLevels({ strategy: this.effectiveStrategy(session), entryPrice: trade.entryPrice, quantity: trade.quantity, tickSize: trade.tickSize });
+    if ('error' in levels && levels.error) { this.event(session, 'UNSUPPORTED_EXIT_RULE', levels.error); }
+    else if (levels.targetPrice !== undefined && quote.bidPrice >= levels.targetPrice) { await this.exit(session, trade, 'STRATEGY_TARGET', checkpoint); return; }
     if (trade.netPnl >= session.config.minNetProfitToActivateTrailing || trade.trailingActive) {
       const tick = trade.tickSize ?? this.catalog.getInstrument(trade.instrumentKey)?.tickSize ?? 0.05;
       const step = Math.max(0, Math.floor((trade.peakNetProfit - session.config.minNetProfitToActivateTrailing) / session.config.trailingStepProfit));

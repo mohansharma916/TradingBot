@@ -272,20 +272,20 @@ export class PriceActionMomentumService {
       useMTF: boolean;
       totalTrades: number;
       winRatePct: number;
-      profitFactor: number;
+      profitFactor: number | null;
       netPnl: number;
       maxDrawdownPct: number;
       expectancy: number;
       inSample?: {
         netPnl: number;
         winRatePct: number;
-        profitFactor: number;
+        profitFactor: number | null;
         totalTrades: number;
       };
       outOfSample?: {
         netPnl: number;
         winRatePct: number;
-        profitFactor: number;
+        profitFactor: number | null;
         totalTrades: number;
       };
       degradationRatio?: number;

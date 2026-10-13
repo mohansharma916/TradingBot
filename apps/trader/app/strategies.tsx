@@ -1618,7 +1618,7 @@ export default function StrategiesScreen() {
               <div style={{ backgroundColor: colors.surfaceElevated, padding: spacing.md, borderRadius: borderRadius.md, borderLeft: `4px solid ${colors.purple}` }}>
                 <span style={{ fontSize: typography.fontSize.xs, color: colors.textMuted }}>Profit Factor</span>
                 <div style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, color: colors.textPrimary, marginTop: 4 }}>
-                  {backtestResult.profitFactor}x
+                  {backtestResult.profitFactor === null ? "∞ (no losing trades)" : `${backtestResult.profitFactor}x`}
                 </div>
                 <span style={{ fontSize: typography.fontSize.xs, color: colors.textSecondary }}>
                   Gross PnL: ₹{backtestResult.grossPnl.toLocaleString('en-IN')}

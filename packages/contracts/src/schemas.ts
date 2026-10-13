@@ -519,9 +519,10 @@ export const BacktestRequestSchema = z.object({
   useTrailingStop: z.boolean().optional(),
   trailingActivationProfitInr: z.number().nonnegative().optional(),
   trailingStepInr: z.number().nonnegative().optional(),
-  maxTradesPerDay: z.number().int().min(1).max(50).default(10),
-  maxTradeLossInr: z.number().positive().default(500),
-  maxDailyLossInr: z.number().positive().default(500),
+  // No defaults: an omitted limit must fall back to the strategy's saved limit, never replace it.
+  maxTradesPerDay: z.number().int().min(1).max(50).optional(),
+  maxTradeLossInr: z.number().positive().optional(),
+  maxDailyLossInr: z.number().positive().optional(),
   strategy: StrategyConfigSchema.optional(),
 });
 export type BacktestRequest = z.infer<typeof BacktestRequestSchema>;
@@ -553,7 +554,8 @@ export const BacktestResultSchema = z.object({
   netPnl: z.number(),
   maxDrawdown: z.number(),
   maxDrawdownPct: z.number(),
-  profitFactor: z.number(),
+  /** Null when there are no losing trades (the ratio is undefined), never an invented value. */
+  profitFactor: z.number().nullable(),
   trades: z.array(BacktestTradeRecordSchema),
   error: z.string().optional(),
 });

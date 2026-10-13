@@ -70,7 +70,8 @@ describe('Execution & Accounting Parity Regression Tests', () => {
     expect(result.trades).toHaveLength(1);
     const trade = result.trades[0]!;
     expect(trade.exitReason).toBe('TARGET_PROFIT');
-    expect(trade.exitPrice).toBe(74.95);
+    // Gap open at 10040: 55 + 20 delta move - 0.05 spread - modeled theta while held.
+    expect(trade.exitPrice).toBe(74.9);
     expect(trade.netPnl).toBeGreaterThan(0);
   });
 
@@ -113,7 +114,7 @@ describe('Execution & Accounting Parity Regression Tests', () => {
     c[4] = { ...c[4]!, timestamp: '2026-10-12T10:05:00Z', open: 11000, high: 11000, low: 11000, close: 11000 };
     const r = run(c);
     expect(r.trades).toHaveLength(1);
-    expect(r.trades[0]!.exitPrice).toBe(54.95);
+    expect(r.trades[0]!.exitPrice).toBe(54.9); // flat spot: premium - spread - modeled theta
     expect(r.trades[0]!.exitPrice).not.toBe(11000);
   });
 
@@ -131,7 +132,7 @@ describe('Execution & Accounting Parity Regression Tests', () => {
     expect(Math.abs(trade.grossPnl - trade.charges - trade.netPnl)).toBeLessThan(0.01);
   });
 
-  it('reports non-zero genuine profit ratio when all trades win', () => {
+  it('reports an undefined (null) profit factor rather than an invented ratio when all trades win', () => {
     const c = bars(5);
     c[4] = { ...c[4]!, high: 10025, close: 10025 };
     const s = config();
@@ -140,8 +141,7 @@ describe('Execution & Accounting Parity Regression Tests', () => {
     const r = run(c, s);
     expect(r.trades).toHaveLength(1);
     expect(r.trades[0]!.exitReason).toBe('TARGET_PROFIT');
-    expect(r.profitFactor).toBeGreaterThan(0);
-    expect(r.profitFactor).not.toBe(99.99);
+    expect(r.profitFactor).toBeNull();
   });
 
   it('blocks target profit execution when estimated round-trip charges result in net loss', () => {
@@ -153,5 +153,34 @@ describe('Execution & Accounting Parity Regression Tests', () => {
 
     const r = run(c, s);
     expect(r.trades).toHaveLength(0);
+  });
+
+  it('decays a held premium with modeled theta, and the decay can be disabled explicitly', () => {
+    const c = bars(5);
+    c[4] = { ...c[4]!, timestamp: '2026-10-12T10:05:00Z' };
+    const withTheta = run(c);
+    const noTheta = runStrategyBacktest({ strategy: config(), candles: c, request: { initialCapital: 10000, useTrailingStop: false }, dataSource: 'ISOLATED_AUDIT_FIXTURE', lotSize: 65, tickSize: 0.05, thetaDecayPctPerSession: 0 });
+    expect(noTheta.trades[0]!.exitPrice).toBe(54.95); // flat spot: premium 55 minus one tick of spread
+    expect(withTheta.trades[0]!.exitPrice).toBeLessThan(noTheta.trades[0]!.exitPrice);
+    expect(withTheta.modelAssumptions.some((line) => line.includes('Time decay'))).toBe(true);
+  });
+
+  it('sizes exactly one lot per trade, matching live proposal sizing, even with ample capital and risk budget', () => {
+    const c = bars(5);
+    c[4] = { ...c[4]!, high: 10025, close: 10025 };
+    const s = config();
+    s.risk.maxCapitalInr = 100000;
+    s.risk.maxAllInTradeLossInr = 5000;
+    s.risk.maxAllInDailyLossInr = 5000;
+    const r = run(c, s, { initialCapital: 100000, maxTradeLossInr: 5000, maxDailyLossInr: 5000 });
+    expect(r.trades.length).toBeGreaterThan(0);
+    expect(r.trades.every((trade) => trade.quantity === 65)).toBe(true);
+  });
+
+  it('rejects exit levels whose stop rounds onto the entry price', () => {
+    const s = config();
+    s.astConfig.exitRules.stopLossValue = 0.01;
+    const levels = strategyExitLevels({ strategy: s as any, entryPrice: 100, quantity: 65, tickSize: 0.05 });
+    expect(levels.error).toMatch(/stop < entry < target/);
   });
 });
