@@ -12,6 +12,7 @@ import {
   configToDraft, createDailyBotDraft, DailyBotDraft, validateDailyBotDraft,
   estimateSebiOptionCharges, loadSavedDraft, saveDraftToStorage,
 } from './config';
+import { AutopilotPanel } from './AutopilotPanel';
 
 const money = (value: number) => `₹${value.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 const stepNames = ['Capital', 'Risk Limits', 'Profit Protection', 'Trading Window', 'Strategy', 'Review & Start'];
@@ -265,6 +266,7 @@ export default function DailyBotScreen() {
           </View>
           {today.strategies.length === 0 && <Text style={styles.errorText}>Create a strategy in Strategies before creating a daily setup.</Text>}
         </View>}
+        {!draft && <AutopilotPanel today={today} />}
         {draft && <View style={styles.card}>
           <View style={styles.rowBetween}><Text style={styles.heading}>Daily Setup · {draft.tradingDate}</Text>
             <Button label="Close Setup" secondary disabled={bot.busy} onPress={() => closeSetup()} /></View>

@@ -51,6 +51,10 @@ import { DailyBotController } from './daily-bot/daily-bot.controller';
 import { DailyBotService } from './daily-bot/daily-bot.service';
 import { DailyBotStore } from './daily-bot/daily-bot.store';
 import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.service';
+import { DailyBotAutopilotService } from './daily-bot/daily-bot-autopilot.service';
+import { DataJournalService } from './journal/data-journal.service';
+import { PaperLanesService } from './daily-bot/paper-lanes.service';
+import { JournalController } from './journal/journal.controller';
 
 @Module({
   imports: [],
@@ -70,6 +74,7 @@ import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.servic
     NotificationsController,
     AutonomousController,
     DailyBotController,
+    JournalController,
   ],
   providers: [
     EnvService,
@@ -108,6 +113,9 @@ import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.servic
     DailyBotStore,
     DailyBotService,
     DailyBotExecutionService,
+    DailyBotAutopilotService,
+    PaperLanesService,
+    DataJournalService,
   ],
   exports: [
     EnvService,
@@ -141,6 +149,9 @@ import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.servic
     DailyBotStore,
     DailyBotService,
     DailyBotExecutionService,
+    DailyBotAutopilotService,
+    PaperLanesService,
+    DataJournalService,
   ],
 })
 export class AppModule {}

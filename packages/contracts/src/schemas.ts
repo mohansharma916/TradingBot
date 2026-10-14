@@ -69,6 +69,11 @@ export const EnvSchema = z.object({
     z.boolean()
   ).default(false),
   DAILY_BOT_STORAGE_PATH: z.string().min(1).optional(),
+  // Rolling analysis journal (quotes, trades, bot decisions, logs) in STATE_DIRECTORY/journal.sqlite.
+  JOURNAL_ENABLED: z.preprocess((v) => v === undefined || v === '' || v === 'true' || v === '1' || v === true, z.boolean()),
+  JOURNAL_RETENTION_HOURS: z.coerce.number().int().min(1).max(720).default(48),
+  // Minimum interval between stored quotes for the same instrument.
+  JOURNAL_QUOTE_SAMPLE_MS: z.coerce.number().int().min(0).max(60_000).default(5000),
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;

@@ -28,6 +28,8 @@ import {
   AutonomousArmRequest,
   AutonomousSessionStatus,
   AutonomousExecutionLog,
+  AutopilotStatus,
+  AutopilotUpdateRequest,
   DailyBotConfigInput,
   DailyBotControlAction,
   DailyBotPreflight,
@@ -35,6 +37,7 @@ import {
   DailyBotSetup,
   DailyBotStartRequest,
   DailyBotToday,
+  JournalSummary,
   BacktestRequest,
   BacktestResult,
   StrategyAstConfig,
@@ -533,6 +536,36 @@ export class TradingPlatformClient {
     return this.request(`/daily-bot/sessions/${encodeURIComponent(id)}/${action}`, {
       method: 'POST',
     });
+  }
+
+  // Daily Bot Autopilot (scheduled unattended Testing sessions)
+  public async getAutopilot(): Promise<AutopilotStatus> {
+    return this.request('/daily-bot/autopilot');
+  }
+
+  public async updateAutopilot(request: AutopilotUpdateRequest): Promise<AutopilotStatus> {
+    return this.request('/daily-bot/autopilot', {
+      method: 'PUT',
+      body: JSON.stringify(request),
+    });
+  }
+
+  public async disableAutopilot(): Promise<AutopilotStatus> {
+    return this.request('/daily-bot/autopilot/disable', {
+      method: 'POST',
+    });
+  }
+
+  /** Stops new entries in every parallel Testing lane; emergency also requests exits for open virtual positions. */
+  public async stopAutopilotLanes(emergency = false): Promise<AutopilotStatus> {
+    return this.request(`/daily-bot/autopilot/lanes/${emergency ? 'emergency-stop' : 'stop'}`, {
+      method: 'POST',
+    });
+  }
+
+  // Rolling analysis journal
+  public async getJournalSummary(): Promise<JournalSummary> {
+    return this.request('/journal');
   }
 
   // Agents

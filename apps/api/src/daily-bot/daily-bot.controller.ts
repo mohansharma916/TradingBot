@@ -1,9 +1,13 @@
-import { Body, Controller, Get, Inject, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, Post, Put } from '@nestjs/common';
 import { DailyBotService } from './daily-bot.service';
+import { DailyBotAutopilotService } from './daily-bot-autopilot.service';
 
 @Controller('daily-bot')
 export class DailyBotController {
-  constructor(@Inject(DailyBotService) private readonly dailyBot: DailyBotService) {}
+  constructor(
+    @Inject(DailyBotService) private readonly dailyBot: DailyBotService,
+    @Inject(DailyBotAutopilotService) private readonly autopilot: DailyBotAutopilotService,
+  ) {}
 
   @Get('today')
   public today() { return this.dailyBot.getToday(); }
@@ -40,4 +44,19 @@ export class DailyBotController {
 
   @Post('sessions/:id/approve-entry')
   public approveEntry(@Param('id') id: string) { return this.dailyBot.approveEntry(id); }
+
+  @Get('autopilot')
+  public autopilotStatus() { return this.autopilot.getStatus(); }
+
+  @Put('autopilot')
+  public updateAutopilot(@Body() input: unknown) { return this.autopilot.update(input); }
+
+  @Post('autopilot/disable')
+  public disableAutopilot() { return this.autopilot.disable(); }
+
+  @Post('autopilot/lanes/stop')
+  public stopLanes() { return this.autopilot.stopLanes(false); }
+
+  @Post('autopilot/lanes/emergency-stop')
+  public emergencyStopLanes() { return this.autopilot.stopLanes(true); }
 }

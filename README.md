@@ -118,6 +118,45 @@ docker-compose up -d
 ```
 
 
+## Autopilot (scheduled Testing sessions)
+
+Autopilot starts the Daily Bot by itself on every verified NSE trading day, so a multi-day paper trial runs unattended. Configure it from **Daily Bot → Today → Scheduled Daily Bot**, or with `PUT /api/v1/daily-bot/autopilot`.
+
+- It reuses the capital, loss and timing limits of your latest saved Daily Bot setup, and the account caps still apply.
+- Choose one or more strategies and a mode:
+  - **All in parallel** (default) starts every strategy the same day, each in its own isolated virtual account (paper broker, ₹ limits, risk ledger and one-position rule) under `STATE_DIRECTORY/paper-lanes/<strategy-id>/`. Every strategy trades the same market days, so the scorecard compares them fairly. Each lane trades as if it were alone, so combined virtual exposure is the sum of the lanes. Lanes are Testing-only, reload after a restart, and pause when the account kill switch is active. Stop or emergency-exit all lanes from the panel, or with `POST /api/v1/daily-bot/autopilot/lanes/stop` (`/emergency-stop`).
+  - **One per day, rotating** runs one strategy per trading day on the main Testing account.
+  - **Same strategy every day** always uses the first authorized one.
+- Only strategies promoted out of `DRAFT` (for example to Paper Active) can be scheduled.
+- Every start goes through the normal Daily Bot preflight. When a check fails (missing Upstox login, stale data, Live mode selected, another session active), Autopilot retries every minute until the last entry time. If it still cannot start, it records the day as `MISSED` and raises an alert.
+- After an API restart it resumes its own Testing session once preflight passes again.
+- Autopilot never starts Live sessions. Live keeps manual start and per-entry approval.
+- The **Strategy Scorecard** reports days, trades, win rate, average win/loss, worst day and profit factor for each strategy.
+
+Index cards fall back to Upstox's REST quote snapshot, labelled `DELAYED`, whenever an index has no live tick (before the open, after the close or during reconnects). Entry checks accept only fresh `LIVE` quotes, so delayed prices are display-only.
+
+Operational requirements: keep the API process running through market hours, and connect Upstox each morning before the auto-start time. Upstox access tokens expire daily, and Testing uses real Upstox market data.
+
+## Data Journal (48-hour analysis buffer)
+
+The API writes a rolling SQLite journal to `STATE_DIRECTORY/journal.sqlite`:
+
+| Table | Contents |
+| :--- | :--- |
+| `quotes` | Option and index quotes (LTP, bid/ask, quantities, volume, OI), sampled per instrument every `JOURNAL_QUOTE_SAMPLE_MS` |
+| `trades` | Every Daily Bot trade: entry/exit, stop, target, P&L, charges, exit reason and the full record |
+| `bot_events` | Every bot decision: signals, blocked scans and the reason, fills, exits, pauses |
+| `events` | Every real-time event: orders, fills, risk, proposals, alerts, broker reconciliation |
+| `logs` | All API log lines |
+
+Rows older than `JOURNAL_RETENTION_HOURS` (default 48) are deleted every 15 minutes, and the space is reclaimed. Open the file with any SQLite tool, or use the authenticated endpoints:
+- `GET /api/v1/journal` returns a summary.
+- `GET /api/v1/journal/<table>?from=&to=&match=&limit=` returns rows as JSON.
+- `GET /api/v1/journal/<table>.csv` returns the same rows as CSV.
+- `POST /api/v1/journal/purge` runs the retention purge now.
+
+The journal is observational. Any failure disables it without affecting trading. The Daily Bot ledger stays the permanent trade record.
+
 ## Testing and Live
 
 The top navbar selects **Testing** or **Live**. Testing uses virtual cash, a separate durable paper ledger, simulated fills and modeled charges. Its initial cash is `MAX_ACCOUNT_CAPITAL_INR`; funds and P&L subsequently follow its actual simulated fills. Connect Upstox for genuine instrument metadata, real quotes and closed historical bars; unavailable or stale data blocks entries rather than inventing quotes.
