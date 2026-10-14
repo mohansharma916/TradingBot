@@ -10,7 +10,7 @@ export const DailyBotTradingDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/,
 const sessionTimeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use HH:mm');
 const amountSchema = z.number().finite().positive();
 
-export const DailyBotConfigSchema = z.object({
+const DailyBotConfigBaseSchema = z.object({
   name: z.string().trim().min(1).max(100),
   tradingDate: DailyBotTradingDateSchema,
   tradingMode: z.nativeEnum(TradeMode).default(TradeMode.PAPER),
@@ -32,7 +32,9 @@ export const DailyBotConfigSchema = z.object({
   lastEntryTime: sessionTimeSchema.default('14:45'),
   mandatoryExitTime: sessionTimeSchema.default('15:10'),
   strategyId: z.string().uuid(),
-}).superRefine((config, context) => {
+});
+
+export const DailyBotConfigSchema = DailyBotConfigBaseSchema.superRefine((config, context) => {
   const issue = (field: keyof typeof config, message: string) => context.addIssue({
     code: z.ZodIssueCode.custom,
     path: [field],
@@ -173,3 +175,74 @@ export type DailyBotCloneRequest = z.infer<typeof DailyBotCloneRequestSchema>;
 
 export const DailyBotControlActionSchema = z.enum(['pause', 'resume', 'stop', 'emergency-stop', 'approve-entry']);
 export type DailyBotControlAction = z.infer<typeof DailyBotControlActionSchema>;
+
+/** Risk and timing rules applied to every scheduled day; strategy and date are chosen by the scheduler. */
+export const AutopilotTemplateSchema = DailyBotConfigBaseSchema.omit({ name: true, tradingDate: true, strategyId: true, tradingMode: true });
+export type AutopilotTemplate = z.infer<typeof AutopilotTemplateSchema>;
+export type AutopilotTemplateInput = z.input<typeof AutopilotTemplateSchema>;
+
+export const AutopilotRotationSchema = z.enum(['ROUND_ROBIN', 'FIXED']);
+export type AutopilotRotation = z.infer<typeof AutopilotRotationSchema>;
+
+export const AutopilotScheduleSchema = z.object({
+  enabled: z.boolean(),
+  /** Unattended starts are limited to Testing; Live sessions keep per-entry owner approval. */
+  tradingMode: z.literal(TradeMode.PAPER),
+  strategyIds: z.array(z.string().uuid()).min(1).max(10),
+  rotation: AutopilotRotationSchema,
+  autoStartTime: sessionTimeSchema,
+  template: AutopilotTemplateSchema,
+  consentRecordedAt: z.string().datetime().nullable(),
+  updatedAt: z.string().datetime(),
+});
+export type AutopilotSchedule = z.infer<typeof AutopilotScheduleSchema>;
+
+export const AutopilotUpdateRequestSchema = z.object({
+  enabled: z.boolean(),
+  strategyIds: z.array(z.string().uuid()).min(1).max(10),
+  rotation: AutopilotRotationSchema.default('ROUND_ROBIN'),
+  autoStartTime: sessionTimeSchema.default('09:20'),
+  template: AutopilotTemplateSchema,
+  operatorConsent: z.boolean().default(false),
+});
+export type AutopilotUpdateRequest = z.input<typeof AutopilotUpdateRequestSchema>;
+
+export const AutopilotRunSchema = z.object({
+  tradingDate: DailyBotTradingDateSchema,
+  status: z.enum(['WAITING', 'STARTED', 'MISSED']),
+  strategyId: z.string().uuid().nullable(),
+  strategyName: z.string().nullable(),
+  setupId: z.string().uuid().nullable(),
+  sessionId: z.string().uuid().nullable(),
+  attempts: z.number().int().nonnegative(),
+  lastAttemptAt: z.string().datetime().nullable(),
+  message: z.string(),
+});
+export type AutopilotRun = z.infer<typeof AutopilotRunSchema>;
+
+export const StrategyScorecardSchema = z.object({
+  strategyId: z.string().uuid(),
+  strategyName: z.string(),
+  tradingMode: z.nativeEnum(TradeMode),
+  tradingDays: z.number().int().nonnegative(),
+  closedTrades: z.number().int().nonnegative(),
+  wins: z.number().int().nonnegative(),
+  losses: z.number().int().nonnegative(),
+  winRatePct: z.number().finite().nullable(),
+  netPnl: z.number().finite(),
+  averageWin: z.number().finite().nullable(),
+  averageLoss: z.number().finite().nullable(),
+  largestLoss: z.number().finite(),
+  worstDayPnl: z.number().finite(),
+  profitFactor: z.number().finite().nullable(),
+});
+export type StrategyScorecard = z.infer<typeof StrategyScorecardSchema>;
+
+export const AutopilotStatusSchema = z.object({
+  schedule: AutopilotScheduleSchema.nullable(),
+  today: AutopilotRunSchema.nullable(),
+  nextStrategyId: z.string().uuid().nullable(),
+  recentRuns: z.array(AutopilotRunSchema),
+  scorecard: z.array(StrategyScorecardSchema),
+});
+export type AutopilotStatus = z.infer<typeof AutopilotStatusSchema>;

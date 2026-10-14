@@ -34,7 +34,7 @@ function isActive(session: DailyBotSession): boolean {
   return ['RUNNING', 'PAUSED', 'STOPPING', 'ERROR'].includes(session.status) || hasOpenTrade(session) || session.pendingProposalId !== null;
 }
 
-function isTradingDate(date: string): boolean {
+export function isTradingDate(date: string): boolean {
   const candidate = new Date(`${date}T00:00:00.000Z`);
   const day = candidate.getUTCDay();
   return isCalendarVerifiedForDate(candidate) && day !== 0 && day !== 6 && !NSE_HOLIDAYS_2026[date];

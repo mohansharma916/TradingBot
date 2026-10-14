@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 import { EnvService } from '../config/env.service';
+import { DataJournalService } from '../journal/data-journal.service';
 
 const DailyBotStateSchema = z.object({
   version: z.literal(1),
@@ -36,7 +37,11 @@ export class DailyBotStore {
   private state: DailyBotState;
   private writeFailure: string | null = null;
 
-  constructor(@Optional() @Inject('DAILY_BOT_STORAGE_PATH') storagePath?: string, @Optional() @Inject(EnvService) env?: EnvService) {
+  constructor(
+    @Optional() @Inject('DAILY_BOT_STORAGE_PATH') storagePath?: string,
+    @Optional() @Inject(EnvService) env?: EnvService,
+    @Optional() @Inject(DataJournalService) private readonly journal?: DataJournalService,
+  ) {
     this.storagePath = path.resolve(storagePath || process.env.DAILY_BOT_STORAGE_PATH || (env?.config.STATE_DIRECTORY ? path.join(env.config.STATE_DIRECTORY, 'daily-bot.json') : path.resolve(__dirname, '../../../../.data/daily-bot.json')));
     this.state = this.load();
   }
@@ -96,5 +101,6 @@ export class DailyBotStore {
       try { if (directoryFd !== undefined) fs.closeSync(directoryFd); } catch { /* Preserve the storage error. */ }
       try { if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath); } catch { /* Preserve the storage error. */ }
     }
+    try { this.journal?.recordSessions(parsed.sessions); } catch { /* The journal is observational; the commit already succeeded. */ }
   }
 }

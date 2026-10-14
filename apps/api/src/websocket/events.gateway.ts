@@ -10,6 +10,7 @@ import { Inject, Optional } from '@nestjs/common';
 import { IncomingMessage } from 'node:http';
 import { OwnerAuthService } from '../auth/owner-auth.service';
 import { EnvService } from '../config/env.service';
+import { DataJournalService } from '../journal/data-journal.service';
 
 @WebSocketGateway({ path: '/ws' })
 export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -20,7 +21,8 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private credentials = new Map<WebSocket, string>();
 
   constructor(@Optional() @Inject(OwnerAuthService) private readonly auth?: OwnerAuthService,
-    @Optional() @Inject(EnvService) private readonly env?: EnvService) {}
+    @Optional() @Inject(EnvService) private readonly env?: EnvService,
+    @Optional() @Inject(DataJournalService) private readonly journal?: DataJournalService) {}
 
   handleConnection(client: WebSocket, request: IncomingMessage) {
     try {
@@ -58,6 +60,7 @@ export class EventsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   public broadcast(topic: string, payload: any) {
+    this.journal?.recordBroadcast(topic, payload);
     const msg = JSON.stringify({ topic, payload });
     for (const client of this.clients) {
       try { if (!this.auth) throw new Error('Owner authentication unavailable'); this.auth.verify(this.credentials.get(client) ?? ''); }

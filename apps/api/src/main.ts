@@ -4,9 +4,12 @@ import { WsAdapter } from '@nestjs/platform-ws';
 import { AppModule } from './app.module';
 import { EnvService } from './config/env.service';
 import { TradingModeService } from './trading/trading-mode.service';
+import { DataJournalService } from './journal/data-journal.service';
+import { JournalLogger } from './journal/journal.logger';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  app.useLogger(new JournalLogger(app.get(DataJournalService)));
   const envService = app.get(EnvService);
   app.enableShutdownHooks();
 

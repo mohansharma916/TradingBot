@@ -21,3 +21,20 @@ export const TradingModeSnapshotSchema = z.object({
 export type TradingModeSnapshot = z.infer<typeof TradingModeSnapshotSchema>;
 
 export const SelectTradingModeSchema = z.object({ mode: z.enum([TradeMode.PAPER, TradeMode.APPROVAL]) });
+
+const JournalTableSummarySchema = z.object({
+  rows: z.number().int().nonnegative(),
+  oldest: z.string().datetime().nullable(),
+  newest: z.string().datetime().nullable(),
+});
+
+export const JournalSummarySchema = z.object({
+  active: z.boolean(),
+  databasePath: z.string().nullable(),
+  retentionHours: z.number().int().positive(),
+  quoteSampleMs: z.number().int().nonnegative(),
+  sizeBytes: z.number().int().nonnegative(),
+  lastError: z.string().nullable(),
+  tables: z.record(z.enum(['quotes', 'events', 'logs', 'bot_events', 'trades']), JournalTableSummarySchema),
+});
+export type JournalSummary = z.infer<typeof JournalSummarySchema>;
