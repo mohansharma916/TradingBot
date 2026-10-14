@@ -129,6 +129,17 @@ describe('Daily Bot Autopilot scheduler', () => {
     expect(store.snapshot().sessions.map((item) => item.config.strategyId)).toEqual([trend, vwap]);
   });
 
+  it('closes out an earlier day\'s paused, flat Testing session so the next day can start', async () => {
+    enable();
+    await at('2026-10-14', '09:20');
+    const [first] = store.snapshot().sessions;
+    await dailyBot.pause(first!.id); // e.g. daily loss limit reached
+    await at('2026-10-15', '09:20');
+    const sessions = store.snapshot().sessions;
+    expect(sessions[0]).toMatchObject({ id: first!.id, status: 'STOPPED' });
+    expect(sessions[1]).toMatchObject({ status: 'RUNNING', config: { tradingDate: '2026-10-15', strategyId: vwap } });
+  });
+
   it('skips a strategy that lost authorization and keeps FIXED rotation on the first authorized one', async () => {
     enable({ rotation: 'FIXED' });
     strategies[0]!.status = StrategyStatus.PAUSED;

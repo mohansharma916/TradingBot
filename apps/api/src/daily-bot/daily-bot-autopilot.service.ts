@@ -275,7 +275,19 @@ export class DailyBotAutopilotService implements OnModuleInit, OnModuleDestroy {
       if (attempts === 1) this.notify(AlertSeverity.WARNING, 'Autopilot is waiting to start', `${message} Retrying every minute until ${schedule.template.lastEntryTime} IST.`);
     };
     if ((this.mode?.getMode() ?? TradeMode.PAPER) !== TradeMode.PAPER) return waiting('The global mode is Live. Autopilot only starts Testing sessions; switch to Testing or start Live sessions manually.');
-    const active = this.dailyBot.getToday().activeSession;
+    let active = this.dailyBot.getToday().activeSession;
+    // A paused, flat Testing session from an earlier day (e.g. daily loss limit reached) is finished business.
+    // ERROR sessions and anything holding exposure or a pending entry still need the owner.
+    if (active && active.status === 'PAUSED' && active.config.tradingMode === TradeMode.PAPER && active.config.tradingDate < tradingDate
+      && active.pendingProposalId === null && active.trades.every((trade) => trade.status === 'CLOSED')) {
+      try {
+        await this.dailyBot.stop(active.id);
+        this.logger.log(`[Autopilot] Closed out paused Testing session ${active.id} from ${active.config.tradingDate}.`);
+      } catch (error) {
+        return waiting(`Could not close out the paused session from ${active.config.tradingDate}: ${describeFailure(error)}`);
+      }
+      active = this.dailyBot.getToday().activeSession;
+    }
     if (active) return waiting(`Daily Bot session ${active.id} (${active.status}) is active or unresolved. Autopilot will start after it is reviewed or finished.`);
     const picked = this.pickStrategy(schedule);
     if (!picked) return waiting('None of the scheduled strategies is currently authorized. Promote at least one to Paper Active.');
