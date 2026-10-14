@@ -53,4 +53,10 @@ export class DailyBotController {
 
   @Post('autopilot/disable')
   public disableAutopilot() { return this.autopilot.disable(); }
+
+  @Post('autopilot/lanes/stop')
+  public stopLanes() { return this.autopilot.stopLanes(false); }
+
+  @Post('autopilot/lanes/emergency-stop')
+  public emergencyStopLanes() { return this.autopilot.stopLanes(true); }
 }

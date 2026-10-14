@@ -49,10 +49,14 @@ describe('Daily Bot Autopilot scheduler', () => {
   });
   const makeDailyBot = () => new DailyBotService(store, execution as any, strategyService() as any, env as any,
     { getAvailableCash: () => 10000, arm: vi.fn(), disarm: vi.fn() } as any, { getMode: () => mode } as any);
+  let killSwitch = false;
+  let laneBots: Map<string, { strategyId: string; store: DailyBotStore; dailyBot: DailyBotService }>;
+  let lanes: Record<string, any>;
   const makeAutopilot = () => new DailyBotAutopilotService(dailyBot, store, strategyService() as any,
-    { config: { ...env.config, STATE_DIRECTORY: directory } } as any, { getMode: () => mode } as any, alerts as any);
+    { config: { ...env.config, STATE_DIRECTORY: directory } } as any, { getMode: () => mode } as any, alerts as any,
+    undefined, lanes as any, { isKillSwitchActive: () => killSwitch } as any);
   const enable = (overrides: Record<string, unknown> = {}) => autopilot.update({
-    enabled: true, operatorConsent: true, strategyIds: [trend, vwap], autoStartTime: '09:20', template, ...overrides,
+    enabled: true, operatorConsent: true, strategyIds: [trend, vwap], rotation: 'ROUND_ROBIN', autoStartTime: '09:20', template, ...overrides,
   });
   const at = async (date: string, time: string) => {
     vi.setSystemTime(istAt(date, time));
@@ -74,11 +78,27 @@ describe('Daily Bot Autopilot scheduler', () => {
       restoreDailyLedger: vi.fn(() => new Set<string>()),
       stop: vi.fn(async (session: DailyBotSession) => { session.status = 'STOPPED'; session.stoppedAt = new Date().toISOString(); }),
     };
+    killSwitch = false;
+    laneBots = new Map();
+    lanes = {
+      getLane: (id: string) => {
+        if (!laneBots.has(id)) {
+          const laneStore = new DailyBotStore(path.join(directory, `lane-${id}.json`));
+          laneBots.set(id, { strategyId: id, store: laneStore, dailyBot: new DailyBotService(laneStore, execution as any, strategyService() as any, env as any, { getAvailableCash: () => 10000, arm: vi.fn(), disarm: vi.fn() } as any) });
+        }
+        return laneBots.get(id)!;
+      },
+      getLanes: () => [...laneBots.values()],
+      snapshot: () => [],
+      pauseAll: vi.fn(async () => 0),
+      stopAll: vi.fn(async () => undefined),
+    };
     dailyBot = makeDailyBot();
     autopilot = makeAutopilot();
   });
 
   afterEach(() => {
+    for (const lane of laneBots.values()) lane.dailyBot.onModuleDestroy();
     dailyBot.onModuleDestroy();
     autopilot.onModuleDestroy();
     vi.useRealTimers();
@@ -87,6 +107,7 @@ describe('Daily Bot Autopilot scheduler', () => {
 
   it('requires consent, authorized strategies and account-cap compliance before enabling', () => {
     expect(() => enable({ operatorConsent: false })).toThrow('explicit operator consent');
+    expect(autopilot.update({ enabled: false, strategyIds: [trend], template }).schedule?.rotation).toBe('PARALLEL');
     expect(() => enable({ strategyIds: [trend, draft] })).toThrow('Untested idea (DRAFT)');
     expect(() => enable({ template: { ...template, perTradeMaxLossAllIn: 900, dailyMaxLossAllIn: 1000 } })).toThrow();
     expect(() => enable({ strategyIds: [trend, trend] })).toThrow('only once');
@@ -209,6 +230,60 @@ describe('Daily Bot Autopilot scheduler', () => {
     await at('2026-10-14', '09:40');
     expect(store.snapshot().sessions[0]).toMatchObject({ status: 'RUNNING' });
     expect(autopilot.getStatus().today?.message).toContain('Resumed after API restart');
+  });
+
+  describe('PARALLEL', () => {
+    const laneSessions = (id: string) => laneBots.get(id)?.store.snapshot().sessions ?? [];
+
+    it('starts every authorized strategy the same day, each in its own lane, without touching the main account', async () => {
+      enable({ rotation: 'PARALLEL' });
+      await at('2026-10-14', '09:20');
+      const status = autopilot.getStatus();
+      expect(status.today).toMatchObject({ status: 'STARTED', lanes: [{ strategyId: trend, status: 'STARTED' }, { strategyId: vwap, status: 'STARTED' }] });
+      expect(store.snapshot().sessions).toHaveLength(0);
+      expect(laneSessions(trend)).toEqual([expect.objectContaining({ status: 'RUNNING', config: expect.objectContaining({ strategyId: trend, tradingMode: TradeMode.PAPER }) })]);
+      expect(laneSessions(vwap)).toEqual([expect.objectContaining({ status: 'RUNNING', config: expect.objectContaining({ strategyId: vwap }) })]);
+      expect(status.nextStrategyId).toBeNull();
+
+      // Next trading day: yesterday's lanes are stopped by the operator, both start again.
+      for (const id of [trend, vwap]) await laneBots.get(id)!.dailyBot.stop(laneSessions(id)[0]!.id);
+      await at('2026-10-15', '09:20');
+      expect(laneSessions(trend)).toHaveLength(2);
+      expect(laneSessions(vwap)).toHaveLength(2);
+    });
+
+    it('retries only the lanes that failed preflight and reports partial starts at the entry cutoff', async () => {
+      enable({ rotation: 'PARALLEL' });
+      execution.preflight!.mockImplementation(async (config: { strategyId: string }) => config.strategyId === vwap
+        ? { passed: false, evaluatedAt: new Date().toISOString(), checks: [{ id: 'market-data', label: 'Fresh market data', passed: false, message: 'Stale.' }] }
+        : { passed: true, evaluatedAt: new Date().toISOString(), checks: [] });
+      await at('2026-10-14', '09:20');
+      expect(autopilot.getStatus().today).toMatchObject({ status: 'WAITING', lanes: [{ strategyId: trend, status: 'STARTED' }, { strategyId: vwap, status: 'WAITING', message: expect.stringContaining('Fresh market data: Stale.') }] });
+
+      await at('2026-10-14', '09:22');
+      expect(laneSessions(trend)).toHaveLength(1); // the running lane is not restarted
+      expect(laneBots.get(vwap)!.store.snapshot().setups).toHaveLength(1); // the waiting setup is reused
+
+      await at('2026-10-14', '14:45');
+      expect(autopilot.getStatus().today).toMatchObject({ status: 'STARTED', lanes: [{ status: 'STARTED' }, { strategyId: vwap, status: 'MISSED' }], message: expect.stringContaining('Not started: VWAP Surge') });
+    });
+
+    it('starts nothing and pauses running lanes while the account kill switch is active', async () => {
+      enable({ rotation: 'PARALLEL' });
+      killSwitch = true;
+      await at('2026-10-14', '09:20');
+      expect(lanes.pauseAll).toHaveBeenCalled();
+      expect(autopilot.getStatus().today).toMatchObject({ status: 'WAITING', message: expect.stringContaining('kill switch') });
+      expect(laneBots.size).toBe(0);
+    });
+
+    it('includes lane sessions in the scorecard and exposes lane stop controls', async () => {
+      enable({ rotation: 'PARALLEL' });
+      await at('2026-10-14', '09:20');
+      expect(autopilot.getStatus().scorecard.map((row) => row.strategyId).sort()).toEqual([trend, vwap].sort());
+      await autopilot.stopLanes(true);
+      expect(lanes.stopAll).toHaveBeenCalledWith(true);
+    });
   });
 });
 

@@ -53,6 +53,7 @@ import { DailyBotStore } from './daily-bot/daily-bot.store';
 import { DailyBotExecutionService } from './daily-bot/daily-bot-execution.service';
 import { DailyBotAutopilotService } from './daily-bot/daily-bot-autopilot.service';
 import { DataJournalService } from './journal/data-journal.service';
+import { PaperLanesService } from './daily-bot/paper-lanes.service';
 import { JournalController } from './journal/journal.controller';
 
 @Module({
@@ -113,6 +114,7 @@ import { JournalController } from './journal/journal.controller';
     DailyBotService,
     DailyBotExecutionService,
     DailyBotAutopilotService,
+    PaperLanesService,
     DataJournalService,
   ],
   exports: [
@@ -148,6 +150,7 @@ import { JournalController } from './journal/journal.controller';
     DailyBotService,
     DailyBotExecutionService,
     DailyBotAutopilotService,
+    PaperLanesService,
     DataJournalService,
   ],
 })

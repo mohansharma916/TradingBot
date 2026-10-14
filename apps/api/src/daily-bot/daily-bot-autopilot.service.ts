@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit, Optional, ServiceUnavailableException } from '@nestjs/common';
 import {
   AlertSeverity,
+  AutopilotLaneRun,
   AutopilotRun,
   AutopilotRunSchema,
   AutopilotSchedule,
@@ -24,6 +25,8 @@ import { StrategiesService } from '../strategies/strategies.service';
 import { TradingModeService } from '../trading/trading-mode.service';
 import { DailyBotService, dailyBotTradingDate, isTradingDate } from './daily-bot.service';
 import { DailyBotStore } from './daily-bot.store';
+import { PaperLanesService } from './paper-lanes.service';
+import { RiskReservationManager } from '../risk/risk-reservation.manager';
 
 const AutopilotStateSchema = z.object({
   version: z.literal(1),
@@ -97,8 +100,9 @@ export function buildStrategyScorecard(sessions: DailyBotSession[]): StrategySco
 }
 
 /**
- * Starts the day's Testing session unattended. Every start goes through DailyBotService, so the same
- * preflight, account caps, day budgets and recovery rules apply as for a manual start.
+ * Starts the day's Testing sessions unattended: one strategy on the main Testing account (ROUND_ROBIN /
+ * FIXED) or every strategy in its own isolated lane (PARALLEL). Every start goes through a DailyBotService,
+ * so the same preflight, caps, day budgets and recovery rules apply as for a manual start.
  */
 @Injectable()
 export class DailyBotAutopilotService implements OnModuleInit, OnModuleDestroy {
@@ -116,6 +120,8 @@ export class DailyBotAutopilotService implements OnModuleInit, OnModuleDestroy {
     @Optional() @Inject(TradingModeService) private readonly mode?: TradingModeService,
     @Optional() @Inject(NotificationsService) private readonly notifications?: NotificationsService,
     @Optional() @Inject('AUTOPILOT_STORAGE_PATH') storagePath?: string,
+    @Optional() @Inject(PaperLanesService) private readonly lanes?: PaperLanesService,
+    @Optional() @Inject(RiskReservationManager) private readonly accountRisk?: RiskReservationManager,
   ) {
     this.storagePath = path.resolve(storagePath || path.join(env.config.STATE_DIRECTORY ?? '.data', 'autopilot.json'));
     this.state = this.load();
@@ -162,10 +168,17 @@ export class DailyBotAutopilotService implements OnModuleInit, OnModuleDestroy {
     return {
       schedule: structuredClone(schedule),
       today: structuredClone(this.state.runs.find((run) => run.tradingDate === tradingDate) ?? null),
-      nextStrategyId: schedule ? this.pickStrategy(schedule)?.strategy.id ?? null : null,
+      nextStrategyId: schedule && schedule.rotation !== 'PARALLEL' ? this.pickStrategy(schedule)?.strategy.id ?? null : null,
       recentRuns: structuredClone(this.state.runs.slice(-20).reverse()),
-      scorecard: buildStrategyScorecard(this.dailyBotStore.snapshot().sessions),
+      scorecard: buildStrategyScorecard([...this.dailyBotStore.snapshot().sessions, ...(this.lanes?.getLanes().flatMap((lane) => lane.store.snapshot().sessions) ?? [])]),
+      lanes: this.lanes?.snapshot(tradingDate) ?? [],
     };
+  }
+
+  /** Stops new entries in every parallel lane; emergency also requests exits for open virtual positions. */
+  public async stopLanes(emergency = false): Promise<AutopilotStatus> {
+    await this.lanes?.stopAll(emergency);
+    return this.getStatus();
   }
 
   public update(input: unknown): AutopilotStatus {
@@ -211,7 +224,7 @@ export class DailyBotAutopilotService implements OnModuleInit, OnModuleDestroy {
     return this.getStatus();
   }
 
-  /** Stops future unattended starts. A session already running continues until stopped from the Daily Bot. */
+  /** Stops future unattended starts. Sessions already running continue until stopped. */
   public disable(): AutopilotStatus {
     if (this.state.schedule?.enabled) {
       this.commit({ ...this.state, schedule: { ...this.state.schedule, enabled: false, consentRecordedAt: null, updatedAt: new Date().toISOString() } });
@@ -244,6 +257,11 @@ export class DailyBotAutopilotService implements OnModuleInit, OnModuleDestroy {
     if (this.ticking) return;
     this.ticking = true;
     try {
+      // The account kill switch freezes every lane, whether or not Autopilot is still enabled.
+      if (this.accountRisk?.isKillSwitchActive() && this.lanes) {
+        const paused = await this.lanes.pauseAll();
+        if (paused) this.notify(AlertSeverity.WARNING, 'Parallel Testing lanes paused', `Kill switch active: new entries paused in ${paused} lane(s). Open virtual positions stay protected.`);
+      }
       const schedule = this.state.schedule;
       if (!schedule?.enabled) return;
       const tradingDate = dailyBotTradingDate(now);
@@ -256,74 +274,151 @@ export class DailyBotAutopilotService implements OnModuleInit, OnModuleDestroy {
         return;
       }
       if (time >= schedule.template.lastEntryTime) {
-        const message = existing ? `Entry window closed before a session could start. Last reason: ${existing.message}` : 'The API was not running during the entry window; no session was started.';
-        this.saveRun({ tradingDate, status: 'MISSED', strategyId: existing?.strategyId ?? null, strategyName: existing?.strategyName ?? null, setupId: existing?.setupId ?? null, sessionId: null, attempts: existing?.attempts ?? 0, lastAttemptAt: existing?.lastAttemptAt ?? null, message });
-        this.notify(AlertSeverity.WARNING, 'Autopilot missed today', message);
+        const lanes = (existing?.lanes ?? []).map((lane) => lane.status === 'STARTED' ? lane : { ...lane, status: 'MISSED' as const });
+        const anyStarted = lanes.some((lane) => lane.status === 'STARTED');
+        const message = anyStarted ? `Entry window closed. Not started: ${lanes.filter((lane) => lane.status === 'MISSED').map((lane) => `${lane.strategyName} (${lane.message})`).join('; ')}`
+          : existing ? `Entry window closed before a session could start. Last reason: ${existing.message}` : 'The API was not running during the entry window; no session was started.';
+        this.saveRun({ tradingDate, status: anyStarted ? 'STARTED' : 'MISSED', strategyId: existing?.strategyId ?? null, strategyName: existing?.strategyName ?? null, setupId: existing?.setupId ?? null, sessionId: null, attempts: existing?.attempts ?? 0, lastAttemptAt: existing?.lastAttemptAt ?? null, message, lanes });
+        this.notify(AlertSeverity.WARNING, anyStarted ? 'Autopilot could not start every strategy' : 'Autopilot missed today', message);
         return;
       }
       if (existing?.lastAttemptAt && now.getTime() - Date.parse(existing.lastAttemptAt) < RETRY_INTERVAL_MS) return;
-      await this.attemptStart(schedule, tradingDate, existing, now);
+      if (schedule.rotation === 'PARALLEL') await this.attemptParallel(schedule, tradingDate, existing, now);
+      else await this.attemptStart(schedule, tradingDate, existing, now);
     } finally {
       this.ticking = false;
     }
   }
 
-  private async attemptStart(schedule: AutopilotSchedule, tradingDate: string, existing: AutopilotRun | undefined, now: Date): Promise<void> {
-    const attempts = (existing?.attempts ?? 0) + 1;
-    const waiting = (message: string, picked?: StrategyConfig, setupId: string | null = null) => {
-      this.saveRun({ tradingDate, status: 'WAITING', strategyId: picked?.id ?? null, strategyName: picked?.name ?? null, setupId, sessionId: null, attempts, lastAttemptAt: now.toISOString(), message });
-      if (attempts === 1) this.notify(AlertSeverity.WARNING, 'Autopilot is waiting to start', `${message} Retrying every minute until ${schedule.template.lastEntryTime} IST.`);
-    };
-    if ((this.mode?.getMode() ?? TradeMode.PAPER) !== TradeMode.PAPER) return waiting('The global mode is Live. Autopilot only starts Testing sessions; switch to Testing or start Live sessions manually.');
-    let active = this.dailyBot.getToday().activeSession;
-    // A paused, flat Testing session from an earlier day (e.g. daily loss limit reached) is finished business.
-    // ERROR sessions and anything holding exposure or a pending entry still need the owner.
+  /**
+   * Starts one strategy in one Daily Bot (the main Testing account or an isolated lane). A paused, flat
+   * Testing session from an earlier day (e.g. daily loss limit reached) is finished business and is
+   * stopped first; ERROR sessions and anything holding exposure or a pending entry still need the owner.
+   */
+  private async startIn(bot: DailyBotService, schedule: AutopilotSchedule, strategy: StrategyConfig, tradingDate: string, priorSetupId: string | null):
+    Promise<{ started: boolean; setupId: string | null; sessionId: string | null; message: string }> {
+    let active = bot.getToday().activeSession;
     if (active && active.status === 'PAUSED' && active.config.tradingMode === TradeMode.PAPER && active.config.tradingDate < tradingDate
       && active.pendingProposalId === null && active.trades.every((trade) => trade.status === 'CLOSED')) {
       try {
-        await this.dailyBot.stop(active.id);
+        await bot.stop(active.id);
         this.logger.log(`[Autopilot] Closed out paused Testing session ${active.id} from ${active.config.tradingDate}.`);
       } catch (error) {
-        return waiting(`Could not close out the paused session from ${active.config.tradingDate}: ${describeFailure(error)}`);
+        return { started: false, setupId: priorSetupId, sessionId: null, message: `Could not close out the paused session from ${active.config.tradingDate}: ${describeFailure(error)}` };
       }
-      active = this.dailyBot.getToday().activeSession;
+      active = bot.getToday().activeSession;
     }
-    if (active) return waiting(`Daily Bot session ${active.id} (${active.status}) is active or unresolved. Autopilot will start after it is reviewed or finished.`);
-    const picked = this.pickStrategy(schedule);
-    if (!picked) return waiting('None of the scheduled strategies is currently authorized. Promote at least one to Paper Active.');
-    const { strategy, index } = picked;
+    if (active) return { started: false, setupId: priorSetupId, sessionId: null, message: `Daily Bot session ${active.id} (${active.status}) is active or unresolved. Autopilot will start after it is reviewed or finished.` };
 
     // Reuse today's setup only while it still captures the strategy's current version.
-    let setupId = this.dailyBot.getSetups().find((setup) => setup.id === existing?.setupId && setup.config.strategyId === strategy.id && setup.strategySnapshot.versionHash === strategy.versionHash)?.id ?? null;
+    let setupId = bot.getSetups().find((setup) => setup.id === priorSetupId && setup.config.strategyId === strategy.id && setup.strategySnapshot.versionHash === strategy.versionHash)?.id ?? null;
     try {
       if (!setupId) {
-        setupId = (await this.dailyBot.createSetup({ ...schedule.template, name: `Autopilot · ${strategy.name}`.slice(0, 100), tradingDate, strategyId: strategy.id, tradingMode: TradeMode.PAPER })).id;
+        setupId = (await bot.createSetup({ ...schedule.template, name: `Autopilot · ${strategy.name}`.slice(0, 100), tradingDate, strategyId: strategy.id, tradingMode: TradeMode.PAPER })).id;
       }
-      const session = await this.dailyBot.start(setupId, { operatorConsent: true });
-      const message = `Started Testing session with '${strategy.name}' v${strategy.version} at ${istTime(now)} IST.`;
-      this.saveRun({ tradingDate, status: 'STARTED', strategyId: strategy.id, strategyName: strategy.name, setupId, sessionId: session.id, attempts, lastAttemptAt: now.toISOString(), message },
-        schedule.rotation === 'ROUND_ROBIN' ? { rotationIndex: (index + 1) % schedule.strategyIds.length } : {});
-      this.logger.log(`[Autopilot] ${message}`);
-      this.notify(AlertSeverity.INFO, 'Autopilot started today\'s session', message);
+      const session = await bot.start(setupId, { operatorConsent: true });
+      return { started: true, setupId, sessionId: session.id, message: `Started Testing session with '${strategy.name}' v${strategy.version}.` };
     } catch (error) {
-      waiting(`Start blocked: ${describeFailure(error)}`, strategy, setupId);
+      return { started: false, setupId, sessionId: null, message: `Start blocked: ${describeFailure(error)}` };
     }
   }
 
-  /** A restart pauses running sessions; resume the Testing session Autopilot started once preflight passes again. */
-  private async resumeAfterRestart(run: AutopilotRun, now: Date): Promise<void> {
-    if (!run.sessionId) return;
-    if (run.lastAttemptAt && now.getTime() - Date.parse(run.lastAttemptAt) < RETRY_INTERVAL_MS) return;
-    let session: DailyBotSession;
-    try { session = this.dailyBot.getSession(run.sessionId); } catch { return; }
-    const lastEvent = session.events[session.events.length - 1];
-    if (session.status !== 'PAUSED' || session.config.tradingMode !== TradeMode.PAPER || lastEvent?.type !== 'RECOVERY_REQUIRED') return;
-    try {
-      await this.dailyBot.resume(session.id);
-      this.saveRun({ ...run, lastAttemptAt: now.toISOString(), message: `Resumed after API restart at ${istTime(now)} IST.` });
-      this.notify(AlertSeverity.INFO, 'Autopilot resumed after restart', `Testing session ${session.id} resumed after a fresh preflight.`);
-    } catch (error) {
-      this.saveRun({ ...run, lastAttemptAt: now.toISOString(), message: `Restart recovery waiting: ${describeFailure(error)}` });
+  private blockedGlobally(): string | null {
+    if ((this.mode?.getMode() ?? TradeMode.PAPER) !== TradeMode.PAPER) return 'The global mode is Live. Autopilot only starts Testing sessions; switch to Testing or start Live sessions manually.';
+    if (this.accountRisk?.isKillSwitchActive()) return 'The account kill switch is active. Autopilot starts nothing until it is reset.';
+    return null;
+  }
+
+  private async attemptStart(schedule: AutopilotSchedule, tradingDate: string, existing: AutopilotRun | undefined, now: Date): Promise<void> {
+    const attempts = (existing?.attempts ?? 0) + 1;
+    const waiting = (message: string, picked?: StrategyConfig, setupId: string | null = null) => {
+      this.saveRun({ tradingDate, status: 'WAITING', strategyId: picked?.id ?? null, strategyName: picked?.name ?? null, setupId, sessionId: null, attempts, lastAttemptAt: now.toISOString(), message, lanes: [] });
+      if (attempts === 1) this.notify(AlertSeverity.WARNING, 'Autopilot is waiting to start', `${message} Retrying every minute until ${schedule.template.lastEntryTime} IST.`);
+    };
+    const blocked = this.blockedGlobally();
+    if (blocked) return waiting(blocked);
+    const picked = this.pickStrategy(schedule);
+    if (!picked) return waiting('None of the scheduled strategies is currently authorized. Promote at least one to Paper Active.');
+    const { strategy, index } = picked;
+    const result = await this.startIn(this.dailyBot, schedule, strategy, tradingDate, existing?.strategyId === strategy.id ? existing.setupId : null);
+    if (!result.started) return waiting(result.message, strategy, result.setupId);
+    const message = `${result.message.slice(0, -1)} at ${istTime(now)} IST.`;
+    this.saveRun({ tradingDate, status: 'STARTED', strategyId: strategy.id, strategyName: strategy.name, setupId: result.setupId, sessionId: result.sessionId, attempts, lastAttemptAt: now.toISOString(), message, lanes: [] },
+      schedule.rotation === 'ROUND_ROBIN' ? { rotationIndex: (index + 1) % schedule.strategyIds.length } : {});
+    this.logger.log(`[Autopilot] ${message}`);
+    this.notify(AlertSeverity.INFO, 'Autopilot started today\'s session', message);
+  }
+
+  /** PARALLEL: every authorized strategy starts in its own isolated virtual account. */
+  private async attemptParallel(schedule: AutopilotSchedule, tradingDate: string, existing: AutopilotRun | undefined, now: Date): Promise<void> {
+    const attempts = (existing?.attempts ?? 0) + 1;
+    const save = (status: AutopilotRun['status'], message: string, lanes: AutopilotLaneRun[]) =>
+      this.saveRun({ tradingDate, status, strategyId: null, strategyName: null, setupId: null, sessionId: null, attempts, lastAttemptAt: now.toISOString(), message, lanes });
+    const blocked = this.blockedGlobally() ?? (this.lanes ? null : 'Parallel paper lanes are unavailable in this deployment.');
+    if (blocked) {
+      save('WAITING', blocked, existing?.lanes ?? []);
+      if (attempts === 1) this.notify(AlertSeverity.WARNING, 'Autopilot is waiting to start', `${blocked} Retrying every minute until ${schedule.template.lastEntryTime} IST.`);
+      return;
     }
+    const known = new Map(this.strategies.getAllStrategies().map((strategy) => [strategy.id, strategy]));
+    const authorized = schedule.strategyIds.map((id) => known.get(id)).filter((strategy): strategy is StrategyConfig => Boolean(strategy && isAuthorized(strategy)));
+    if (authorized.length === 0) {
+      save('WAITING', 'None of the scheduled strategies is currently authorized. Promote at least one to Paper Active.', existing?.lanes ?? []);
+      return;
+    }
+    const lanes: AutopilotLaneRun[] = [];
+    const startedNow: string[] = [];
+    const failedNow: string[] = [];
+    for (const strategy of authorized) {
+      const prior = existing?.lanes.find((lane) => lane.strategyId === strategy.id);
+      if (prior?.status === 'STARTED') { lanes.push(prior); continue; }
+      let result: Awaited<ReturnType<DailyBotAutopilotService['startIn']>>;
+      try {
+        result = await this.startIn(this.lanes!.getLane(strategy.id).dailyBot, schedule, strategy, tradingDate, prior?.setupId ?? null);
+      } catch (error) {
+        result = { started: false, setupId: prior?.setupId ?? null, sessionId: null, message: `Lane unavailable: ${describeFailure(error)}` };
+      }
+      lanes.push({ strategyId: strategy.id, strategyName: strategy.name, status: result.started ? 'STARTED' : 'WAITING', setupId: result.setupId, sessionId: result.sessionId, attempts: (prior?.attempts ?? 0) + 1, message: result.message });
+      (result.started ? startedNow : failedNow).push(strategy.name);
+    }
+    const started = lanes.filter((lane) => lane.status === 'STARTED').length;
+    const allStarted = started === lanes.length;
+    save(allStarted ? 'STARTED' : 'WAITING', `${started} of ${lanes.length} strategies running in parallel Testing lanes${allStarted ? '' : '; retrying the rest every minute'}.`, lanes);
+    if (startedNow.length) this.notify(AlertSeverity.INFO, 'Autopilot started parallel Testing', `Started at ${istTime(now)} IST: ${startedNow.join(', ')}.`);
+    if (failedNow.length && attempts === 1) this.notify(AlertSeverity.WARNING, 'Autopilot is waiting to start some strategies', `${failedNow.join(', ')} could not start yet. Retrying every minute until ${schedule.template.lastEntryTime} IST.`);
+  }
+
+  /** A restart pauses running sessions; resume a Testing session Autopilot started once preflight passes again. Returns a status message when it acted. */
+  private async resumeIfRecovering(bot: DailyBotService, sessionId: string, now: Date): Promise<string | null> {
+    let session: DailyBotSession;
+    try { session = bot.getSession(sessionId); } catch { return null; }
+    const lastEvent = session.events[session.events.length - 1];
+    if (session.status !== 'PAUSED' || session.config.tradingMode !== TradeMode.PAPER || lastEvent?.type !== 'RECOVERY_REQUIRED') return null;
+    try {
+      await bot.resume(session.id);
+      this.notify(AlertSeverity.INFO, 'Autopilot resumed after restart', `Testing session '${session.strategySnapshot.name}' resumed after a fresh preflight.`);
+      return `Resumed after API restart at ${istTime(now)} IST.`;
+    } catch (error) {
+      return `Restart recovery waiting: ${describeFailure(error)}`;
+    }
+  }
+
+  private async resumeAfterRestart(run: AutopilotRun, now: Date): Promise<void> {
+    if (run.lastAttemptAt && now.getTime() - Date.parse(run.lastAttemptAt) < RETRY_INTERVAL_MS) return;
+    if (this.accountRisk?.isKillSwitchActive()) return;
+    if (run.lanes.length === 0) {
+      const message = run.sessionId ? await this.resumeIfRecovering(this.dailyBot, run.sessionId, now) : null;
+      if (message) this.saveRun({ ...run, lastAttemptAt: now.toISOString(), message });
+      return;
+    }
+    if (!this.lanes) return;
+    let changed = false;
+    const lanes = [];
+    for (const lane of run.lanes) {
+      const message = lane.status === 'STARTED' && lane.sessionId ? await this.resumeIfRecovering(this.lanes.getLane(lane.strategyId).dailyBot, lane.sessionId, now) : null;
+      if (message) changed = true;
+      lanes.push(message ? { ...lane, message } : lane);
+    }
+    if (changed) this.saveRun({ ...run, lanes, lastAttemptAt: now.toISOString() });
   }
 }

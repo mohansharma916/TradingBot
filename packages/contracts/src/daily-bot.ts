@@ -181,7 +181,8 @@ export const AutopilotTemplateSchema = DailyBotConfigBaseSchema.omit({ name: tru
 export type AutopilotTemplate = z.infer<typeof AutopilotTemplateSchema>;
 export type AutopilotTemplateInput = z.input<typeof AutopilotTemplateSchema>;
 
-export const AutopilotRotationSchema = z.enum(['ROUND_ROBIN', 'FIXED']);
+/** PARALLEL runs every strategy the same day, each in its own isolated virtual account. */
+export const AutopilotRotationSchema = z.enum(['PARALLEL', 'ROUND_ROBIN', 'FIXED']);
 export type AutopilotRotation = z.infer<typeof AutopilotRotationSchema>;
 
 export const AutopilotScheduleSchema = z.object({
@@ -200,16 +201,29 @@ export type AutopilotSchedule = z.infer<typeof AutopilotScheduleSchema>;
 export const AutopilotUpdateRequestSchema = z.object({
   enabled: z.boolean(),
   strategyIds: z.array(z.string().uuid()).min(1).max(10),
-  rotation: AutopilotRotationSchema.default('ROUND_ROBIN'),
+  rotation: AutopilotRotationSchema.default('PARALLEL'),
   autoStartTime: sessionTimeSchema.default('09:20'),
   template: AutopilotTemplateSchema,
   operatorConsent: z.boolean().default(false),
 });
 export type AutopilotUpdateRequest = z.input<typeof AutopilotUpdateRequestSchema>;
 
+const AutopilotRunStatusSchema = z.enum(['WAITING', 'STARTED', 'MISSED']);
+
+export const AutopilotLaneRunSchema = z.object({
+  strategyId: z.string().uuid(),
+  strategyName: z.string(),
+  status: AutopilotRunStatusSchema,
+  setupId: z.string().uuid().nullable(),
+  sessionId: z.string().uuid().nullable(),
+  attempts: z.number().int().nonnegative(),
+  message: z.string(),
+});
+export type AutopilotLaneRun = z.infer<typeof AutopilotLaneRunSchema>;
+
 export const AutopilotRunSchema = z.object({
   tradingDate: DailyBotTradingDateSchema,
-  status: z.enum(['WAITING', 'STARTED', 'MISSED']),
+  status: AutopilotRunStatusSchema,
   strategyId: z.string().uuid().nullable(),
   strategyName: z.string().nullable(),
   setupId: z.string().uuid().nullable(),
@@ -217,6 +231,8 @@ export const AutopilotRunSchema = z.object({
   attempts: z.number().int().nonnegative(),
   lastAttemptAt: z.string().datetime().nullable(),
   message: z.string(),
+  /** Per-strategy outcomes when the schedule runs in PARALLEL. */
+  lanes: z.array(AutopilotLaneRunSchema).default([]),
 });
 export type AutopilotRun = z.infer<typeof AutopilotRunSchema>;
 
@@ -238,11 +254,28 @@ export const StrategyScorecardSchema = z.object({
 });
 export type StrategyScorecard = z.infer<typeof StrategyScorecardSchema>;
 
+export const PaperLaneSnapshotSchema = z.object({
+  strategyId: z.string().uuid(),
+  strategyName: z.string(),
+  sessionId: z.string().uuid().nullable(),
+  status: DailyBotSessionSchema.shape.status.nullable(),
+  tradingDate: DailyBotTradingDateSchema.nullable(),
+  tradesExecuted: z.number().int().nonnegative(),
+  realizedNetPnl: z.number().finite(),
+  openPositions: z.array(z.string()),
+  availableFunds: z.number().finite().nonnegative(),
+  lastMessage: z.string().nullable(),
+  lastHeartbeatAt: z.string().datetime().nullable(),
+  tradingMode: z.literal(TradeMode.PAPER),
+});
+export type PaperLaneSnapshot = z.infer<typeof PaperLaneSnapshotSchema>;
+
 export const AutopilotStatusSchema = z.object({
   schedule: AutopilotScheduleSchema.nullable(),
   today: AutopilotRunSchema.nullable(),
   nextStrategyId: z.string().uuid().nullable(),
   recentRuns: z.array(AutopilotRunSchema),
   scorecard: z.array(StrategyScorecardSchema),
+  lanes: z.array(PaperLaneSnapshotSchema),
 });
 export type AutopilotStatus = z.infer<typeof AutopilotStatusSchema>;
