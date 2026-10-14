@@ -556,6 +556,13 @@ export class TradingPlatformClient {
     });
   }
 
+  /** Stops new entries in every parallel Testing lane; emergency also requests exits for open virtual positions. */
+  public async stopAutopilotLanes(emergency = false): Promise<AutopilotStatus> {
+    return this.request(`/daily-bot/autopilot/lanes/${emergency ? 'emergency-stop' : 'stop'}`, {
+      method: 'POST',
+    });
+  }
+
   // Rolling analysis journal
   public async getJournalSummary(): Promise<JournalSummary> {
     return this.request('/journal');

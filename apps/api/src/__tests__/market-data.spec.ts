@@ -84,6 +84,25 @@ describe('Official Upstox V3 decoding and provenance', () => {
     expect(feed.getFeedHealth().status).toBe(FeedStatus.DISCONNECTED);
   });
 
+  it('fills index cards without a live tick from the delayed REST snapshot and never overwrites live ticks', async () => {
+    const token = { accessToken: 'owner-token', expiresAt: new Date(now + 3_600_000).toISOString() };
+    feed = new UpstoxMarketFeedService({ config: {} } as any, decoder, gateway as any, { getToken: () => token } as any);
+    feed.subscribe(['NSE_INDEX|Nifty 50', 'NSE_INDEX|Nifty Bank', 'NSE_FO|52175']);
+    feed.handleBinaryMessage(decoder.encodeMarketFeed(marketPacket()));
+    (feed as any).quotes.set('NSE_INDEX|Nifty 50', { ...feed.getQuote('NSE_FO|52175')!, instrumentKey: 'NSE_INDEX|Nifty 50', lastPrice: 25100 });
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ data: {
+      'NSE_INDEX:Nifty Bank': { instrument_token: 'NSE_INDEX|Nifty Bank', last_price: 56789.5, ohlc: { close: 56500 }, net_change: 289.5, last_trade_time: String(now) },
+      'NSE_INDEX:Nifty 50': { instrument_token: 'NSE_INDEX|Nifty 50', last_price: 1, ohlc: { close: 1 } },
+    } }) }));
+    vi.stubGlobal('fetch', fetchMock);
+    await feed.refreshMissingIndexQuotes();
+    vi.unstubAllGlobals();
+    const requested = new URL(String((fetchMock.mock.calls[0] as unknown[])[0])).searchParams.get('instrument_key');
+    expect(requested).toBe('NSE_INDEX|Nifty Bank'); // only indices lacking a live tick
+    expect(feed.getQuote('NSE_INDEX|Nifty Bank')).toMatchObject({ lastPrice: 56789.5, provenance: 'DELAYED', isStale: true });
+    expect(feed.getQuote('NSE_INDEX|Nifty 50')).toMatchObject({ lastPrice: 25100, provenance: 'LIVE' });
+  });
+
   it('accepts a fresh depth update even when the last trade timestamp did not change', () => {
     feed.handleBinaryMessage(decoder.encodeMarketFeed(marketPacket()));
     feed.handleBinaryMessage(decoder.encodeMarketFeed(marketPacket(now + 1000, now)));

@@ -123,12 +123,17 @@ docker-compose up -d
 Autopilot starts the Daily Bot by itself on every verified NSE trading day, so a multi-day paper trial runs unattended. Configure it from **Daily Bot → Today → Scheduled Daily Bot**, or with `PUT /api/v1/daily-bot/autopilot`.
 
 - It reuses the capital, loss and timing limits of your latest saved Daily Bot setup, and the account caps still apply.
-- Choose one or more strategies. **Rotate daily** runs one strategy per trading day, so each strategy gets real market days and you can compare them. **Same strategy every day** always uses the first authorized one.
+- Choose one or more strategies and a mode:
+  - **All in parallel** (default) starts every strategy the same day, each in its own isolated virtual account (paper broker, ₹ limits, risk ledger and one-position rule) under `STATE_DIRECTORY/paper-lanes/<strategy-id>/`. Every strategy trades the same market days, so the scorecard compares them fairly. Each lane trades as if it were alone, so combined virtual exposure is the sum of the lanes. Lanes are Testing-only, reload after a restart, and pause when the account kill switch is active. Stop or emergency-exit all lanes from the panel, or with `POST /api/v1/daily-bot/autopilot/lanes/stop` (`/emergency-stop`).
+  - **One per day, rotating** runs one strategy per trading day on the main Testing account.
+  - **Same strategy every day** always uses the first authorized one.
 - Only strategies promoted out of `DRAFT` (for example to Paper Active) can be scheduled.
 - Every start goes through the normal Daily Bot preflight. When a check fails (missing Upstox login, stale data, Live mode selected, another session active), Autopilot retries every minute until the last entry time. If it still cannot start, it records the day as `MISSED` and raises an alert.
 - After an API restart it resumes its own Testing session once preflight passes again.
 - Autopilot never starts Live sessions. Live keeps manual start and per-entry approval.
 - The **Strategy Scorecard** reports days, trades, win rate, average win/loss, worst day and profit factor for each strategy.
+
+Index cards fall back to Upstox's REST quote snapshot, labelled `DELAYED`, whenever an index has no live tick (before the open, after the close or during reconnects). Entry checks accept only fresh `LIVE` quotes, so delayed prices are display-only.
 
 Operational requirements: keep the API process running through market hours, and connect Upstox each morning before the auto-start time. Upstox access tokens expire daily, and Testing uses real Upstox market data.
 

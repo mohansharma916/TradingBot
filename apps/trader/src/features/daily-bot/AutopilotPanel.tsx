@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import { AutopilotStatus, AutopilotTemplate, DailyBotToday, StrategyStatus } from '@trading-bot/contracts';
+import { AutopilotRotation, AutopilotStatus, AutopilotTemplate, DailyBotToday, StrategyStatus } from '@trading-bot/contracts';
 import { formatErrorMessage } from '@trading-bot/client-sdk';
 import { colors } from '@trading-bot/ui';
 import { apiClient } from '../../services/api';
@@ -27,7 +27,7 @@ export function AutopilotPanel({ today }: { today: DailyBotToday }) {
   const [status, setStatus] = useState<AutopilotStatus | null>(null);
   const [editing, setEditing] = useState(false);
   const [selected, setSelected] = useState<string[]>([]);
-  const [rotation, setRotation] = useState<'ROUND_ROBIN' | 'FIXED'>('ROUND_ROBIN');
+  const [rotation, setRotation] = useState<AutopilotRotation>('PARALLEL');
   const [startTime, setStartTime] = useState('09:20');
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -52,7 +52,7 @@ export function AutopilotPanel({ today }: { today: DailyBotToday }) {
 
   const openEditor = () => {
     setSelected(schedule?.strategyIds.filter((id) => authorized.some((strategy) => strategy.id === id)) ?? authorized.slice(0, 3).map((strategy) => strategy.id));
-    setRotation(schedule?.rotation ?? 'ROUND_ROBIN');
+    setRotation(schedule?.rotation ?? 'PARALLEL');
     setStartTime(schedule?.autoStartTime ?? '09:20');
     setConsent(false); setError(null); setEditing(true);
   };
@@ -68,14 +68,14 @@ export function AutopilotPanel({ today }: { today: DailyBotToday }) {
       <View style={{ flexShrink: 1, gap: 4 }}>
         <Text style={styles.eyebrow}>AUTOPILOT · TESTING ONLY</Text>
         <Text style={styles.heading}>Scheduled Daily Bot</Text>
-        <Text style={styles.description}>Starts a Testing session on every trading day and rotates through your chosen strategies so you can compare them. Live sessions still start manually with per-entry approval.</Text>
+        <Text style={styles.description}>Starts Testing on every trading day without you. Run all chosen strategies side by side, each with its own virtual account, or one strategy per day. Live sessions still start manually with per-entry approval.</Text>
       </View>
       <Text style={styles.status}>{schedule?.enabled ? 'ENABLED' : 'OFF'}</Text>
     </View>
     {error && <Text accessibilityRole="alert" style={styles.errorText}>{error}</Text>}
 
     {schedule?.enabled && !editing && <>
-      <Text style={styles.description}>Starts at {schedule.autoStartTime} IST · {schedule.rotation === 'ROUND_ROBIN' ? 'One strategy per day, in rotation' : 'First authorized strategy every day'} · Next: {strategyName(status?.nextStrategyId)}</Text>
+      <Text style={styles.description}>Starts at {schedule.autoStartTime} IST · {schedule.rotation === 'PARALLEL' ? `All ${schedule.strategyIds.length} strategies in parallel, each with its own virtual account` : `${schedule.rotation === 'ROUND_ROBIN' ? 'One strategy per day, in rotation' : 'First authorized strategy every day'} · Next: ${strategyName(status?.nextStrategyId)}`}</Text>
       {status?.today && <View style={styles.innerCard}>
         <Text style={styles.label}>Today: {status.today.status}{status.today.strategyName ? ` · ${status.today.strategyName}` : ''}</Text>
         <Text style={styles.hint}>{status.today.message}</Text>
@@ -83,14 +83,16 @@ export function AutopilotPanel({ today }: { today: DailyBotToday }) {
     </>}
 
     {editing && <View style={{ gap: 12 }}>
-      <Text style={styles.label}>Strategies to rotate ({selected.length} selected)</Text>
+      <Text style={styles.label}>Strategies ({selected.length} selected)</Text>
       {authorized.length === 0 && <Text style={styles.errorText}>No strategy is authorized yet. Backtest a strategy and promote it to Paper Active in Strategies.</Text>}
       <View style={styles.row}>{authorized.map((strategy) => <Chip key={strategy.id} label={`${strategy.name} · ${strategy.underlying}`} selected={selected.includes(strategy.id)}
         onPress={() => setSelected((current) => current.includes(strategy.id) ? current.filter((id) => id !== strategy.id) : [...current, strategy.id])} />)}</View>
       <View style={styles.row}>
-        <Chip label="Rotate daily" selected={rotation === 'ROUND_ROBIN'} onPress={() => setRotation('ROUND_ROBIN')} />
+        <Chip label="All in parallel (recommended)" selected={rotation === 'PARALLEL'} onPress={() => setRotation('PARALLEL')} />
+        <Chip label="One per day, rotating" selected={rotation === 'ROUND_ROBIN'} onPress={() => setRotation('ROUND_ROBIN')} />
         <Chip label="Same strategy every day" selected={rotation === 'FIXED'} onPress={() => setRotation('FIXED')} />
       </View>
+      {rotation === 'PARALLEL' && <Text style={styles.hint}>Each strategy gets its own virtual ₹{(activeTemplate?.dailyCapitalBudget ?? 10000).toLocaleString('en-IN')} account and limits, as if it traded alone. Combined virtual exposure is the sum of all lanes.</Text>}
       <Text style={styles.label}>Auto-start time (IST, HH:mm)</Text>
       <TextInput accessibilityLabel="Auto-start time" value={startTime} onChangeText={setStartTime} style={styles.input} autoCapitalize="none" />
       {!template && <Text style={styles.errorText}>Save one Daily Bot setup first. Autopilot reuses its capital, loss and timing limits.</Text>}
@@ -99,6 +101,22 @@ export function AutopilotPanel({ today }: { today: DailyBotToday }) {
     {activeTemplate && <Text style={styles.hint}>
       Daily rules{editing && source ? ` from setup “${source.config.name}”` : ''}: capital {money(activeTemplate.dailyCapitalBudget)} · max daily loss {money(activeTemplate.dailyMaxLossAllIn)} · risk per trade {money(activeTemplate.perTradeMaxLossAllIn)} · up to {activeTemplate.maximumTradesPerDay} trades · entries {activeTemplate.entryStartTime}–{activeTemplate.lastEntryTime} · exit by {activeTemplate.mandatoryExitTime} IST.
     </Text>}
+
+    {!!status?.lanes.length && !editing && <View style={{ gap: 8 }}>
+      <Text style={styles.label}>Parallel Testing Lanes</Text>
+      {status.lanes.map((lane) => <View key={lane.strategyId} style={styles.innerCard}>
+        <View style={styles.rowBetween}>
+          <Text style={styles.label}>{lane.strategyName}</Text>
+          <Text style={styles.status}>{lane.status ?? 'IDLE'}</Text>
+        </View>
+        <Text style={styles.hint}>Realized {money(lane.realizedNetPnl)} · {lane.tradesExecuted} trades · virtual funds {money(lane.availableFunds)}{lane.openPositions.length ? ` · open: ${lane.openPositions.join(', ')}` : ''}</Text>
+        {lane.lastMessage && <Text style={styles.hint}>{lane.lastMessage}</Text>}
+      </View>)}
+      <View style={styles.row}>
+        <Button label="Stop New Entries in All Lanes" secondary disabled={busy} onPress={() => { void run(() => apiClient.stopAutopilotLanes(false)); }} />
+        <Button label="Emergency Exit All Lanes" secondary disabled={busy} onPress={() => { void run(() => apiClient.stopAutopilotLanes(true)); }} />
+      </View>
+    </View>}
 
     {editing && <Chip label="I authorize unattended Testing sessions with these limits on every trading day until I turn Autopilot off." selected={consent} onPress={() => setConsent(!consent)} />}
 

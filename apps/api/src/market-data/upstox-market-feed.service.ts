@@ -39,6 +39,7 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
   private lastTickReceivedAt: string | null = null;
   private lastFeedLatencyMs = 0;
   private authorizationToken: string | null = null;
+  private lastIndexSnapshotAt = 0;
 
   constructor(
     @Inject(EnvService) _envService: EnvService,
@@ -181,6 +182,10 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
       socket.close();
       this.setStatus(FeedStatus.DISCONNECTED);
     }
+    if (authenticated && now - this.lastIndexSnapshotAt >= 60_000) {
+      this.lastIndexSnapshotAt = now;
+      void this.refreshMissingIndexQuotes().catch(() => undefined);
+    }
     // OAuth may be completed after startup, or replaced after expiry.
     if (!this.stopped && authenticated && !this.ws && !this.connecting && !this.reconnectTimer &&
       !(this.status === FeedStatus.AUTH_FAILED && record!.accessToken === this.authorizationToken)) void this.initiateConnection();
@@ -219,11 +224,26 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     if (this.ws?.readyState === WebSocket.OPEN && keys.length) this.ws.send(Buffer.from(JSON.stringify({ guid: `sub_${Date.now()}`, method: 'sub', data: { mode, instrumentKeys: keys } })), { binary: true });
   }
 
+  /**
+   * Index cards need a price even before the open, after the close or while the socket reconnects.
+   * Indices without a current LIVE tick are filled from the REST quote snapshot as DELAYED, which
+   * entry freshness checks never accept, so this is display-only.
+   */
+  public async refreshMissingIndexQuotes(): Promise<void> {
+    const missing = [...this.subscriptions.keys()].filter((key) => key.startsWith('NSE_INDEX|') && !this.isFreshLive(this.quotes.get(key)));
+    if (missing.length) await this.syncRealMarketPrices(missing);
+  }
+
+  private isFreshLive(quote: QuoteSnapshot | undefined): boolean {
+    return quote?.provenance === 'LIVE' && !quote.isStale;
+  }
+
   /** REST snapshots are explicitly delayed; no Yahoo fallback or fabricated depth. */
-  public async syncRealMarketPrices(): Promise<void> {
+  public async syncRealMarketPrices(keys: string[] = [...this.subscriptions.keys()]): Promise<void> {
     const record = this.tokenStorage?.getToken();
-    if (!record?.accessToken || !Number.isFinite(Date.parse(record.expiresAt)) || Date.parse(record.expiresAt) <= Date.now() || !this.subscriptions.size) return;
-    const query = new URLSearchParams({ instrument_key: [...this.subscriptions.keys()].join(',') });
+    keys = keys.filter((key) => this.subscriptions.has(key)).slice(0, 500);
+    if (!record?.accessToken || !Number.isFinite(Date.parse(record.expiresAt)) || Date.parse(record.expiresAt) <= Date.now() || !keys.length) return;
+    const query = new URLSearchParams({ instrument_key: keys.join(',') });
     const response = await fetch(`https://api.upstox.com/v2/market-quote/quotes?${query}`, {
       headers: { Authorization: `Bearer ${record.accessToken}`, Accept: 'application/json' }, signal: AbortSignal.timeout(10000),
     });
@@ -234,6 +254,8 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
       const key = row.instrument_token;
       const lastTradeTime = Number(row.last_trade_time);
       if (typeof key !== 'string' || !this.subscriptions.has(key) || !Number.isFinite(row.last_price) || row.last_price <= 0) continue;
+      // A live tick that arrived during the request is newer than this snapshot.
+      if (this.isFreshLive(this.quotes.get(key))) continue;
       const bids = (row.depth?.buy || []).filter((level: any) => level.price > 0 && level.quantity > 0).slice(0, 5).map((level: any) => ({ price: level.price, quantity: level.quantity }));
       const asks = (row.depth?.sell || []).filter((level: any) => level.price > 0 && level.quantity > 0).slice(0, 5).map((level: any) => ({ price: level.price, quantity: level.quantity }));
       const snapshot = this.decoder.normalizeToQuoteSnapshot({
