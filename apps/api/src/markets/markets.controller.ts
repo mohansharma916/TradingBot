@@ -28,7 +28,8 @@ export class MarketsController {
   ) {}
 
   @Get('watchlist')
-  getWatchlist(): QuoteSnapshot[] {
+  async getWatchlist(): Promise<QuoteSnapshot[]> {
+    await this.feedService.ensureIndexQuotes();
     return this.feedService.getAllQuotes();
   }
 

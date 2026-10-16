@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useReducer } from 'react';
 import { colors, spacing, borderRadius, typography } from '@trading-bot/ui';
 import { Badge } from '@trading-bot/ui';
 import { isMarketOpenForTrading } from '@trading-bot/domain';
 import { apiClient } from '../src/services/api';
 import { formatErrorMessage } from '@trading-bot/client-sdk';
+import {
+  Underlying, SPOT_KEYS, marketCache, updateMarketCache, subscribeMarketCache, fetchMarketData, applyQuoteTicks, isMarketDataLoading,
+} from '../src/features/markets/market-cache';
 
 interface OptionStrikeRow {
   strikePrice: number;
@@ -34,27 +37,32 @@ interface OptionStrikeRow {
 }
 
 export default function MarketsScreen() {
-  const [selectedUnderlying, setSelectedUnderlying] = useState<'NIFTY' | 'BANKNIFTY'>('NIFTY');
-  const [selectedExpiry, setSelectedExpiry] = useState<string>('');
+  // Module-level store: survives tab switches and is pre-warmed at sign-in, so the first paint has data.
+  const [, rerender] = useReducer((tick: number) => tick + 1, 0);
+  useEffect(() => subscribeMarketCache(rerender), []);
+  const { selectedUnderlying, chains, feedLatencyMs, isFeedStale, isLiveConnected, dataSource, watchlistQuotes, connectionError } = marketCache;
+  const isLoading = isMarketDataLoading();
+
   const [searchQuery, setSearchQuery] = useState('');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [feedLatencyMs, setFeedLatencyMs] = useState<number | null>(null);
-  const [isFeedStale, setIsFeedStale] = useState(true);
-  const [isLiveConnected, setIsLiveConnected] = useState<boolean>(false);
   const [isMarketOpen, setIsMarketOpen] = useState<boolean>(() => isMarketOpenForTrading());
   const [snapshotTrigger, setSnapshotTrigger] = useState<number>(0);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-
-  const [dataSource, setDataSource] = useState('UNAVAILABLE');
-  const [liveLotSize, setLiveLotSize] = useState(0);
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [liveOptionRows, setLiveOptionRows] = useState<OptionStrikeRow[] | null>(null);
-  const [liveSpotPrice, setLiveSpotPrice] = useState<number | null>(null);
-  const [liveExpiries, setLiveExpiries] = useState<string[] | null>(null);
   const [searchResults, setSearchResults] = useState<any[]>([]);
-  const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, any>>({});
 
-  // Real-time WebSocket streaming connection
+  const chain = chains[selectedUnderlying];
+  const selectedExpiry = chain.expiry;
+  const liveOptionRows = chain.rows as OptionStrikeRow[] | null;
+  const liveSpotPrice = chain.spotPrice;
+  const liveExpiries = chain.expiries;
+  const liveLotSize = chain.lotSize;
+
+  const setSelectedUnderlying = (underlying: Underlying) => updateMarketCache({ selectedUnderlying: underlying }, true);
+  const setSelectedExpiry = (expiry: string) =>
+    updateMarketCache({ chains: { ...marketCache.chains, [selectedUnderlying]: { ...marketCache.chains[selectedUnderlying], expiry } } }, true);
+  const setConnectionError = (message: string | null) => updateMarketCache({ connectionError: message }, true);
+
+  // Real-time WebSocket streaming: one connection for the screen's lifetime, updates both indices' chains.
   useEffect(() => {
     let ws: WebSocket | null = null;
     let isMounted = true;
@@ -73,53 +81,12 @@ export default function MarketsScreen() {
           try {
             const data = JSON.parse(event.data);
             if (data.topic === 'quotes.snapshot' && Array.isArray(data.payload)) {
-              const quotesList = data.payload;
-              setWatchlistQuotes((prev) => {
-                const updated = { ...prev };
-                for (const q of quotesList) {
-                  if (q.instrumentKey) updated[q.instrumentKey] = q;
-                }
-                return updated;
-              });
-
-              const targetKey = selectedUnderlying === 'NIFTY' ? 'NSE_INDEX|Nifty 50' : 'NSE_INDEX|Nifty Bank';
-              const spotUpdate = quotesList.find((q: any) => q.instrumentKey === targetKey);
-              if (spotUpdate && spotUpdate.lastPrice > 0) {
-                setLiveSpotPrice(spotUpdate.lastPrice);
-              }
-
-              setLiveOptionRows((prev) => {
-                if (!prev) return prev;
-                let changed = false;
-                const next = prev.map((row) => {
-                  let callUpdated = row.call;
-                  let putUpdated = row.put;
-
-                  if (row.call?.instrumentKey) {
-                    const match = quotesList.find((q: any) => q.instrumentKey === row.call?.instrumentKey);
-                    if (match && match.lastPrice > 0) {
-                      changed = true;
-                      callUpdated = { ...row.call, ...match };
-                    }
-                  }
-                  if (row.put?.instrumentKey) {
-                    const match = quotesList.find((q: any) => q.instrumentKey === row.put?.instrumentKey);
-                    if (match && match.lastPrice > 0) {
-                      changed = true;
-                      putUpdated = { ...row.put, ...match };
-                    }
-                  }
-
-                  if (callUpdated !== row.call || putUpdated !== row.put) {
-                    return { ...row, call: callUpdated, put: putUpdated };
-                  }
-                  return row;
-                });
-                return changed ? next : prev;
-              });
+              applyQuoteTicks(data.payload);
             } else if (data.topic === 'feed.status') {
-              setIsLiveConnected(data.payload?.status === 'CONNECTED');
-              if (data.payload?.provenance) setDataSource(data.payload.provenance);
+              updateMarketCache({
+                isLiveConnected: data.payload?.status === 'CONNECTED',
+                ...(data.payload?.provenance ? { dataSource: data.payload.provenance } : {}),
+              }, true);
             }
           } catch {}
         };
@@ -130,7 +97,7 @@ export default function MarketsScreen() {
       isMounted = false;
       ws?.close();
     };
-  }, [selectedUnderlying]);
+  }, []);
 
   // Periodic sync: only polls during active market hours; fetches once when market is closed
   useEffect(() => {
@@ -138,48 +105,17 @@ export default function MarketsScreen() {
     const marketOpen = isMarketOpenForTrading();
     setIsMarketOpen(marketOpen);
 
-    const fetchLiveChain = async (isManual = false) => {
+    const refresh = async (isManual = false) => {
+      if (isManual) setIsRefreshing(true);
       try {
-        if (isManual) setIsRefreshing(true);
-        const [chain, diag, watchlist] = await Promise.all([
-          apiClient.getOptionChain(selectedUnderlying, selectedExpiry),
-          apiClient.getFeedHealth(),
-          apiClient.getWatchlist(),
-        ]);
-        if (isMounted) {
-          if (chain) {
-            setLiveOptionRows(chain.strikes as any);
-            setLiveSpotPrice(chain.spotPrice);
-            setLiveExpiries(chain.availableExpiries || []);
-            setIsLiveConnected(true);
-            setLiveLotSize(chain.lotSize);
-            setConnectionError(null);
-            if (!selectedExpiry && chain.expiryDate) setSelectedExpiry(chain.expiryDate);
-          }
-          if (watchlist && Array.isArray(watchlist)) {
-            const map: Record<string, any> = {};
-            for (const q of watchlist) {
-              map[q.instrumentKey] = q;
-            }
-            setWatchlistQuotes(map);
-          }
-          setDataSource(diag.provenance || 'UNAVAILABLE');
-          setFeedLatencyMs(diag.lastTickReceivedAt ? diag.feedLatencyMs : null);
-          setIsFeedStale(diag.provenance !== 'LIVE' || diag.staleCount > 0);
-        }
-      } catch (failure) {
-        if (isMounted) {
-          setIsLiveConnected(false);
-          setDataSource('UNAVAILABLE');
-          setConnectionError(formatErrorMessage(failure) || 'Market data unavailable.');
-        }
+        await fetchMarketData([selectedUnderlying]);
       } finally {
         if (isMounted && isManual) setIsRefreshing(false);
       }
     };
 
     // Always fetch closing/live snapshot upon mount or selection change
-    fetchLiveChain(snapshotTrigger > 0);
+    void refresh(snapshotTrigger > 0);
 
     // If market is closed, DO NOT poll continuously. Save network, CPU, and API quotas.
     if (!marketOpen) {
@@ -188,7 +124,7 @@ export default function MarketsScreen() {
       };
     }
 
-    const interval = setInterval(() => fetchLiveChain(false), 3000);
+    const interval = setInterval(() => void refresh(false), 3000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -215,11 +151,15 @@ export default function MarketsScreen() {
     };
   }, [searchQuery]);
 
-  const niftyQuote = watchlistQuotes['NSE_INDEX|Nifty 50'];
-  const bankNiftyQuote = watchlistQuotes['NSE_INDEX|Nifty Bank'];
+  const niftyQuote = watchlistQuotes[SPOT_KEYS.NIFTY];
+  const bankNiftyQuote = watchlistQuotes[SPOT_KEYS.BANKNIFTY];
+  const niftySpot = niftyQuote?.lastPrice > 0 ? niftyQuote.lastPrice : chains.NIFTY.spotPrice;
+  const bankNiftySpot = bankNiftyQuote?.lastPrice > 0 ? bankNiftyQuote.lastPrice : chains.BANKNIFTY.spotPrice;
+  const formatSpot = (price: number | null | undefined) =>
+    price && price > 0 ? `₹${price.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : isLoading ? 'Loading…' : 'Unavailable';
 
   const expiries = liveExpiries || [];
-  const spotPrice = liveSpotPrice ?? (selectedUnderlying === 'NIFTY' ? niftyQuote?.lastPrice : bankNiftyQuote?.lastPrice) ?? 0;
+  const spotPrice = liveSpotPrice ?? (selectedUnderlying === 'NIFTY' ? niftySpot : bankNiftySpot) ?? 0;
   const lotSize = liveLotSize;
   const atmStrike = spotPrice > 0 ? Math.round(spotPrice / (selectedUnderlying === 'NIFTY' ? 50 : 100)) * (selectedUnderlying === 'NIFTY' ? 50 : 100) : 0;
 
@@ -235,7 +175,7 @@ export default function MarketsScreen() {
               Markets, Catalog & Option Chain
             </h1>
             <Badge
-              label={isLiveConnected ? `DATA: ${dataSource}` : 'DATA UNAVAILABLE'}
+              label={isLiveConnected ? `DATA: ${dataSource}` : isLoading ? 'CONNECTING…' : 'DATA UNAVAILABLE'}
               variant={isLiveConnected ? 'success' : 'purple'}
               size="sm"
             />
@@ -368,7 +308,7 @@ export default function MarketsScreen() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 2 }}>
             <span style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, fontFamily: typography.fontFamily.mono }}>
-              {niftyQuote ? `₹${niftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'NIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Unavailable')}
+              {formatSpot(niftySpot)}
             </span>
             {niftyQuote && (
               <span style={{ fontSize: typography.fontSize.xs, color: niftyQuote.netChange >= 0 ? colors.profit : colors.loss, fontWeight: typography.fontWeight.bold }}>
@@ -403,7 +343,7 @@ export default function MarketsScreen() {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 2 }}>
             <span style={{ fontSize: typography.fontSize.xl, fontWeight: typography.fontWeight.bold, fontFamily: typography.fontFamily.mono }}>
-              {bankNiftyQuote ? `₹${bankNiftyQuote.lastPrice.toLocaleString('en-IN', { minimumFractionDigits: 2 })}` : (liveSpotPrice && selectedUnderlying === 'BANKNIFTY' ? `₹${liveSpotPrice.toFixed(2)}` : 'Unavailable')}
+              {formatSpot(bankNiftySpot)}
             </span>
             {bankNiftyQuote && (
               <span style={{ fontSize: typography.fontSize.xs, color: bankNiftyQuote.netChange >= 0 ? colors.profit : colors.loss, fontWeight: typography.fontWeight.bold }}>

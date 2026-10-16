@@ -40,6 +40,8 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
   private lastFeedLatencyMs = 0;
   private authorizationToken: string | null = null;
   private lastIndexSnapshotAt = 0;
+  private lastOnDemandIndexRefreshAt = 0;
+  private indexRefreshInFlight: Promise<void> | null = null;
 
   constructor(
     @Inject(EnvService) _envService: EnvService,
@@ -234,6 +236,21 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     if (missing.length) await this.syncRealMarketPrices(missing);
   }
 
+  /**
+   * Called on read paths (watchlist) so every index card has a price on the first response instead of
+   * waiting for the 60s background refresh. Shares one in-flight request and rate-limits REST calls.
+   */
+  public async ensureIndexQuotes(): Promise<void> {
+    const hasEmpty = [...this.subscriptions.keys()].some((key) => key.startsWith('NSE_INDEX|') && !this.quotes.has(key));
+    if (!hasEmpty) return;
+    if (!this.indexRefreshInFlight) {
+      if (Date.now() - this.lastOnDemandIndexRefreshAt < 5_000) return;
+      this.lastOnDemandIndexRefreshAt = Date.now();
+      this.indexRefreshInFlight = this.refreshMissingIndexQuotes().catch(() => undefined).finally(() => { this.indexRefreshInFlight = null; });
+    }
+    await this.indexRefreshInFlight;
+  }
+
   private isFreshLive(quote: QuoteSnapshot | undefined): boolean {
     return quote?.provenance === 'LIVE' && !quote.isStale;
   }
@@ -243,8 +260,8 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     const record = this.tokenStorage?.getToken();
     keys = keys.filter((key) => this.subscriptions.has(key)).slice(0, 500);
     if (!record?.accessToken || !Number.isFinite(Date.parse(record.expiresAt)) || Date.parse(record.expiresAt) <= Date.now() || !keys.length) return;
-    const query = new URLSearchParams({ instrument_key: keys.join(',') });
-    const response = await fetch(`https://api.upstox.com/v2/market-quote/quotes?${query}`, {
+    // encodeURIComponent keeps spaces as %20 ("Nifty 50"); URLSearchParams would send '+'.
+    const response = await fetch(`https://api.upstox.com/v2/market-quote/quotes?instrument_key=${encodeURIComponent(keys.join(','))}`, {
       headers: { Authorization: `Bearer ${record.accessToken}`, Accept: 'application/json' }, signal: AbortSignal.timeout(10000),
     });
     if (!response.ok) throw new Error(`Quote snapshot returned HTTP ${response.status}`);

@@ -1,5 +1,5 @@
 import { Slot, useRouter, usePathname } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ActivityIndicator, Platform, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View, useWindowDimensions,
 } from 'react-native';
@@ -7,6 +7,7 @@ import { colors, RiskBanner } from '@trading-bot/ui';
 import { useWorkstation, WorkstationProvider } from '../src/hooks/useWorkstation';
 import { TradeMode } from '@trading-bot/contracts';
 import { mainNavigation } from '../src/features/daily-bot/config';
+import { prefetchMarketData } from '../src/features/markets/market-cache';
 
 export default function RootLayout() {
   return <WorkstationProvider><WorkstationShell /></WorkstationProvider>;
@@ -20,6 +21,9 @@ function WorkstationShell() {
   const [username, setUsername] = useState('owner');
   const [password, setPassword] = useState('');
   const isDesktop = width >= 900;
+
+  // Warm index quotes and both option chains at sign-in so Markets opens with data on the first visit.
+  useEffect(() => { if (isAuthenticated) void prefetchMarketData(); }, [isAuthenticated]);
 
   if (checkingSession) return <SafeAreaView style={styles.loginRoot}><ActivityIndicator color={colors.cyan} /><Text style={styles.navText}>Checking owner session…</Text></SafeAreaView>;
   if (!isAuthenticated) return <SafeAreaView style={styles.loginRoot}>
