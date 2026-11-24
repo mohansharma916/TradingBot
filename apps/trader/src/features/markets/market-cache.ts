@@ -19,6 +19,7 @@ export interface MarketCache {
   chains: Record<Underlying, ChainSnapshot>;
   feedLatencyMs: number | null;
   isFeedStale: boolean;
+  feedStatus: string | null;
   isLiveConnected: boolean;
   dataSource: string;
   watchlistQuotes: Record<string, any>;
@@ -47,6 +48,7 @@ const hydrate = (): MarketCache => {
     chains: { NIFTY: emptyChain(), BANKNIFTY: emptyChain() },
     feedLatencyMs: null,
     isFeedStale: true,
+    feedStatus: null,
     isLiveConnected: false,
     dataSource: 'UNAVAILABLE',
     watchlistQuotes: {},
@@ -140,7 +142,9 @@ export const fetchMarketData = (underlyings: Underlying[] = UNDERLYINGS): Promis
       updateMarketCache({
         dataSource: diag.provenance || 'UNAVAILABLE',
         feedLatencyMs: diag.lastTickReceivedAt ? diag.feedLatencyMs : null,
-        isFeedStale: diag.provenance !== 'LIVE' || diag.staleCount > 0,
+        // Stale only when no instrument is streaming LIVE; a few illiquid contracts without recent ticks are normal.
+        isFeedStale: diag.provenance !== 'LIVE',
+        feedStatus: diag.status ?? null,
       }, true);
     }),
     ...underlyings.map((underlying) => {

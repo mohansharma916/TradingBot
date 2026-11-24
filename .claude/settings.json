@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh .project-track/log-session.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -40,7 +40,7 @@ export default function MarketsScreen() {
   // Module-level store: survives tab switches and is pre-warmed at sign-in, so the first paint has data.
   const [, rerender] = useReducer((tick: number) => tick + 1, 0);
   useEffect(() => subscribeMarketCache(rerender), []);
-  const { selectedUnderlying, chains, feedLatencyMs, isFeedStale, isLiveConnected, dataSource, watchlistQuotes, connectionError } = marketCache;
+  const { selectedUnderlying, chains, feedLatencyMs, isFeedStale, feedStatus, isLiveConnected, dataSource, watchlistQuotes, connectionError } = marketCache;
   const isLoading = isMarketDataLoading();
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -276,7 +276,11 @@ export default function MarketsScreen() {
           }}
         >
           <span>
-            Market data is stale or unavailable. Live entries require fresh broker quotes and executable depth.
+            {feedStatus === 'DISCONNECTED' || feedStatus === 'AUTH_FAILED'
+              ? `Upstox live feed is ${feedStatus === 'AUTH_FAILED' ? 'rejecting the login' : 'not connected'}. Log in to Upstox from the Health screen to stream live prices; until then prices are delayed snapshots and live entries are blocked.`
+              : feedStatus === 'CONNECTING'
+                ? 'Connecting to the Upstox live feed…'
+                : `Market data is ${dataSource === 'UNAVAILABLE' ? 'unavailable' : `${dataSource.toLowerCase()}, not live`}. Live entries require fresh broker quotes and executable depth.`}
           </span>
         </div>
       )}

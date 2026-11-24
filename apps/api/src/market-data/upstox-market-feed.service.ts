@@ -217,6 +217,8 @@ export class UpstoxMarketFeedService implements OnModuleInit, OnModuleDestroy {
     this.sendSubscriptionMessage(valid, mode);
   }
 
+  public isSubscribed(key: string): boolean { return this.subscriptions.has(key); }
+
   public unsubscribe(keys: string[]): void {
     for (const key of keys) { this.subscriptions.delete(key); this.quotes.delete(key); this.lastEventTimestamps.delete(key); }
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(Buffer.from(JSON.stringify({ guid: `unsub_${Date.now()}`, method: 'unsub', data: { instrumentKeys: keys } })), { binary: true });

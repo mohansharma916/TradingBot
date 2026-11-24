@@ -36,3 +36,6 @@ pnpm-debug.log*
 # Temporary / scratch
 scratch/
 tmp/
+
+# project-track: local activity log
+.project-track/activity.jsonl

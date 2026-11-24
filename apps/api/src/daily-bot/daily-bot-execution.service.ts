@@ -1,7 +1,7 @@
 import { BadRequestException, Inject, Injectable, Optional } from '@nestjs/common';
 import {
   AgentToolName, AllowedOptionType, DailyBotConfig, DailyBotConfigSchema, DailyBotPreflight,
-  DailyBotSession, DailyBotTrade, InstrumentType, OrderSide, OrderType,
+  DailyBotSession, DailyBotTrade, FeedStatus, InstrumentType, OrderSide, OrderType,
   ProductType, ProposalStatus, QuoteSnapshot, StrategyConfig, StrategyStatus, TradeMode, TradeProposal,
 } from '@trading-bot/contracts';
 import { calculateOptionCharges, evaluateStrategySignal, isCalendarVerifiedForDate, NSE_HOLIDAYS_2026, strategyExitLevels, strategyTimeframeMinutes } from '@trading-bot/domain';
@@ -109,7 +109,14 @@ export class DailyBotExecutionService {
     check('market-session', 'Market session', this.isTradingDay(clock) && clock.time >= '09:15' && clock.time < config.lastEntryTime, `Entries require an exchange trading day between 09:15 and ${config.lastEntryTime} IST; current time is ${clock.weekday} ${clock.time}${NSE_HOLIDAYS_2026[clock.date] ? ` (${NSE_HOLIDAYS_2026[clock.date]})` : ''}.`);
     const timeframe = strategyTimeframeMinutes(strategy.timeframe);
     const supportedExits = strategyExitLevels({ strategy, entryPrice: 10000, quantity: 1 });
-    check('strategy', 'Selected strategy', strategy.id === config.strategyId && strategy.market === 'NSE_FO' && [1, 5, 15, 30].includes(timeframe) && !strategy.astConfig?.indicators?.some((indicator) => indicator.timeframe && indicator.timeframe !== strategy.timeframe) && !supportedExits.error && ![StrategyStatus.RETIRED, StrategyStatus.PAUSED, StrategyStatus.DRAFT].includes(strategy.status), supportedExits.error ?? 'Use an active intraday option strategy with aligned supported indicator timeframes and premium exits.');
+    const strategyIssue = strategy.id !== config.strategyId ? 'The saved strategy snapshot does not match the setup. Re-select the strategy and save the setup again.'
+      : strategy.market !== 'NSE_FO' ? `Strategy market ${strategy.market} is not NSE_FO options.`
+      : ![1, 5, 15, 30].includes(timeframe) ? `Timeframe ${strategy.timeframe} is unsupported; use 1m, 5m, 15m or 30m.`
+      : strategy.astConfig?.indicators?.some((indicator) => indicator.timeframe && indicator.timeframe !== strategy.timeframe) ? `Every indicator must use the strategy timeframe ${strategy.timeframe}.`
+      : supportedExits.error ? supportedExits.error
+      : [StrategyStatus.RETIRED, StrategyStatus.PAUSED, StrategyStatus.DRAFT].includes(strategy.status) ? `Strategy "${strategy.name}" is ${strategy.status}. Activate it in Strategies before starting.`
+      : null;
+    check('strategy', 'Selected strategy', !strategyIssue, strategyIssue ?? `"${strategy.name}" v${strategy.version} is active and supported.`);
     check('kill-switch', 'Account risk gate', !this.reservations.isKillSwitchActive(), this.reservations.isKillSwitchActive() ? 'The account kill switch is active. Review account risk before enabling entries.' : 'Account kill switch is clear.');
     const owned = session?.trades.filter((trade) => trade.status !== 'CLOSED') ?? [];
     const positions = (await this.broker.getPositions()).filter((position) => position.netQuantity !== 0);
@@ -125,7 +132,18 @@ export class DailyBotExecutionService {
     await this.tools.hydrateHistory(underlying, strategy.timeframe);
     const quote = this.feed.getQuote(underlying);
     const options = this.catalog.getUnderlyingInstruments(strategy.underlying).filter((instrument) => [InstrumentType.CE, InstrumentType.PE].includes(instrument.instrumentType));
-    check('market-data', 'Fresh market data', this.fresh(quote, false) && options.some((instrument) => this.fresh(this.feed.getQuote(instrument.instrumentKey))), 'Recent observed underlying prices and option depth must be available within 3 seconds. Live mode accepts LIVE provenance only.');
+    await this.ensureOptionStream(options, quote?.lastPrice);
+    const lastSeen = quote ? ` (last: ${quote.provenance}${quote.isStale ? ', stale' : ''})` : '';
+    const underlyingFresh = this.fresh(quote, false);
+    const optionsFresh = options.some((instrument) => this.fresh(this.feed.getQuote(instrument.instrumentKey)));
+    const feedStatus = typeof this.feed.getFeedHealth === 'function' ? this.feed.getFeedHealth().status : undefined;
+    const feedDown = feedStatus === FeedStatus.DISCONNECTED || feedStatus === FeedStatus.AUTH_FAILED || feedStatus === FeedStatus.CONNECTING;
+    check('market-data', 'Fresh market data', underlyingFresh && optionsFresh,
+      underlyingFresh && optionsFresh ? `Live ${strategy.underlying} index and option depth are streaming.`
+      : feedDown ? `Upstox live feed is ${feedStatus}. Connect or re-login to Upstox (Health screen) so prices stream in real time; entries need ticks under 3 seconds old.`
+      : !underlyingFresh ? `No live ${strategy.underlying} index tick in the last 3 seconds${lastSeen}. Entries require LIVE prices during market hours.`
+      : !options.length ? `No ${strategy.underlying} option contracts are in the instrument catalogue.`
+      : `No live ${strategy.underlying} option quote with bid/ask depth in the last 3 seconds. Contracts are subscribed; retry in a moment.`);
     const bars = this.tools.getClosedCandles(underlying, true, strategy.timeframe);
     const warmup = evaluateStrategySignal({ strategy, candles: bars, candleTimestampBasis: 'CLOSE' });
     const lastTime = bars.length ? Date.parse(String(bars[bars.length - 1]!.timestamp)) : NaN;
@@ -596,6 +614,24 @@ export class DailyBotExecutionService {
     const value = (kind: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === kind)?.value ?? '';
     return { date: `${value('year')}-${value('month')}-${value('day')}`, time: `${value('hour')}:${value('minute')}`, weekday: value('weekday') };
   }
+  /**
+   * The feed only streams subscribed keys, and only the Markets screen subscribed option contracts. Keep the
+   * strategy's nearest-expiry, near-the-money contracts streaming so freshness checks and contract selection
+   * see live depth without any screen open. Waits briefly for first ticks after new subscriptions.
+   */
+  private async ensureOptionStream(options: Array<{ instrumentKey: string; expiry?: string | null; strikePrice?: number | null }>, spot: number | undefined): Promise<void> {
+    if (typeof this.feed.isSubscribed !== 'function' || !options.length) return;
+    const nearest = options.map((option) => option.expiry ?? '').filter(Boolean).sort()[0];
+    const candidates = options.filter((option) => option.expiry === nearest && option.strikePrice);
+    if (spot && spot > 0) candidates.sort((a, b) => Math.abs(a.strikePrice! - spot) - Math.abs(b.strikePrice! - spot));
+    const missing = candidates.slice(0, 40).map((option) => option.instrumentKey).filter((key) => !this.feed.isSubscribed(key));
+    if (!missing.length) return;
+    try { this.feed.subscribe(missing); } catch { return; }
+    if (this.feed.getFeedHealth().status !== FeedStatus.CONNECTED && this.feed.getFeedHealth().status !== FeedStatus.STALE) return;
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline && !missing.some((key) => this.fresh(this.feed.getQuote(key)))) await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
   private fresh(quote: QuoteSnapshot | undefined, executable = true): quote is QuoteSnapshot {
     if (!quote) return false;
     const observed = quote.provenance === 'LIVE' || (!this.isLive() && process.env.NODE_ENV === 'test' && quote.provenance === 'SIMULATED');
